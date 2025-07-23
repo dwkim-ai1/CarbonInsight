@@ -1,28 +1,34 @@
-# .github/workflows/krx_working_solution.yml
-name: KRX ETS 수집 (완전 작동 버전)
+# .github/workflows/real_krx_collector.yml
+name: 실시간 KRX ETS 데이터 수집
 
 on:
   schedule:
-    # 평일 거래시간 기준 3회 수집
-    - cron: '30 1 * * 1-5'  # 10:30 KST
-    - cron: '30 3 * * 1-5'  # 12:30 KST  
-    - cron: '0 6 * * 1-5'   # 15:00 KST
+    # 거래시간 중 실시간 수집 (10분마다)
+    - cron: '*/10 1-3 * * 1-5'  # 10:00-12:00 KST (매 10분)
+    # 장 마감 후 최종 수집
+    - cron: '30 3 * * 1-5'      # 12:30 KST
+    # 오후 확인 수집
+    - cron: '0 6 * * 1-5'       # 15:00 KST
     
   workflow_dispatch:
     inputs:
-      force_run:
-        description: '강제 실행 (거래시간 무시)'
+      force_collection:
+        description: '강제 수집 (거래시간 무시)'
+        required: false
+        default: false
+        type: boolean
+      debug_mode:
+        description: '디버그 모드 (상세 로그)'
         required: false
         default: false
         type: boolean
 
-# 권한 설정 - Issues 생성 권한 제거하여 오류 방지
 permissions:
   contents: read
   actions: read
 
 jobs:
-  collect-data:
+  collect-real-time-data:
     runs-on: ubuntu-latest
     
     steps:
@@ -34,89 +40,79 @@ jobs:
       with:
         python-version: '3.9'
         
-    - name: 모든 의존성 강제 설치
+    - name: 의존성 설치
       run: |
-        echo "📦 Python 패키지 설치 중..."
-        
-        # pip 업그레이드
+        echo "📦 필수 패키지 설치..."
         python -m pip install --upgrade pip
         
-        # 필수 패키지 직접 설치
+        # 필수 패키지 설치
         pip install requests==2.31.0
         pip install gspread==5.12.0
         pip install google-auth==2.23.4
         pip install google-auth-oauthlib==1.1.0
-        pip install google-auth-httplib2==0.1.1
         pip install beautifulsoup4==4.12.2
         pip install lxml==4.9.3
         pip install pandas==2.1.3
-        pip install numpy==1.24.3
         
-        echo "✅ 모든 패키지 설치 완료"
+        echo "✅ 패키지 설치 완료"
         
-        # 설치된 패키지 확인
-        echo "📋 설치된 패키지:"
-        pip list | grep -E "(requests|gspread|beautifulsoup4|pandas)"
-        
-    - name: 거래시간 및 시장 상태 확인
-      id: market_status
+    - name: 시장 상태 및 거래시간 확인
+      id: market_check
       run: |
         # 현재 시간 (KST)
         CURRENT_HOUR=$(TZ=Asia/Seoul date +%H)
         CURRENT_MINUTE=$(TZ=Asia/Seoul date +%M)
         CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
-        CURRENT_DAY=$(TZ=Asia/Seoul date +%u)  # 1=월요일, 7=일요일
+        CURRENT_DAY=$(TZ=Asia/Seoul date +%u)
+        CURRENT_DATE=$(TZ=Asia/Seoul date +%Y-%m-%d)
         
         echo "current_time=${CURRENT_TIME}" >> $GITHUB_OUTPUT
         echo "current_hour=${CURRENT_HOUR}" >> $GITHUB_OUTPUT
-        echo "current_day=${CURRENT_DAY}" >> $GITHUB_OUTPUT
+        echo "current_date=${CURRENT_DATE}" >> $GITHUB_OUTPUT
         
-        # 평일 여부 확인
+        # 평일 여부
+        IS_WEEKDAY="false"
         if [ "${CURRENT_DAY}" -le 5 ]; then
           IS_WEEKDAY="true"
-          echo "📅 평일입니다"
-        else
-          IS_WEEKDAY="false"
-          echo "📅 주말입니다"
         fi
         echo "is_weekday=${IS_WEEKDAY}" >> $GITHUB_OUTPUT
         
-        # 거래시간 단계 결정
-        if [ "${IS_WEEKDAY}" = "false" ]; then
-          PHASE="weekend"
-          DESCRIPTION="주말 - 시장 비운영"
-        elif [ "${CURRENT_HOUR}" -lt 9 ]; then
-          PHASE="pre_market"
-          DESCRIPTION="장 시작 전"
-        elif [ "${CURRENT_HOUR}" -eq 9 ]; then
-          PHASE="order_only"
-          DESCRIPTION="호가접수만 가능 (09:00-10:00)"
-        elif [ "${CURRENT_HOUR}" -ge 10 ] && [ "${CURRENT_HOUR}" -lt 12 ]; then
-          PHASE="trading_hours"
-          DESCRIPTION="매매거래 시간 (10:00-12:00)"
-        elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -lt 30 ]; then
-          PHASE="just_closed"
-          DESCRIPTION="장 마감 직후"
-        else
-          PHASE="post_market"
-          DESCRIPTION="장 마감 후"
+        # 거래시간 분석
+        IS_TRADING_HOURS="false"
+        MARKET_PHASE="closed"
+        
+        if [ "${IS_WEEKDAY}" = "true" ]; then
+          if [ "${CURRENT_HOUR}" -ge 10 ] && [ "${CURRENT_HOUR}" -lt 12 ]; then
+            IS_TRADING_HOURS="true"
+            MARKET_PHASE="trading"
+          elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -lt 30 ]; then
+            MARKET_PHASE="just_closed"
+          elif [ "${CURRENT_HOUR}" -eq 9 ]; then
+            MARKET_PHASE="pre_trading"
+          else
+            MARKET_PHASE="post_trading"
+          fi
         fi
         
-        echo "phase=${PHASE}" >> $GITHUB_OUTPUT
-        echo "description=${DESCRIPTION}" >> $GITHUB_OUTPUT
+        echo "is_trading_hours=${IS_TRADING_HOURS}" >> $GITHUB_OUTPUT
+        echo "market_phase=${MARKET_PHASE}" >> $GITHUB_OUTPUT
         
         echo "🕐 현재 시간: ${CURRENT_TIME} KST"
-        echo "📊 시장 상태: ${DESCRIPTION}"
-        echo "📈 KRX 거래시간: 10:00-12:00 (매매), 09:00-12:00 (호가)"
+        echo "📅 날짜: ${CURRENT_DATE}"
+        echo "📊 시장 상태: ${MARKET_PHASE}"
+        echo "💹 거래시간 여부: ${IS_TRADING_HOURS}"
+        echo "📈 KRX 거래시간: 10:00-12:00 (평일)"
         
-    - name: 완전한 데이터 수집 스크립트 생성
+    - name: 실시간 데이터 수집 스크립트 생성
+      env:
+        DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
       run: |
-        echo "📝 데이터 수집 스크립트 생성 중..."
+        echo "📝 실시간 수집 스크립트 생성..."
         
-        cat > krx_collector.py << 'EOF'
+        cat > real_krx_collector.py << 'EOF'
         #!/usr/bin/env python3
         """
-        KRX ETS 완전 작동 데이터 수집기
+        실시간 KRX ETS 데이터 수집기 - 정확한 웹사이트 데이터
         """
         
         import requests
@@ -125,426 +121,586 @@ jobs:
         import os
         import logging
         import sys
-        from datetime import datetime, timedelta
+        from datetime import datetime
         from typing import Dict, List, Optional
         import time
         import re
+        from bs4 import BeautifulSoup
         
-        # 로깅 설정
-        logging.basicConfig(
-            level=logging.INFO, 
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
+        # 디버그 모드 확인
+        DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
+        log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
+        
+        logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
         logger = logging.getLogger(__name__)
         
-        class KRXCollector:
+        class RealTimeKRXCollector:
             def __init__(self):
                 self.session = requests.Session()
                 self.session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
-                    'Connection': 'keep-alive'
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
                 })
                 
-            def get_sample_data(self) -> List[Dict]:
-                """샘플 데이터 생성 (실제 KRX 접근 대신)"""
-                today = datetime.now().strftime('%Y-%m-%d')
-                current_time = datetime.now().strftime('%H:%M:%S')
+                self.base_url = "https://ets.krx.co.kr"
                 
-                # 현실적인 탄소배출권 데이터
-                sample_data = [
-                    {
-                        'date': today,
-                        'symbol': 'KAU22',
-                        'current_price': 7070 + int(datetime.now().minute) * 5,  # 시간에 따라 변동
-                        'change': -80,
-                        'change_rate': -1.12,
-                        'open_price': 6920,
-                        'high_price': 7180,
-                        'low_price': 6920,
-                        'volume': 192829,
-                        'trading_value': 1372159740,
-                        'weighted_avg': 7116
-                    },
-                    {
-                        'date': today,
-                        'symbol': 'KAU23',
-                        'current_price': 7200 + int(datetime.now().minute) * 3,
-                        'change': -50,
-                        'change_rate': -0.69,
-                        'open_price': 7150,
-                        'high_price': 7250,
-                        'low_price': 7150,
-                        'volume': 14810,
-                        'trading_value': 106832000,
-                        'weighted_avg': 7214
-                    },
-                    {
-                        'date': today,
-                        'symbol': 'KAU24',
-                        'current_price': 9500,
-                        'change': 0,
-                        'change_rate': 0.0,
-                        'open_price': 0,
-                        'high_price': 0,
-                        'low_price': 0,
-                        'volume': 0,
-                        'trading_value': 0,
-                        'weighted_avg': 0
-                    },
-                    {
-                        'date': today,
-                        'symbol': 'KCU22',
-                        'current_price': 5850,
-                        'change': -550,
-                        'change_rate': -8.59,
-                        'open_price': 0,
-                        'high_price': 0,
-                        'low_price': 0,
-                        'volume': 0,
-                        'trading_value': 0,
-                        'weighted_avg': 0
-                    },
-                    {
-                        'date': today,
-                        'symbol': 'KOC21-23',
-                        'current_price': 11650,
-                        'change': 0,
-                        'change_rate': 0.0,
-                        'open_price': 0,
-                        'high_price': 0,
-                        'low_price': 0,
-                        'volume': 0,
-                        'trading_value': 0,
-                        'weighted_avg': 0
-                    }
-                ]
-                
-                # 수집 메타데이터 추가
-                for item in sample_data:
-                    item.update({
-                        'collection_time': current_time,
-                        'data_source': 'simulated',
-                        'market_phase': os.getenv('MARKET_PHASE', 'unknown')
-                    })
-                
-                logger.info(f"샘플 데이터 생성: {len(sample_data)}개 종목")
-                return sample_data
-                
-            def try_real_krx_data(self) -> List[Dict]:
-                """실제 KRX 데이터 수집 시도"""
+            def get_current_data(self) -> List[Dict]:
+                """현재 실시간 데이터 수집"""
                 try:
-                    logger.info("실제 KRX 데이터 수집 시도 중...")
+                    logger.info("=== 실시간 KRX ETS 데이터 수집 ===")
                     
-                    # KRX ETS URL
-                    url = "https://ets.krx.co.kr/contents/ETS/03/03010000/ETS03010000.jsp"
+                    # 1단계: 세션 초기화
+                    main_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
+                    logger.info(f"메인 페이지 접속: {main_url}")
                     
-                    response = self.session.get(url, timeout=10)
+                    response = self.session.get(main_url, timeout=30)
+                    response.raise_for_status()
+                    logger.info("메인 페이지 접속 성공")
+                    
+                    if DEBUG_MODE:
+                        logger.debug(f"응답 헤더: {dict(response.headers)}")
+                    
+                    # 2단계: 데이터 요청
+                    data_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000M.jsp"
+                    current_date = datetime.now().strftime('%Y%m%d')
+                    
+                    # 실제 KRX 사이트와 동일한 파라미터
+                    post_data = {
+                        'locale': 'ko_KR',
+                        'searchDate': current_date,
+                        'mktTpCd': '1',
+                        'csvxls_isNo': 'false'
+                    }
+                    
+                    headers = {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Referer': main_url,
+                        'Origin': self.base_url
+                    }
+                    
+                    logger.info(f"데이터 요청 - 날짜: {current_date}")
+                    if DEBUG_MODE:
+                        logger.debug(f"POST 데이터: {post_data}")
+                    
+                    response = self.session.post(
+                        data_url, 
+                        data=post_data, 
+                        headers=headers,
+                        timeout=30
+                    )
                     response.raise_for_status()
                     
-                    logger.info("KRX 사이트 접근 성공")
+                    logger.info(f"데이터 응답 상태: {response.status_code}")
+                    logger.info(f"응답 타입: {response.headers.get('content-type', 'unknown')}")
                     
-                    # 실제 구현시에는 여기에 파싱 로직 추가
-                    # 현재는 접근 테스트만 수행
+                    # 응답 처리
+                    content_type = response.headers.get('content-type', '').lower()
                     
-                    return []  # 실제 데이터 파싱은 추후 구현
+                    if 'json' in content_type:
+                        logger.info("JSON 응답 처리")
+                        try:
+                            json_data = response.json()
+                            if DEBUG_MODE:
+                                logger.debug(f"JSON 구조: {list(json_data.keys())}")
+                            return self._parse_json_data(json_data)
+                        except json.JSONDecodeError:
+                            logger.warning("JSON 파싱 실패, HTML로 처리")
+                            return self._parse_html_data(response.text)
+                    else:
+                        logger.info("HTML 응답 처리")
+                        return self._parse_html_data(response.text)
+                        
+                except Exception as e:
+                    logger.error(f"데이터 수집 실패: {e}")
+                    if DEBUG_MODE:
+                        logger.exception("상세 오류:")
+                    return []
+            
+            def _parse_json_data(self, json_data: Dict) -> List[Dict]:
+                """JSON 데이터 파싱"""
+                try:
+                    result = []
+                    
+                    # JSON 구조 분석
+                    data_key = None
+                    for key in ['result', 'data', 'list', 'items']:
+                        if key in json_data and isinstance(json_data[key], list):
+                            data_key = key
+                            break
+                    
+                    if data_key:
+                        data_list = json_data[data_key]
+                        logger.info(f"JSON 데이터 배열 발견: {len(data_list)}개 항목")
+                        
+                        for item in data_list:
+                            parsed = self._parse_item(item)
+                            if parsed:
+                                result.append(parsed)
+                                
+                    else:
+                        logger.warning("JSON에서 데이터 배열을 찾을 수 없음")
+                        if DEBUG_MODE:
+                            logger.debug(f"JSON 전체 구조: {json_data}")
+                    
+                    logger.info(f"JSON 파싱 완료: {len(result)}개 종목")
+                    return result
                     
                 except Exception as e:
-                    logger.warning(f"실제 KRX 접근 실패: {e}")
+                    logger.error(f"JSON 파싱 오류: {e}")
                     return []
+            
+            def _parse_html_data(self, html_content: str) -> List[Dict]:
+                """HTML 데이터 파싱"""
+                try:
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    result = []
                     
-        class SheetsManager:
+                    # 테이블 찾기
+                    table = soup.find('table') or soup.find('tbody')
+                    
+                    if not table:
+                        logger.warning("HTML에서 테이블을 찾을 수 없음")
+                        if DEBUG_MODE:
+                            logger.debug(f"HTML 길이: {len(html_content)}")
+                            logger.debug(f"HTML 샘플: {html_content[:500]}")
+                        return []
+                    
+                    rows = table.find_all('tr')
+                    logger.info(f"테이블 행 수: {len(rows)}")
+                    
+                    # 헤더 건너뛰고 데이터 행 처리
+                    for i, row in enumerate(rows[1:] if len(rows) > 1 else rows):
+                        try:
+                            cells = row.find_all(['td', 'th'])
+                            if len(cells) >= 3:  # 최소한의 데이터가 있는 행
+                                parsed = self._parse_row(cells)
+                                if parsed:
+                                    result.append(parsed)
+                                    if DEBUG_MODE:
+                                        logger.debug(f"행 {i+1} 파싱: {parsed['symbol']}")
+                        except Exception as e:
+                            logger.warning(f"행 {i+1} 파싱 실패: {e}")
+                    
+                    logger.info(f"HTML 파싱 완료: {len(result)}개 종목")
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"HTML 파싱 오류: {e}")
+                    return []
+            
+            def _parse_item(self, item: Dict) -> Optional[Dict]:
+                """개별 아이템 파싱 (JSON)"""
+                try:
+                    # 다양한 필드명 매핑
+                    symbol = item.get('itemCd') or item.get('symbol') or item.get('code')
+                    name = item.get('itemNm') or item.get('name')
+                    
+                    if not symbol and not name:
+                        return None
+                    
+                    return {
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        'symbol': str(symbol or name).strip(),
+                        'current_price': self._safe_float(item.get('currentPrice', 0)),
+                        'change': self._safe_float(item.get('change', 0)),
+                        'change_rate': self._safe_float(item.get('changeRate', 0)),
+                        'open_price': self._safe_float(item.get('openPrice', 0)),
+                        'high_price': self._safe_float(item.get('highPrice', 0)),
+                        'low_price': self._safe_float(item.get('lowPrice', 0)),
+                        'volume': self._safe_float(item.get('volume', 0)),
+                        'trading_value': self._safe_float(item.get('tradingValue', 0)),
+                        'weighted_avg': self._safe_float(item.get('weightedAvg', 0)),
+                        'collection_time': datetime.now().strftime('%H:%M:%S'),
+                        'data_source': 'krx_realtime'
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"아이템 파싱 실패: {e}")
+                    return None
+            
+            def _parse_row(self, cells: List) -> Optional[Dict]:
+                """테이블 행 파싱 (HTML)"""
+                try:
+                    cell_texts = [cell.get_text(strip=True) for cell in cells]
+                    
+                    if len(cell_texts) < 3 or not cell_texts[0]:
+                        return None
+                    
+                    symbol = cell_texts[0]
+                    if symbol == '-' or not symbol:
+                        return None
+                    
+                    return {
+                        'date': datetime.now().strftime('%Y-%m-%d'),
+                        'symbol': symbol,
+                        'current_price': self._extract_number(cell_texts[1] if len(cell_texts) > 1 else '0'),
+                        'change': self._extract_number(cell_texts[2] if len(cell_texts) > 2 else '0'),
+                        'change_rate': self._extract_number(cell_texts[3] if len(cell_texts) > 3 else '0'),
+                        'open_price': self._extract_number(cell_texts[4] if len(cell_texts) > 4 else '0'),
+                        'high_price': self._extract_number(cell_texts[5] if len(cell_texts) > 5 else '0'),
+                        'low_price': self._extract_number(cell_texts[6] if len(cell_texts) > 6 else '0'),
+                        'volume': self._extract_number(cell_texts[7] if len(cell_texts) > 7 else '0'),
+                        'trading_value': self._extract_number(cell_texts[8] if len(cell_texts) > 8 else '0'),
+                        'weighted_avg': self._extract_number(cell_texts[9] if len(cell_texts) > 9 else '0'),
+                        'collection_time': datetime.now().strftime('%H:%M:%S'),
+                        'data_source': 'krx_realtime_html'
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"행 파싱 실패: {e}")
+                    return None
+            
+            def _safe_float(self, value) -> float:
+                """안전한 float 변환"""
+                try:
+                    if value is None:
+                        return 0.0
+                    if isinstance(value, (int, float)):
+                        return float(value)
+                    if isinstance(value, str):
+                        cleaned = re.sub(r'[^\d.-]', '', value.replace(',', ''))
+                        return float(cleaned) if cleaned else 0.0
+                    return 0.0
+                except:
+                    return 0.0
+            
+            def _extract_number(self, text: str) -> float:
+                """텍스트에서 숫자 추출"""
+                try:
+                    if not text or text in ['-', '']:
+                        return 0.0
+                    cleaned = re.sub(r'[^\d.-]', '', text.replace(',', ''))
+                    return float(cleaned) if cleaned else 0.0
+                except:
+                    return 0.0
+        
+        class GoogleSheetsUpdater:
             def __init__(self, credentials_json: str, sheet_id: str):
                 try:
-                    logger.info("Google Sheets 연결 시작...")
-                    
                     creds_dict = json.loads(credentials_json)
                     self.gc = gspread.service_account_from_dict(creds_dict)
                     self.sheet_id = sheet_id
                     
-                    # 스프레드시트 열기
                     self.spreadsheet = self.gc.open_by_key(sheet_id)
-                    logger.info(f"스프레드시트 연결 성공: {self.spreadsheet.title}")
+                    logger.info(f"스프레드시트 연결: {self.spreadsheet.title}")
                     
-                    # 워크시트 설정
-                    self.setup_worksheet()
+                    self._setup_worksheet()
                     
                 except Exception as e:
                     logger.error(f"Google Sheets 연결 실패: {e}")
                     raise
-                    
-            def setup_worksheet(self):
-                """워크시트 설정"""
+            
+            def _setup_worksheet(self):
                 try:
-                    # 'ets.KRX' 워크시트 확인/생성
                     try:
                         self.worksheet = self.spreadsheet.worksheet('ets.KRX')
-                        logger.info("기존 ets.KRX 워크시트 사용")
+                        logger.info("기존 워크시트 사용")
                     except gspread.WorksheetNotFound:
-                        logger.info("ets.KRX 워크시트 생성 중...")
                         self.worksheet = self.spreadsheet.add_worksheet(
-                            title='ets.KRX', 
-                            rows=1000, 
-                            cols=12
+                            title='ets.KRX', rows=1000, cols=13
                         )
                         
-                        # 헤더 설정
                         headers = [
-                            '날짜', '종목명', '현재가', '대비', '등락률', 
-                            '시가', '고가', '저가', '거래량', '거래대금', 
-                            '가중평균', '수집시간'
+                            '날짜', '종목명', '현재가', '대비', '등락률',
+                            '시가', '고가', '저가', '거래량', '거래대금',
+                            '가중평균', '수집시간', '데이터소스'
                         ]
-                        self.worksheet.update('A1:L1', [headers])
+                        self.worksheet.update('A1:M1', [headers])
                         
                         # 헤더 서식
-                        self.worksheet.format('A1:L1', {
-                            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+                        self.worksheet.format('A1:M1', {
+                            'backgroundColor': {'red': 0.1, 'green': 0.5, 'blue': 0.8},
                             'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
                             'horizontalAlignment': 'CENTER'
                         })
                         
-                        logger.info("헤더 설정 완료")
+                        logger.info("새 워크시트 생성 완료")
                         
                 except Exception as e:
                     logger.error(f"워크시트 설정 실패: {e}")
                     raise
-                    
-            def update_data(self, data: List[Dict], phase: str):
-                """데이터 업데이트"""
+            
+            def update_realtime_data(self, data: List[Dict]) -> bool:
                 try:
                     if not data:
-                        logger.warning("업데이트할 데이터가 없습니다")
+                        logger.warning("업데이트할 데이터 없음")
                         return False
-                        
-                    logger.info(f"데이터 업데이트 시작: {len(data)}개 항목, 단계: {phase}")
                     
                     current_date = data[0]['date']
+                    logger.info(f"실시간 데이터 업데이트: {current_date}, {len(data)}개 종목")
                     
-                    # 오늘 날짜의 기존 데이터 확인
+                    # 기존 오늘 데이터 삭제
                     all_values = self.worksheet.get_all_values()
-                    today_rows = []
+                    rows_to_delete = []
                     
-                    for i, row in enumerate(all_values[1:], start=2):  # 헤더 제외
+                    for i, row in enumerate(all_values[1:], start=2):
                         if len(row) > 0 and row[0] == current_date:
-                            today_rows.append(i)
+                            rows_to_delete.append(i)
                     
-                    # 기존 오늘 데이터 삭제 (최신 데이터로 교체)
-                    if today_rows:
-                        logger.info(f"기존 {len(today_rows)}개 행 삭제")
-                        for row_num in reversed(today_rows):
+                    if rows_to_delete:
+                        logger.info(f"기존 {len(rows_to_delete)}개 행 삭제")
+                        for row_num in reversed(rows_to_delete):
                             self.worksheet.delete_rows(row_num)
                     
                     # 새 데이터 추가
                     new_rows = []
                     for item in data:
                         row = [
-                            item['date'],
-                            item['symbol'],
-                            item['current_price'],
-                            item['change'],
-                            item['change_rate'],
-                            item['open_price'],
-                            item['high_price'],
-                            item['low_price'],
-                            item['volume'],
-                            item['trading_value'],
-                            item['weighted_avg'],
-                            item.get('collection_time', '')
+                            item['date'], item['symbol'], item['current_price'],
+                            item['change'], item['change_rate'], item['open_price'],
+                            item['high_price'], item['low_price'], item['volume'],
+                            item['trading_value'], item['weighted_avg'],
+                            item['collection_time'], item['data_source']
                         ]
                         new_rows.append(row)
                     
-                    # 데이터 일괄 추가
-                    self.worksheet.append_rows(new_rows)
-                    logger.info(f"{len(new_rows)}개 행 추가 완료")
+                    if new_rows:
+                        self.worksheet.append_rows(new_rows)
+                        logger.info(f"{len(new_rows)}개 행 추가")
+                        
+                        # 형식 적용
+                        self._apply_formatting()
+                        
+                        return True
                     
-                    # 숫자 형식 적용
-                    self.apply_formatting()
-                    
-                    return True
+                    return False
                     
                 except Exception as e:
                     logger.error(f"데이터 업데이트 실패: {e}")
                     return False
-                    
-            def apply_formatting(self):
-                """숫자 형식 적용"""
+            
+            def _apply_formatting(self):
                 try:
                     last_row = len(self.worksheet.get_all_values())
+                    if last_row <= 1:
+                        return
                     
-                    if last_row > 1:
-                        # 가격 관련 컬럼 (천 단위 구분)
-                        price_format = {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}
-                        for col in ['C', 'D', 'F', 'G', 'H', 'K']:
-                            self.worksheet.format(f'{col}2:{col}{last_row}', price_format)
-                        
-                        # 등락률 (%)
-                        self.worksheet.format(f'E2:E{last_row}', {
-                            'numberFormat': {'type': 'NUMBER', 'pattern': '0.00%'}
-                        })
-                        
-                        # 거래량, 거래대금
-                        for col in ['I', 'J']:
-                            self.worksheet.format(f'{col}2:{col}{last_row}', price_format)
-                            
-                        logger.info("숫자 형식 적용 완료")
-                        
+                    # 숫자 형식
+                    number_format = {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}
+                    for col in ['C', 'D', 'F', 'G', 'H', 'I', 'J', 'K']:
+                        self.worksheet.format(f'{col}2:{col}{last_row}', number_format)
+                    
+                    # 등락률 형식
+                    self.worksheet.format(f'E2:E{last_row}', {
+                        'numberFormat': {'type': 'NUMBER', 'pattern': '0.00%'}
+                    })
+                    
+                    logger.info("형식 적용 완료")
+                    
                 except Exception as e:
-                    logger.warning(f"형식 적용 중 오류: {e}")
-                    
+                    logger.warning(f"형식 적용 오류: {e}")
+        
         def main():
-            """메인 실행 함수"""
             try:
-                logger.info("=== KRX ETS 데이터 수집 시작 ===")
+                logger.info("=== 실시간 KRX ETS 데이터 수집 시작 ===")
                 
                 # 환경변수 확인
                 creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
                 sheet_id = os.getenv('KAU_SHEET_ID')
-                phase = os.getenv('MARKET_PHASE', 'unknown')
+                market_phase = os.getenv('MARKET_PHASE', 'unknown')
                 
-                if not creds_json:
-                    raise ValueError("GOOGLE_SHEETS_CREDS 환경변수 없음")
-                if not sheet_id:
-                    raise ValueError("KAU_SHEET_ID 환경변수 없음")
+                if not creds_json or not sheet_id:
+                    raise ValueError("필수 환경변수 누락")
                 
-                logger.info(f"시장 단계: {phase}")
+                logger.info(f"시장 단계: {market_phase}")
                 
-                # 수집기 초기화
-                collector = KRXCollector()
-                
-                # 데이터 수집 시도
-                data = collector.try_real_krx_data()
-                
-                if not data:
-                    logger.info("실제 데이터 수집 실패, 샘플 데이터 사용")
-                    data = collector.get_sample_data()
+                # 실시간 데이터 수집
+                collector = RealTimeKRXCollector()
+                data = collector.get_current_data()
                 
                 if data:
-                    # Google Sheets 매니저 초기화
-                    sheets_manager = SheetsManager(creds_json, sheet_id)
-                    
-                    # 데이터 업데이트
-                    success = sheets_manager.update_data(data, phase)
+                    # Google Sheets 업데이트
+                    updater = GoogleSheetsUpdater(creds_json, sheet_id)
+                    success = updater.update_realtime_data(data)
                     
                     if success:
-                        logger.info("✅ 데이터 수집 및 업데이트 성공!")
-                        
                         # 결과 출력
                         total_volume = sum(item['volume'] for item in data)
-                        active_items = len([item for item in data if item['volume'] > 0])
+                        active_count = len([item for item in data if item['volume'] > 0])
                         
-                        print(f"✅ 성공: {len(data)}개 종목 수집")
-                        print(f"📊 총 거래량: {total_volume:,} 톤")
-                        print(f"🔥 활성 종목: {active_items}개")
-                        print(f"🕐 수집 시간: {datetime.now().strftime('%H:%M:%S')} KST")
+                        print(f"✅ 실시간 수집 성공!")
+                        print(f"📊 총 종목: {len(data)}개")
+                        print(f"🔥 활성 종목: {active_count}개")
+                        print(f"📈 총 거래량: {total_volume:,} 톤")
+                        print(f"🕐 수집시간: {datetime.now().strftime('%H:%M:%S')} KST")
                         
+                        # 주요 종목 표시
+                        active_data = [d for d in data if d['volume'] > 0]
+                        if active_data:
+                            print("\n📋 활성 거래 종목:")
+                            for item in active_data[:3]:
+                                print(f"  • {item['symbol']}: {item['current_price']:,}원 "
+                                      f"({item['change']:+.0f}) 거래량: {item['volume']:,}톤")
+                        
+                        logger.info("✅ 실시간 데이터 업데이트 완료")
                     else:
-                        logger.error("❌ 데이터 업데이트 실패")
+                        logger.error("❌ 업데이트 실패")
                         sys.exit(1)
-                        
                 else:
-                    logger.error("❌ 수집할 데이터가 없습니다")
+                    logger.error("❌ 데이터 수집 실패")
                     sys.exit(1)
                     
             except Exception as e:
-                logger.error(f"❌ 실행 중 오류: {e}")
-                print(f"❌ 오류: {e}")
+                logger.error(f"❌ 실행 오류: {e}")
+                if DEBUG_MODE:
+                    logger.exception("상세 오류:")
                 sys.exit(1)
-                
+        
         if __name__ == "__main__":
             main()
         EOF
         
-        echo "✅ 스크립트 생성 완료"
-        echo "📋 생성된 파일: krx_collector.py"
+        echo "✅ 실시간 수집 스크립트 생성 완료"
         
     - name: 환경변수 검증
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        MARKET_PHASE: ${{ steps.market_status.outputs.phase }}
       run: |
-        echo "🔍 환경변수 검증 중..."
+        echo "🔍 환경변수 검증..."
         
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
-          echo "❌ GOOGLE_SHEETS_CREDS가 설정되지 않았습니다"
+          echo "❌ GOOGLE_SHEETS_CREDS 누락"
           exit 1
         else
-          echo "✅ GOOGLE_SHEETS_CREDS 설정됨 (길이: ${#GOOGLE_SHEETS_CREDS})"
+          echo "✅ GOOGLE_SHEETS_CREDS 확인 (${#GOOGLE_SHEETS_CREDS} chars)"
         fi
         
         if [ -z "$KAU_SHEET_ID" ]; then
-          echo "❌ KAU_SHEET_ID가 설정되지 않았습니다"
+          echo "❌ KAU_SHEET_ID 누락"
           exit 1
         else
-          echo "✅ KAU_SHEET_ID 설정됨: $KAU_SHEET_ID"
+          echo "✅ KAU_SHEET_ID: $KAU_SHEET_ID"
         fi
         
-        echo "✅ 모든 환경변수 확인 완료"
-        
-    - name: 데이터 수집 실행
+    - name: 실시간 데이터 수집 실행
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        MARKET_PHASE: ${{ steps.market_status.outputs.phase }}
+        MARKET_PHASE: ${{ steps.market_check.outputs.market_phase }}
+        DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
       run: |
-        echo "🚀 데이터 수집 실행..."
-        echo "📊 시장 단계: ${{ steps.market_status.outputs.description }}"
-        echo "⏰ 현재 시간: ${{ steps.market_status.outputs.current_time }} KST"
+        echo "🚀 실시간 KRX 데이터 수집 시작..."
+        echo "📊 시장 단계: ${{ steps.market_check.outputs.market_phase }}"
+        echo "⏰ 현재 시간: ${{ steps.market_check.outputs.current_time }} KST"
+        echo "💹 거래시간: ${{ steps.market_check.outputs.is_trading_hours }}"
         
         # 주말 체크
-        if [ "${{ steps.market_status.outputs.is_weekday }}" = "false" ]; then
-          echo "📅 주말이므로 수집을 건너뜁니다"
-          echo "다음 수집: 월요일 10:30 KST"
+        if [ "${{ steps.market_check.outputs.is_weekday }}" = "false" ]; then
+          echo "📅 주말이므로 수집 건너뜀"
           exit 0
         fi
         
-        # 강제 실행이 아닌 경우 거래시간 체크
-        if [ "${{ github.event.inputs.force_run }}" != "true" ]; then
-          case "${{ steps.market_status.outputs.phase }}" in
-            "pre_market")
-              echo "⏰ 장 시작 전입니다. 다음 수집: 10:30 KST"
+        # 강제 수집이 아닌 경우 거래시간 확인
+        if [ "${{ github.event.inputs.force_collection }}" != "true" ]; then
+          case "${{ steps.market_check.outputs.market_phase }}" in
+            "closed")
+              echo "🔒 시장 마감 - 수집 건너뜀"
+              exit 0
               ;;
-            "order_only")
-              echo "📝 호가접수 시간입니다. 거래는 10:00부터 시작됩니다."
+            "trading"|"just_closed"|"post_trading")
+              echo "📈 수집 진행..."
               ;;
-            "trading_hours"|"just_closed"|"post_market")
-              echo "💹 수집 진행..."
+            *)
+              echo "⏰ 거래시간 외 - 제한적 수집"
               ;;
           esac
+        else
+          echo "🔧 강제 수집 모드"
         fi
         
-        # Python 스크립트 실행
-        python krx_collector.py
+        # 실시간 수집 실행
+        python real_krx_collector.py
         
-    - name: 실행 결과 요약 (오류 없는 버전)
+    - name: 수집 결과 분석 및 요약
+      if: always()
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+      run: |
+        echo "📊 수집 결과 분석 중..."
+        
+        python -c "
+        import gspread
+        import json
+        import os
+        from datetime import datetime
+        
+        try:
+            creds = json.loads(os.environ['GOOGLE_SHEETS_CREDS'])
+            gc = gspread.service_account_from_dict(creds)
+            sheet = gc.open_by_key(os.environ['KAU_SHEET_ID']).worksheet('ets.KRX')
+            
+            # 오늘 데이터 확인
+            today = datetime.now().strftime('%Y-%m-%d')
+            all_data = sheet.get_all_records()
+            today_data = [r for r in all_data if r.get('날짜') == today]
+            
+            if today_data:
+                print(f'📈 오늘({today}) 수집 결과:')
+                print(f'  • 총 종목: {len(today_data)}개')
+                
+                # 활성 거래 분석
+                active = [r for r in today_data if int(str(r.get('거래량', 0)).replace(',', '') or 0) > 0]
+                print(f'  • 활성 거래: {len(active)}개')
+                
+                if active:
+                    total_vol = sum(int(str(r.get('거래량', 0)).replace(',', '') or 0) for r in active)
+                    avg_price = sum(float(str(r.get('현재가', 0)).replace(',', '') or 0) for r in active) / len(active)
+                    print(f'  • 총 거래량: {total_vol:,} 톤')
+                    print(f'  • 평균 가격: {avg_price:,.0f} 원')
+                    
+                    # 상위 거래량 종목
+                    sorted_active = sorted(active, key=lambda x: int(str(x.get('거래량', 0)).replace(',', '') or 0), reverse=True)
+                    print(f'  • 최대 거래량: {sorted_active[0].get(\"종목명\")} ({int(str(sorted_active[0].get(\"거래량\", 0)).replace(\",\", \") or 0):,}톤)')
+                
+                latest_time = today_data[-1].get('수집시간', 'Unknown')
+                print(f'  • 최종 수집: {latest_time}')
+                
+            else:
+                print(f'⚠️ 오늘({today}) 데이터 없음')
+                
+        except Exception as e:
+            print(f'❌ 분석 실패: {e}')
+        "
+        
+    - name: 실행 결과 요약
       if: always()
       run: |
-        echo "## 📊 KRX ETS 수집 결과" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 실시간 KRX ETS 수집 결과" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**실행 시간**: ${{ steps.market_status.outputs.current_time }} KST" >> $GITHUB_STEP_SUMMARY
-        echo "**시장 상태**: ${{ steps.market_status.outputs.description }}" >> $GITHUB_STEP_SUMMARY
-        echo "**평일 여부**: ${{ steps.market_status.outputs.is_weekday }}" >> $GITHUB_STEP_SUMMARY
+        echo "**실행 시간**: ${{ steps.market_check.outputs.current_time }} KST" >> $GITHUB_STEP_SUMMARY
+        echo "**날짜**: ${{ steps.market_check.outputs.current_date }}" >> $GITHUB_STEP_SUMMARY
+        echo "**시장 상태**: ${{ steps.market_check.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
+        echo "**거래시간**: ${{ steps.market_check.outputs.is_trading_hours }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         if [ $? -eq 0 ]; then
           echo "**결과**: ✅ 성공" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📈 KRX 거래시간" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 거래시간 정보" >> $GITHUB_STEP_SUMMARY
           echo "- **매매거래**: 10:00-12:00 KST" >> $GITHUB_STEP_SUMMARY
           echo "- **호가접수**: 09:00-12:00 KST" >> $GITHUB_STEP_SUMMARY
+          echo "- **수집 주기**: 거래시간 중 10분마다" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📅 다음 수집 일정" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 다음 수집" >> $GITHUB_STEP_SUMMARY
           
-          case "${{ steps.market_status.outputs.phase }}" in
-            "trading_hours")
-              echo "- **다음**: 12:30 KST (장 마감 후)" >> $GITHUB_STEP_SUMMARY
+          case "${{ steps.market_check.outputs.market_phase }}" in
+            "trading")
+              echo "- **10분 후**: 실시간 업데이트" >> $GITHUB_STEP_SUMMARY
+              echo "- **12:30**: 장 마감 후 최종 수집" >> $GITHUB_STEP_SUMMARY
               ;;
-            "just_closed"|"post_market")
-              echo "- **다음**: 15:00 KST (일일 정리)" >> $GITHUB_STEP_SUMMARY
+            "just_closed")
+              echo "- **15:00**: 오후 확인 수집" >> $GITHUB_STEP_SUMMARY
               ;;
             *)
-              echo "- **다음**: 10:30 KST (장 시작 후)" >> $GITHUB_STEP_SUMMARY
+              echo "- **내일 10:00**: 다음 거래시간" >> $GITHUB_STEP_SUMMARY
               ;;
           esac
           
@@ -552,27 +708,14 @@ jobs:
           echo "**결과**: ❌ 실패" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🔧 확인 필요" >> $GITHUB_STEP_SUMMARY
-          echo "- GitHub Secrets 설정" >> $GITHUB_STEP_SUMMARY
-          echo "- Google Sheets 권한" >> $GITHUB_STEP_SUMMARY
-          echo "- Python 패키지 설치" >> $GITHUB_STEP_SUMMARY
+          echo "- KRX 웹사이트 접근 상태" >> $GITHUB_STEP_SUMMARY
+          echo "- 네트워크 연결 상태" >> $GITHUB_STEP_SUMMARY
+          echo "- Google Sheets API 할당량" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # 성공/실패 상관없이 결과 표시
+        # 알림 메시지
         if [ $? -eq 0 ]; then
-          echo "::notice::✅ KRX ETS 데이터 수집 성공!"
+          echo "::notice::✅ 실시간 KRX 데이터 수집 성공!"
         else
-          echo "::warning::❌ KRX ETS 데이터 수집 실패 - 로그를 확인해주세요"
+          echo "::warning::❌ 실시간 KRX 데이터 수집 실패"
         fi
-
----
-
-# requirements.txt (저장소 루트에 추가)
-requests==2.31.0
-gspread==5.12.0
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
-beautifulsoup4==4.12.2
-lxml==4.9.3
-pandas==2.1.3
-numpy==1.24.3
