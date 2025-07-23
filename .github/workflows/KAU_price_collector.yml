@@ -120,10 +120,10 @@ jobs:
         # 데이터 수집 실행
         if [ -n "$TARGET_DATE" ]; then
           echo "📅 지정된 날짜 수집: $TARGET_DATE"
-          python krx_ets_updater.py --date $TARGET_DATE --phase $COLLECTION_PHASE
+          python KAU_price_collector.py --date $TARGET_DATE --phase $COLLECTION_PHASE
         else
           echo "📅 오늘 날짜 수집"
-          python krx_ets_updater.py --phase $COLLECTION_PHASE
+          python KAU_price_collector.py --phase $COLLECTION_PHASE
         fi
         
     - name: 거래량 분석 및 알림
