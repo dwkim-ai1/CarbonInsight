@@ -1,367 +1,410 @@
 #!/usr/bin/env python3
 """
-KRX ETS 거래시간 인식 데이터 수집기
-실제 거래시간에 맞춘 스마트 수집 로직
+실제 KRX ETS 실시간 데이터 수집기
+웹사이트에서 정확한 현재 데이터를 가져옵니다
 """
 
 import requests
 import gspread
 import json
 import os
-import time
 import logging
-import argparse
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
-from bs4 import BeautifulSoup
+import time
 import re
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class TradingHoursAwareCollector:
+class RealKRXCollector:
     def __init__(self):
-        """거래시간 인식 수집기"""
+        """실제 KRX 데이터 수집기 초기화"""
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
-            'Connection': 'keep-alive'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         })
         
-        # KRX 거래시간 정보
-        self.trading_hours = {
-            'order_start': 9,      # 09:00 - 호가접수 시작
-            'market_open': 10,     # 10:00 - 매매거래 시작  
-            'market_close': 12,    # 12:00 - 매매거래 종료
-            'order_end': 12        # 12:00 - 호가접수 종료
-        }
-        
         self.base_url = "https://ets.krx.co.kr"
-    
-    def get_current_market_phase(self) -> Dict[str, str]:
-        """현재 시장 단계 확인"""
-        now = datetime.now()
-        current_hour = now.hour
-        current_minute = now.minute
         
-        # 평일 여부 확인 (0=월요일, 6=일요일)
-        is_weekday = now.weekday() < 5
-        
-        if not is_weekday:
-            return {
-                'phase': 'weekend',
-                'description': '주말 - 시장 비운영',
-                'next_action': '다음 거래일까지 대기',
-                'is_trading_time': False
-            }
-        
-        # 거래시간 단계 구분
-        if current_hour < self.trading_hours['order_start']:
-            phase = 'pre_market'
-            description = '장 시작 전'
-            next_action = f"{self.trading_hours['order_start']:02d}:00 호가접수 시작 대기"
-            is_trading = False
-            
-        elif current_hour == self.trading_hours['order_start'] and current_minute < 60:
-            phase = 'order_only'
-            description = '호가접수만 가능'
-            next_action = f"{self.trading_hours['market_open']:02d}:00 매매거래 시작 대기"
-            is_trading = False
-            
-        elif (current_hour >= self.trading_hours['market_open'] and 
-              current_hour < self.trading_hours['market_close']):
-            phase = 'trading_hours'
-            description = '매매거래 시간'
-            next_action = f"{self.trading_hours['market_close']:02d}:00 장 마감까지"
-            is_trading = True
-            
-        elif current_hour == self.trading_hours['market_close'] and current_minute < 30:
-            phase = 'just_closed'
-            description = '장 마감 직후'
-            next_action = '최종 데이터 수집 완료 후 대기'
-            is_trading = False
-            
-        else:
-            phase = 'post_market'
-            description = '장 마감 후'
-            next_action = '내일 거래시간까지 대기'
-            is_trading = False
-        
-        return {
-            'phase': phase,
-            'description': description,
-            'next_action': next_action,
-            'is_trading_time': is_trading,
-            'current_time': now.strftime('%H:%M:%S'),
-            'is_weekday': is_weekday
-        }
-    
-    def should_collect_data(self, phase_info: Dict) -> bool:
-        """데이터 수집 필요성 판단"""
-        phase = phase_info['phase']
-        
-        # 수집이 필요한 단계들
-        collect_phases = [
-            'trading_hours',     # 거래시간 중 - 실시간 수집
-            'just_closed',       # 장 마감 직후 - 최종 수집
-            'post_market'        # 장 마감 후 - 확인 수집
-        ]
-        
-        should_collect = phase in collect_phases
-        
-        logger.info(f"시장 단계: {phase_info['description']}")
-        logger.info(f"수집 필요: {'예' if should_collect else '아니오'}")
-        
-        return should_collect
-    
-    def get_ets_data_with_context(self, date_str: str = None, phase: str = None) -> List[Dict]:
-        """거래시간 컨텍스트를 포함한 데이터 수집"""
+    def get_real_krx_data(self) -> List[Dict]:
+        """실제 KRX ETS 데이터 수집"""
         try:
-            if date_str is None:
-                date_str = datetime.now().strftime('%Y%m%d')
+            logger.info("=== 실제 KRX ETS 데이터 수집 시작 ===")
             
-            phase_info = self.get_current_market_phase()
-            current_phase = phase or phase_info['phase']
-            
-            logger.info(f"=== KRX ETS 데이터 수집 시작 ===")
-            logger.info(f"날짜: {date_str}")
-            logger.info(f"시장 단계: {phase_info['description']}")
-            logger.info(f"거래시간 여부: {phase_info['is_trading_time']}")
-            
-            # 거래시간이 아닌 경우 경고
-            if not self.should_collect_data(phase_info) and current_phase not in ['pre_market', 'manual']:
-                logger.warning(f"현재 시간({phase_info['current_time']})은 최적 수집시간이 아닙니다")
-                logger.info(f"권장 수집시간: 10:30, 12:30, 15:00")
-            
-            # 실제 데이터 수집
-            data = self._fetch_krx_data(date_str)
-            
-            # 데이터에 수집 컨텍스트 추가
-            for item in data:
-                item.update({
-                    'collection_phase': current_phase,
-                    'collection_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'is_trading_time': phase_info['is_trading_time'],
-                    'market_status': phase_info['description']
-                })
-            
-            logger.info(f"수집 완료: {len(data)}개 종목")
-            
-            return data
-            
-        except Exception as e:
-            logger.error(f"데이터 수집 실패: {e}")
-            return []
-    
-    def _fetch_krx_data(self, date_str: str) -> List[Dict]:
-        """실제 KRX 데이터 가져오기"""
-        try:
-            # 메인 페이지 접속
+            # 1단계: 메인 페이지 접속하여 세션 설정
             main_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
+            logger.info(f"메인 페이지 접속: {main_url}")
+            
             response = self.session.get(main_url, timeout=30)
             response.raise_for_status()
+            logger.info("메인 페이지 접속 성공")
             
-            # 데이터 요청
+            # 2단계: 실제 데이터 요청 (POST 방식)
             data_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000M.jsp"
             
+            # 현재 날짜
+            current_date = datetime.now().strftime('%Y%m%d')
+            
+            # POST 데이터 설정 (실제 KRX 사이트에서 사용하는 파라미터)
             post_data = {
                 'locale': 'ko_KR',
-                'searchDate': date_str,
-                'mktTpCd': '1',
+                'searchDate': current_date,
+                'mktTpCd': '1',  # 1: 일반시장
                 'csvxls_isNo': 'false'
             }
             
-            response = self.session.post(data_url, data=post_data, timeout=30)
+            # 요청 헤더 업데이트 (POST용)
+            post_headers = {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': main_url,
+                'Origin': self.base_url
+            }
+            
+            logger.info(f"데이터 요청: {data_url}")
+            logger.info(f"요청 데이터: {post_data}")
+            
+            response = self.session.post(
+                data_url, 
+                data=post_data, 
+                headers=post_headers,
+                timeout=30
+            )
             response.raise_for_status()
             
-            # 응답 파싱
-            if 'json' in response.headers.get('content-type', ''):
-                return self._parse_json_response(response.json(), date_str)
+            logger.info(f"응답 상태: {response.status_code}")
+            logger.info(f"응답 Content-Type: {response.headers.get('content-type', 'Unknown')}")
+            
+            # 3단계: 응답 데이터 파싱
+            content_type = response.headers.get('content-type', '').lower()
+            
+            if 'json' in content_type:
+                # JSON 응답 처리
+                logger.info("JSON 응답 감지 - JSON 파싱 진행")
+                try:
+                    json_data = response.json()
+                    return self._parse_json_response(json_data)
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON 파싱 실패: {e}")
+                    return self._parse_html_response(response.text)
             else:
-                return self._parse_html_response(response.text, date_str)
+                # HTML 응답 처리
+                logger.info("HTML 응답 감지 - HTML 파싱 진행")
+                return self._parse_html_response(response.text)
                 
+        except requests.RequestException as e:
+            logger.error(f"네트워크 요청 실패: {e}")
+            return []
         except Exception as e:
-            logger.error(f"KRX 데이터 가져오기 실패: {e}")
+            logger.error(f"데이터 수집 중 예상치 못한 오류: {e}")
             return []
     
-    def _parse_json_response(self, data: Dict, date_str: str) -> List[Dict]:
+    def _parse_json_response(self, json_data: Dict) -> List[Dict]:
         """JSON 응답 파싱"""
-        result_list = []
-        
         try:
-            if 'result' in data and isinstance(data['result'], list):
-                for item in data['result']:
-                    parsed_item = {
-                        'date': self._format_date(date_str),
-                        'symbol': item.get('itemCd', '').strip(),
-                        'name': item.get('itemNm', '').strip(),
-                        'current_price': self._safe_number(item.get('currentPrice', 0)),
-                        'change': self._safe_number(item.get('change', 0)),
-                        'change_rate': self._safe_number(item.get('changeRate', 0)),
-                        'open_price': self._safe_number(item.get('openPrice', 0)),
-                        'high_price': self._safe_number(item.get('highPrice', 0)),
-                        'low_price': self._safe_number(item.get('lowPrice', 0)),
-                        'volume': self._safe_number(item.get('volume', 0)),
-                        'trading_value': self._safe_number(item.get('tradingValue', 0)),
-                        'weighted_avg': self._safe_number(item.get('weightedAvg', 0))
-                    }
-                    result_list.append(parsed_item)
+            logger.info("JSON 데이터 파싱 시작")
+            result_list = []
             
+            # JSON 구조 분석
+            logger.info(f"JSON 키: {list(json_data.keys())}")
+            
+            # 다양한 JSON 구조에 대응
+            data_array = None
+            if 'result' in json_data:
+                data_array = json_data['result']
+            elif 'data' in json_data:
+                data_array = json_data['data']
+            elif 'list' in json_data:
+                data_array = json_data['list']
+            elif isinstance(json_data, list):
+                data_array = json_data
+            
+            if data_array and isinstance(data_array, list):
+                logger.info(f"데이터 배열 발견: {len(data_array)}개 항목")
+                
+                for i, item in enumerate(data_array):
+                    try:
+                        if isinstance(item, dict):
+                            parsed_item = self._parse_item_data(item)
+                            if parsed_item:
+                                result_list.append(parsed_item)
+                                logger.info(f"항목 {i+1} 파싱 성공: {parsed_item.get('symbol', 'Unknown')}")
+                    except Exception as e:
+                        logger.warning(f"항목 {i+1} 파싱 실패: {e}")
+                        continue
+            else:
+                logger.warning("유효한 데이터 배열을 찾을 수 없습니다")
+                
+            logger.info(f"JSON 파싱 완료: {len(result_list)}개 종목")
             return result_list
             
         except Exception as e:
-            logger.error(f"JSON 파싱 오류: {e}")
+            logger.error(f"JSON 파싱 중 오류: {e}")
             return []
     
-    def _parse_html_response(self, html_content: str, date_str: str) -> List[Dict]:
+    def _parse_html_response(self, html_content: str) -> List[Dict]:
         """HTML 응답 파싱"""
         try:
+            logger.info("HTML 데이터 파싱 시작")
             soup = BeautifulSoup(html_content, 'html.parser')
             result_list = []
             
-            table = soup.find('table')
+            # 테이블 찾기 (다양한 클래스명 시도)
+            table = None
+            table_selectors = [
+                'table.type-2',
+                'table.tb-list', 
+                'table[class*="list"]',
+                'table[class*="data"]',
+                'table'
+            ]
+            
+            for selector in table_selectors:
+                table = soup.select_one(selector)
+                if table:
+                    logger.info(f"테이블 발견: {selector}")
+                    break
+            
             if not table:
+                logger.warning("데이터 테이블을 찾을 수 없습니다")
+                # HTML 구조 분석을 위한 디버그 정보
+                logger.info(f"HTML 길이: {len(html_content)}")
+                logger.info("HTML 일부 내용:")
+                logger.info(html_content[:1000])
                 return []
             
+            # 헤더 행 찾기
+            header_row = table.find('tr')
+            if header_row:
+                headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+                logger.info(f"테이블 헤더: {headers}")
+            
+            # 데이터 행 처리
             rows = table.find_all('tr')[1:]  # 헤더 제외
+            logger.info(f"데이터 행 수: {len(rows)}")
             
-            for row in rows:
-                cells = row.find_all(['td', 'th'])
-                
-                if len(cells) >= 9:
-                    try:
-                        parsed_item = {
-                            'date': self._format_date(date_str),
-                            'symbol': cells[0].get_text(strip=True),
-                            'name': cells[0].get_text(strip=True),
-                            'current_price': self._extract_number(cells[1].get_text(strip=True)),
-                            'change': self._extract_number(cells[2].get_text(strip=True)),
-                            'change_rate': self._extract_number(cells[3].get_text(strip=True)),
-                            'open_price': self._extract_number(cells[4].get_text(strip=True)),
-                            'high_price': self._extract_number(cells[5].get_text(strip=True)),
-                            'low_price': self._extract_number(cells[6].get_text(strip=True)),
-                            'volume': self._extract_number(cells[7].get_text(strip=True)),
-                            'trading_value': self._extract_number(cells[8].get_text(strip=True)),
-                            'weighted_avg': self._extract_number(cells[9].get_text(strip=True)) if len(cells) > 9 else 0
-                        }
-                        result_list.append(parsed_item)
-                        
-                    except Exception:
-                        continue
+            for i, row in enumerate(rows):
+                try:
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) >= 8:  # 최소 필요한 컬럼 수
+                        parsed_item = self._parse_row_cells(cells)
+                        if parsed_item and parsed_item.get('symbol'):
+                            result_list.append(parsed_item)
+                            logger.info(f"행 {i+1} 파싱 성공: {parsed_item['symbol']}")
+                except Exception as e:
+                    logger.warning(f"행 {i+1} 파싱 실패: {e}")
+                    continue
             
+            logger.info(f"HTML 파싱 완료: {len(result_list)}개 종목")
             return result_list
             
         except Exception as e:
-            logger.error(f"HTML 파싱 오류: {e}")
+            logger.error(f"HTML 파싱 중 오류: {e}")
             return []
     
-    def _format_date(self, date_str: str) -> str:
-        """날짜 형식 변환"""
+    def _parse_item_data(self, item: Dict) -> Optional[Dict]:
+        """개별 항목 데이터 파싱 (JSON용)"""
         try:
-            if len(date_str) == 8:
-                return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-            return date_str
-        except:
-            return datetime.now().strftime('%Y-%m-%d')
+            # 다양한 키 이름에 대응
+            symbol_keys = ['itemCd', 'symbol', 'code', 'item_code']
+            name_keys = ['itemNm', 'name', 'item_name']
+            price_keys = ['currentPrice', 'price', 'current', 'last_price']
+            
+            symbol = self._get_first_valid_value(item, symbol_keys)
+            name = self._get_first_valid_value(item, name_keys)
+            current_price = self._get_first_valid_value(item, price_keys)
+            
+            if not symbol and not name:
+                return None
+                
+            return {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'symbol': str(symbol or name or '').strip(),
+                'current_price': self._safe_number(current_price),
+                'change': self._safe_number(item.get('change', item.get('diff', 0))),
+                'change_rate': self._safe_number(item.get('changeRate', item.get('rate', 0))),
+                'open_price': self._safe_number(item.get('openPrice', item.get('open', 0))),
+                'high_price': self._safe_number(item.get('highPrice', item.get('high', 0))),
+                'low_price': self._safe_number(item.get('lowPrice', item.get('low', 0))),
+                'volume': self._safe_number(item.get('volume', item.get('qty', 0))),
+                'trading_value': self._safe_number(item.get('tradingValue', item.get('amount', 0))),
+                'weighted_avg': self._safe_number(item.get('weightedAvg', item.get('avg', 0))),
+                'collection_time': datetime.now().strftime('%H:%M:%S'),
+                'data_source': 'krx_json'
+            }
+            
+        except Exception as e:
+            logger.warning(f"항목 데이터 파싱 실패: {e}")
+            return None
+    
+    def _parse_row_cells(self, cells: List) -> Optional[Dict]:
+        """테이블 행 셀 파싱 (HTML용)"""
+        try:
+            if len(cells) < 8:
+                return None
+                
+            # 셀 텍스트 추출
+            cell_texts = [cell.get_text(strip=True) for cell in cells]
+            
+            # 종목명이 첫 번째 컬럼에 있다고 가정
+            symbol = cell_texts[0]
+            if not symbol or symbol == '-':
+                return None
+                
+            return {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'symbol': symbol,
+                'current_price': self._extract_number(cell_texts[1] if len(cell_texts) > 1 else '0'),
+                'change': self._extract_number(cell_texts[2] if len(cell_texts) > 2 else '0'),
+                'change_rate': self._extract_number(cell_texts[3] if len(cell_texts) > 3 else '0'),
+                'open_price': self._extract_number(cell_texts[4] if len(cell_texts) > 4 else '0'),
+                'high_price': self._extract_number(cell_texts[5] if len(cell_texts) > 5 else '0'),
+                'low_price': self._extract_number(cell_texts[6] if len(cell_texts) > 6 else '0'),
+                'volume': self._extract_number(cell_texts[7] if len(cell_texts) > 7 else '0'),
+                'trading_value': self._extract_number(cell_texts[8] if len(cell_texts) > 8 else '0'),
+                'weighted_avg': self._extract_number(cell_texts[9] if len(cell_texts) > 9 else '0'),
+                'collection_time': datetime.now().strftime('%H:%M:%S'),
+                'data_source': 'krx_html'
+            }
+            
+        except Exception as e:
+            logger.warning(f"행 셀 파싱 실패: {e}")
+            return None
+    
+    def _get_first_valid_value(self, data: Dict, keys: List[str]):
+        """여러 키 중 첫 번째 유효한 값 반환"""
+        for key in keys:
+            if key in data and data[key] is not None:
+                return data[key]
+        return None
     
     def _safe_number(self, value, default=0):
         """안전한 숫자 변환"""
         try:
+            if value is None:
+                return default
             if isinstance(value, (int, float)):
-                return value
+                return float(value)
             if isinstance(value, str):
+                # 쉼표, 원화 기호, % 기호 등 제거
                 cleaned = re.sub(r'[^\d.-]', '', value.replace(',', ''))
                 return float(cleaned) if cleaned else default
             return default
-        except:
+        except (ValueError, TypeError):
             return default
     
     def _extract_number(self, text: str) -> float:
         """텍스트에서 숫자 추출"""
         try:
-            if not text:
-                return 0
+            if not text or text == '-':
+                return 0.0
+            # 쉼표 제거하고 숫자만 추출
             cleaned = re.sub(r'[^\d.-]', '', text.replace(',', ''))
-            return float(cleaned) if cleaned else 0
-        except:
-            return 0
+            return float(cleaned) if cleaned else 0.0
+        except (ValueError, TypeError):
+            return 0.0
 
-class TradingHoursAwareSheetsManager:
+class EnhancedSheetsManager:
     def __init__(self, credentials_json: str, sheet_id: str):
-        """거래시간 인식 시트 매니저"""
+        """향상된 Google Sheets 관리자"""
         try:
+            logger.info("Google Sheets 연결 시작...")
+            
             creds_dict = json.loads(credentials_json)
             self.gc = gspread.service_account_from_dict(creds_dict)
             self.sheet_id = sheet_id
+            
+            # 스프레드시트 열기
             self.spreadsheet = self.gc.open_by_key(sheet_id)
+            logger.info(f"스프레드시트 연결: {self.spreadsheet.title}")
             
-            # 'ets.KRX' 워크시트 확인/생성
-            try:
-                self.worksheet = self.spreadsheet.worksheet('ets.KRX')
-            except gspread.WorksheetNotFound:
-                self.worksheet = self.spreadsheet.add_worksheet(
-                    title='ets.KRX', rows=1000, cols=12
-                )
-                self._setup_headers()
-            
-            logger.info("Google Sheets 연결 성공")
+            # 워크시트 설정
+            self.setup_worksheet()
             
         except Exception as e:
             logger.error(f"Google Sheets 연결 실패: {e}")
             raise
     
-    def _setup_headers(self):
-        """헤더 설정"""
-        headers = [
-            '날짜', '종목명', '현재가', '대비', '등락률', 
-            '시가', '고가', '저가', '거래량', '거래대금', '가중평균', '수집단계'
-        ]
-        self.worksheet.update('A1:L1', [headers])
-        
-        # 헤더 서식
-        self.worksheet.format('A1:L1', {
-            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
-            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
-            'horizontalAlignment': 'CENTER'
-        })
-    
-    def update_data_with_trading_context(self, ets_data: List[Dict]):
-        """거래시간 컨텍스트를 포함한 데이터 업데이트"""
+    def setup_worksheet(self):
+        """워크시트 설정"""
         try:
-            if not ets_data:
+            # 'ets.KRX' 워크시트 확인/생성
+            try:
+                self.worksheet = self.spreadsheet.worksheet('ets.KRX')
+                logger.info("기존 ets.KRX 워크시트 사용")
+            except gspread.WorksheetNotFound:
+                logger.info("ets.KRX 워크시트 생성...")
+                self.worksheet = self.spreadsheet.add_worksheet(
+                    title='ets.KRX', 
+                    rows=1000, 
+                    cols=13
+                )
+                
+                # 헤더 설정
+                headers = [
+                    '날짜', '종목명', '현재가', '대비', '등락률', 
+                    '시가', '고가', '저가', '거래량', '거래대금', 
+                    '가중평균', '수집시간', '데이터소스'
+                ]
+                self.worksheet.update('A1:M1', [headers])
+                
+                # 헤더 서식
+                self.worksheet.format('A1:M1', {
+                    'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
+                    'horizontalAlignment': 'CENTER'
+                })
+                
+                logger.info("헤더 설정 완료")
+                
+        except Exception as e:
+            logger.error(f"워크시트 설정 실패: {e}")
+            raise
+    
+    def update_real_data(self, data: List[Dict]):
+        """실시간 데이터 업데이트"""
+        try:
+            if not data:
                 logger.warning("업데이트할 데이터가 없습니다")
-                return
+                return False
             
-            current_date = ets_data[0]['date']
-            collection_phase = ets_data[0].get('collection_phase', 'unknown')
+            logger.info(f"실시간 데이터 업데이트: {len(data)}개 종목")
             
-            logger.info(f"날짜 {current_date}, 단계 {collection_phase} 데이터 업데이트")
+            current_date = data[0]['date']
+            current_time = datetime.now().strftime('%H:%M:%S')
             
-            # 기존 같은 날짜 + 같은 단계 데이터 확인
+            # 오늘 날짜의 기존 데이터 모두 삭제 (최신 데이터로 완전 교체)
             all_values = self.worksheet.get_all_values()
+            rows_to_delete = []
             
-            # 같은 날짜의 데이터 찾기
-            rows_to_update = []
-            for i, row in enumerate(all_values[1:], start=2):
-                if len(row) >= 12 and row[0] == current_date:
-                    # 같은 날짜의 다른 수집단계는 유지, 같은 단계는 업데이트
-                    existing_phase = row[11] if len(row) > 11 else ''
-                    if existing_phase == collection_phase:
-                        rows_to_update.append(i)
+            for i, row in enumerate(all_values[1:], start=2):  # 헤더 제외
+                if len(row) > 0 and row[0] == current_date:
+                    rows_to_delete.append(i)
             
-            # 기존 같은 단계 데이터 삭제
-            for row_num in reversed(rows_to_update):
-                self.worksheet.delete_rows(row_num)
-                logger.info(f"기존 {collection_phase} 단계 데이터 삭제: 행 {row_num}")
+            # 기존 데이터 삭제
+            if rows_to_delete:
+                logger.info(f"기존 {len(rows_to_delete)}개 행 삭제")
+                for row_num in reversed(rows_to_delete):
+                    self.worksheet.delete_rows(row_num)
             
-            # 새 데이터 추가
+            # 새 데이터 준비
             new_rows = []
-            for item in ets_data:
+            for item in data:
                 row = [
                     item['date'],
-                    item['symbol'] or item['name'],
+                    item['symbol'],
                     item['current_price'],
                     item['change'],
                     item['change_rate'],
@@ -371,28 +414,36 @@ class TradingHoursAwareSheetsManager:
                     item['volume'],
                     item['trading_value'],
                     item['weighted_avg'],
-                    item.get('collection_phase', 'unknown')
+                    item.get('collection_time', current_time),
+                    item.get('data_source', 'unknown')
                 ]
                 new_rows.append(row)
             
+            # 데이터 일괄 추가
             if new_rows:
                 self.worksheet.append_rows(new_rows)
-                logger.info(f"{len(new_rows)}개 {collection_phase} 단계 데이터 추가")
+                logger.info(f"{len(new_rows)}개 행 추가 완료")
                 
-                # 정렬 및 형식 적용
-                self._sort_and_format_data()
+                # 데이터 정렬 (날짜 내림차순, 거래량 내림차순)
+                self._sort_data()
                 
-                # 거래시간별 통계
-                self._log_trading_statistics(ets_data)
+                # 숫자 형식 적용
+                self._apply_formatting()
+                
+                # 통계 로깅
+                self._log_statistics(data)
+                
+                return True
+            
+            return False
             
         except Exception as e:
             logger.error(f"데이터 업데이트 실패: {e}")
-            raise
+            return False
     
-    def _sort_and_format_data(self):
-        """데이터 정렬 및 형식 적용"""
+    def _sort_data(self):
+        """데이터 정렬"""
         try:
-            # 날짜 내림차순, 수집단계 순서로 정렬
             all_values = self.worksheet.get_all_values()
             if len(all_values) <= 1:
                 return
@@ -400,136 +451,141 @@ class TradingHoursAwareSheetsManager:
             headers = all_values[0]
             data_rows = all_values[1:]
             
-            # 정렬 (날짜 desc, 수집단계 asc)
-            phase_order = {'trading_hours': 1, 'just_closed': 2, 'post_market': 3, 'pre_market': 4}
-            
+            # 날짜 내림차순, 거래량 내림차순으로 정렬
             data_rows.sort(key=lambda x: (
-                x[0],  # 날짜
-                phase_order.get(x[11] if len(x) > 11 else '', 99)  # 수집단계
+                x[0] if len(x) > 0 else '',  # 날짜
+                -float(str(x[8]).replace(',', '') or 0) if len(x) > 8 else 0  # 거래량 내림차순
             ), reverse=True)
             
-            # 업데이트
+            # 정렬된 데이터 업데이트
             sorted_data = [headers] + data_rows
-            range_name = f'A1:L{len(sorted_data)}'
+            range_name = f'A1:M{len(sorted_data)}'
             self.worksheet.update(range_name, sorted_data)
             
-            # 숫자 형식 적용
-            self._apply_number_formats()
+            logger.info("데이터 정렬 완료")
             
         except Exception as e:
-            logger.warning(f"정렬 중 오류: {e}")
+            logger.warning(f"데이터 정렬 중 오류: {e}")
     
-    def _apply_number_formats(self):
+    def _apply_formatting(self):
         """숫자 형식 적용"""
         try:
             last_row = len(self.worksheet.get_all_values())
             
             if last_row > 1:
-                # 가격 컬럼
+                # 가격 관련 컬럼 (천 단위 구분)
                 price_format = {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}
                 for col in ['C', 'D', 'F', 'G', 'H', 'K']:  # 현재가, 대비, 시가, 고가, 저가, 가중평균
                     self.worksheet.format(f'{col}2:{col}{last_row}', price_format)
                 
-                # 등락률
+                # 등락률 (%)
                 self.worksheet.format(f'E2:E{last_row}', {
                     'numberFormat': {'type': 'NUMBER', 'pattern': '0.00%'}
                 })
                 
-                # 거래량, 거래대금
-                volume_format = {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0'}}
+                # 거래량, 거래대금 (천 단위 구분)
                 for col in ['I', 'J']:
-                    self.worksheet.format(f'{col}2:{col}{last_row}', volume_format)
+                    self.worksheet.format(f'{col}2:{col}{last_row}', price_format)
+                
+                logger.info("숫자 형식 적용 완료")
                 
         except Exception as e:
-            logger.warning(f"형식 적용 중 오류: {e}")
+            logger.warning(f"숫자 형식 적용 중 오류: {e}")
     
-    def _log_trading_statistics(self, ets_data: List[Dict]):
-        """거래 통계 로깅"""
+    def _log_statistics(self, data: List[Dict]):
+        """통계 정보 로깅"""
         try:
-            total_volume = sum(item['volume'] for item in ets_data)
-            active_items = len([item for item in ets_data if item['volume'] > 0])
-            total_items = len(ets_data)
+            total_volume = sum(item['volume'] for item in data)
+            active_items = len([item for item in data if item['volume'] > 0])
+            total_items = len(data)
             
-            collection_phase = ets_data[0].get('collection_phase', 'unknown')
-            is_trading_time = ets_data[0].get('is_trading_time', False)
+            avg_price = 0
+            if active_items > 0:
+                active_data = [item for item in data if item['volume'] > 0]
+                avg_price = sum(item['current_price'] for item in active_data) / len(active_data)
             
-            logger.info(f"=== 거래 통계 ({collection_phase}) ===")
-            logger.info(f"거래시간 여부: {is_trading_time}")
-            logger.info(f"총 거래량: {total_volume:,} 톤")
-            logger.info(f"활성 종목: {active_items}/{total_items}개")
+            logger.info("=== 실시간 거래 통계 ===")
+            logger.info(f"총 종목 수: {total_items}개")
+            logger.info(f"활성 거래 종목: {active_items}개")
+            logger.info(f"총 거래량: {total_volume:,.0f} 톤")
+            logger.info(f"평균 가격: {avg_price:,.0f} 원")
+            logger.info(f"데이터 소스: {data[0].get('data_source', 'unknown')}")
             
-            if is_trading_time:
-                logger.info("🔥 실시간 거래시간 중 수집된 데이터")
-            else:
-                logger.info("📊 장외시간 수집된 데이터")
-                
         except Exception as e:
             logger.warning(f"통계 로깅 중 오류: {e}")
 
 def main():
     """메인 실행 함수"""
-    parser = argparse.ArgumentParser(description='KRX ETS 거래시간 인식 수집기')
-    parser.add_argument('--date', help='수집할 날짜 (YYYYMMDD)')
-    parser.add_argument('--phase', help='수집 단계 지정')
-    parser.add_argument('--force', action='store_true', help='거래시간 무시하고 강제 수집')
-    
-    args = parser.parse_args()
-    
     try:
-        logger.info("=== KRX ETS 거래시간 인식 수집기 시작 ===")
+        logger.info("=== KRX ETS 실시간 데이터 수집 시작 ===")
         
         # 환경변수 확인
-        google_creds = os.getenv('GOOGLE_SHEETS_CREDS')
+        creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
         sheet_id = os.getenv('KAU_SHEET_ID')
         
-        if not google_creds or not sheet_id:
-            raise ValueError("필수 환경변수가 설정되지 않았습니다")
+        if not creds_json:
+            raise ValueError("GOOGLE_SHEETS_CREDS 환경변수가 설정되지 않았습니다")
+        if not sheet_id:
+            raise ValueError("KAU_SHEET_ID 환경변수가 설정되지 않았습니다")
         
-        # 수집기 및 매니저 초기화
-        collector = TradingHoursAwareCollector()
-        sheets_manager = TradingHoursAwareSheetsManager(google_creds, sheet_id)
+        # 현재 시간 확인
+        now = datetime.now()
+        current_time = now.strftime('%H:%M:%S')
+        is_weekday = now.weekday() < 5
         
-        # 현재 시장 상태 확인
-        phase_info = collector.get_current_market_phase()
+        logger.info(f"수집 시작 시간: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
+        logger.info(f"평일 여부: {is_weekday}")
         
-        logger.info(f"📊 현재 시장 상태: {phase_info['description']}")
-        logger.info(f"🕐 현재 시간: {phase_info['current_time']} KST")
-        logger.info(f"📈 거래시간: 10:00-12:00, 호가접수: 09:00-12:00")
+        # 실제 데이터 수집기 초기화
+        collector = RealKRXCollector()
         
-        # 수집 필요성 판단
-        if not args.force and not collector.should_collect_data(phase_info):
-            logger.info(f"💡 권장 수집시간: 10:30 (장시작), 12:30 (장마감), 15:00 (일일정리)")
-            logger.info(f"⏰ 다음 액션: {phase_info['next_action']}")
+        # 실시간 데이터 수집
+        logger.info("실제 KRX 웹사이트에서 데이터 수집 중...")
+        real_data = collector.get_real_krx_data()
+        
+        if real_data:
+            logger.info(f"실제 데이터 수집 성공: {len(real_data)}개 종목")
             
-            if phase_info['phase'] == 'weekend':
-                logger.info("주말이므로 수집을 건너뜁니다.")
-                return
-        
-        # 데이터 수집
-        target_date = args.date or datetime.now().strftime('%Y%m%d')
-        ets_data = collector.get_ets_data_with_context(target_date, args.phase)
-        
-        if ets_data:
             # Google Sheets 업데이트
-            sheets_manager.update_data_with_trading_context(ets_data)
+            sheets_manager = EnhancedSheetsManager(creds_json, sheet_id)
+            success = sheets_manager.update_real_data(real_data)
             
-            # 결과 요약
-            collection_phase = ets_data[0].get('collection_phase', 'unknown')
-            is_trading_time = ets_data[0].get('is_trading_time', False)
-            
-            logger.info("✅ 수집 및 업데이트 완료!")
-            print(f"✅ 성공: {len(ets_data)}개 종목 데이터 수집")
-            print(f"📊 수집 단계: {collection_phase}")
-            print(f"🕐 거래시간 여부: {'예' if is_trading_time else '아니오'}")
-            
+            if success:
+                # 성공 결과 출력
+                total_volume = sum(item['volume'] for item in real_data)
+                active_items = len([item for item in real_data if item['volume'] > 0])
+                
+                print(f"✅ 실시간 데이터 수집 성공!")
+                print(f"📊 총 종목: {len(real_data)}개")
+                print(f"🔥 활성 종목: {active_items}개")
+                print(f"📈 총 거래량: {total_volume:,} 톤")
+                print(f"🕐 수집 시간: {current_time} KST")
+                print(f"💾 데이터 소스: {real_data[0].get('data_source', 'unknown')}")
+                
+                # 주요 종목 정보 출력
+                active_data = [item for item in real_data if item['volume'] > 0]
+                if active_data:
+                    print(f"\n📋 활성 거래 종목:")
+                    for item in active_data[:5]:  # 상위 5개만
+                        print(f"  • {item['symbol']}: {item['current_price']:,}원 "
+                              f"({item['change']:+.0f}, {item['change_rate']:+.2f}%) "
+                              f"거래량: {item['volume']:,}톤")
+                
+                logger.info("✅ 실시간 데이터 수집 및 업데이트 완료!")
+                
+            else:
+                logger.error("❌ Google Sheets 업데이트 실패")
+                sys.exit(1)
+                
         else:
-            logger.warning("⚠️ 수집된 데이터가 없습니다")
-            print("⚠️ 수집된 데이터가 없습니다. 시장 상태를 확인해주세요.")
-        
+            logger.error("❌ 실제 데이터 수집 실패")
+            print("❌ KRX에서 데이터를 가져올 수 없습니다")
+            sys.exit(1)
+            
     except Exception as e:
         logger.error(f"❌ 실행 중 오류: {e}")
         print(f"❌ 오류: {e}")
-        raise
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
