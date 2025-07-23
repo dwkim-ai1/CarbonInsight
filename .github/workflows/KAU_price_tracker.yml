@@ -1,0 +1,375 @@
+# .github/workflows/krx_ets_collector_optimized.yml
+name: KRX ETS 배출권 가격 수집 (최적화된 스케줄)
+
+on:
+  schedule:
+    # KRX 탄소배출권 거래시간에 맞춘 최적 스케줄
+    # 거래시간: 10:00-12:00 KST, 호가접수: 09:00-12:00 KST
+    
+    # 1차: 장 시작 직후 (10:30 KST = 01:30 UTC)
+    - cron: '30 1 * * 1-5'
+    
+    # 2차: 장 마감 직후 (12:30 KST = 03:30 UTC) 
+    - cron: '30 3 * * 1-5'
+    
+    # 3차: 오후 확인용 (15:00 KST = 06:00 UTC)
+    - cron: '0 6 * * 1-5'
+    
+  workflow_dispatch:  # 수동 실행
+    inputs:
+      collection_type:
+        description: '수집 유형'
+        required: true
+        default: 'regular'
+        type: choice
+        options:
+        - 'regular'      # 일반 수집
+        - 'opening'      # 장 시작 시점
+        - 'closing'      # 장 마감 시점
+        - 'market_hours' # 장중 수집
+      date:
+        description: '수집할 날짜 (YYYYMMDD, 비어있으면 오늘)'
+        required: false
+        default: ''
+
+env:
+  # KRX 거래시간 정보
+  MARKET_OPEN: '10:00'
+  MARKET_CLOSE: '12:00'
+  ORDER_START: '09:00'
+  ORDER_END: '12:00'
+
+jobs:
+  collect-krx-ets:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 코드 체크아웃
+      uses: actions/checkout@v4
+      
+    - name: Python 환경 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+        
+    - name: 의존성 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: 거래시간 확인 및 수집 시점 결정
+      id: market_check
+      run: |
+        # 현재 시간 (KST)
+        CURRENT_HOUR=$(TZ=Asia/Seoul date +%H)
+        CURRENT_MINUTE=$(TZ=Asia/Seoul date +%M)
+        CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
+        
+        echo "current_time=${CURRENT_TIME}" >> $GITHUB_OUTPUT
+        echo "current_hour=${CURRENT_HOUR}" >> $GITHUB_OUTPUT
+        
+        # 수집 시점 결정
+        if [ "${CURRENT_HOUR}" -ge 10 ] && [ "${CURRENT_HOUR}" -lt 12 ]; then
+          COLLECTION_PHASE="market_hours"
+          echo "📊 현재 장중 (거래시간) - 실시간 데이터 수집"
+        elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -ge 30 ]; then
+          COLLECTION_PHASE="post_market"
+          echo "🔔 장 마감 후 - 최종 데이터 수집"
+        elif [ "${CURRENT_HOUR}" -ge 15 ]; then
+          COLLECTION_PHASE="daily_final"
+          echo "📋 일일 최종 - 데이터 정리 및 검증"
+        else
+          COLLECTION_PHASE="pre_market"
+          echo "⏰ 장 시작 전 - 전일 데이터 확인"
+        fi
+        
+        echo "collection_phase=${COLLECTION_PHASE}" >> $GITHUB_OUTPUT
+        echo "🕐 현재 시간 (KST): ${CURRENT_TIME}"
+        echo "📈 거래시간: 10:00-12:00"
+        echo "📝 호가접수: 09:00-12:00"
+        
+    - name: KRX ETS 데이터 수집
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+        COLLECTION_PHASE: ${{ steps.market_check.outputs.collection_phase }}
+        TARGET_DATE: ${{ github.event.inputs.date }}
+        COLLECTION_TYPE: ${{ github.event.inputs.collection_type }}
+      run: |
+        echo "🚀 KRX ETS 데이터 수집 시작..."
+        echo "📊 수집 단계: ${COLLECTION_PHASE}"
+        echo "⏰ 현재 시간: ${{ steps.market_check.outputs.current_time }} KST"
+        
+        # 거래시간에 따른 메시지
+        case "${COLLECTION_PHASE}" in
+          "market_hours")
+            echo "💹 장중 실시간 데이터 수집 중..."
+            ;;
+          "post_market")
+            echo "🔔 장 마감 후 최종 데이터 수집 중..."
+            ;;
+          "daily_final") 
+            echo "📋 일일 최종 데이터 정리 중..."
+            ;;
+          "pre_market")
+            echo "⏰ 장 시작 전 데이터 확인 중..."
+            ;;
+        esac
+        
+        # 데이터 수집 실행
+        if [ -n "$TARGET_DATE" ]; then
+          echo "📅 지정된 날짜 수집: $TARGET_DATE"
+          python krx_ets_updater.py --date $TARGET_DATE --phase $COLLECTION_PHASE
+        else
+          echo "📅 오늘 날짜 수집"
+          python krx_ets_updater.py --phase $COLLECTION_PHASE
+        fi
+        
+    - name: 거래량 분석 및 알림
+      if: success()
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+        COLLECTION_PHASE: ${{ steps.market_check.outputs.collection_phase }}
+      run: |
+        echo "📊 거래량 분석 중..."
+        
+        python -c "
+        import gspread
+        import json
+        import os
+        from datetime import datetime
+        
+        # Google Sheets 연결
+        creds = json.loads(os.environ['GOOGLE_SHEETS_CREDS'])
+        gc = gspread.service_account_from_dict(creds)
+        sheet = gc.open_by_key(os.environ['KAU_SHEET_ID']).worksheet('ets.KRX')
+        
+        # 오늘 데이터 확인
+        today = datetime.now().strftime('%Y-%m-%d')
+        all_records = sheet.get_all_records()
+        today_data = [r for r in all_records if r.get('날짜') == today]
+        
+        if today_data:
+            total_volume = sum(int(str(r.get('거래량', 0)).replace(',', '') or 0) for r in today_data)
+            active_items = len([r for r in today_data if int(str(r.get('거래량', 0)).replace(',', '') or 0) > 0])
+            total_items = len(today_data)
+            
+            print(f'📈 오늘 거래 현황:')
+            print(f'  • 총 거래량: {total_volume:,} 톤')
+            print(f'  • 활성 종목: {active_items}/{total_items}개')
+            print(f'  • 수집 시점: ${os.environ[\"COLLECTION_PHASE\"]}')
+            
+            # GitHub Actions 요약에 추가
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                f.write(f'''
+        ## 📊 KRX ETS 거래 현황 ({today})
+        
+        - **수집 시점**: ${os.environ[\"COLLECTION_PHASE\"]}
+        - **총 거래량**: {total_volume:,} 톤
+        - **활성 종목**: {active_items}/{total_items}개
+        - **수집 시간**: {datetime.now().strftime(\"%H:%M:%S\")} KST
+        
+        ### 거래시간 정보
+        - 🕙 매매거래: 10:00-12:00
+        - 📝 호가접수: 09:00-12:00
+        ''')
+        else:
+            print('⚠️ 오늘 데이터가 없습니다.')
+        "
+        
+    - name: 장중/장후 상태별 후처리
+      if: always()
+      env:
+        COLLECTION_PHASE: ${{ steps.market_check.outputs.collection_phase }}
+      run: |
+        case "${COLLECTION_PHASE}" in
+          "market_hours")
+            echo "💹 장중 수집 완료 - 다음 수집: 12:30 (장 마감 후)"
+            ;;
+          "post_market")
+            echo "🔔 장 마감 후 수집 완료 - 다음 수집: 15:00 (일일 최종)"
+            ;;
+          "daily_final")
+            echo "📋 일일 최종 수집 완료 - 다음 수집: 내일 10:30"
+            ;;
+          "pre_market")
+            echo "⏰ 장 시작 전 확인 완료 - 다음 수집: 10:30 (장 시작 후)"
+            ;;
+        esac
+        
+    - name: 실패 시 거래시간 고려 알림
+      if: failure()
+      env:
+        COLLECTION_PHASE: ${{ steps.market_check.outputs.collection_phase }}
+        CURRENT_TIME: ${{ steps.market_check.outputs.current_time }}
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const phase = process.env.COLLECTION_PHASE;
+          const currentTime = process.env.CURRENT_TIME;
+          
+          let priority = 'medium';
+          let phaseDescription = '';
+          
+          switch(phase) {
+            case 'market_hours':
+              priority = 'high';
+              phaseDescription = '장중 실시간 데이터 수집';
+              break;
+            case 'post_market':
+              priority = 'high'; 
+              phaseDescription = '장 마감 후 최종 데이터 수집';
+              break;
+            case 'daily_final':
+              priority = 'medium';
+              phaseDescription = '일일 최종 데이터 정리';
+              break;
+            case 'pre_market':
+              priority = 'low';
+              phaseDescription = '장 시작 전 데이터 확인';
+              break;
+          }
+          
+          const title = `🚨 KRX ETS 수집 실패 - ${phaseDescription}`;
+          const labels = ['bug', 'krx-ets', `priority-${priority}`];
+          
+          const body = `
+          ## 🚨 KRX ETS 데이터 수집 실패
+          
+          **실패 시점**: ${currentTime} KST
+          **수집 단계**: ${phaseDescription}
+          **우선순위**: ${priority.toUpperCase()}
+          
+          ### 🕐 KRX 거래시간 정보
+          - **매매거래**: 10:00-12:00 KST
+          - **호가접수**: 09:00-12:00 KST
+          
+          ### ⚡ 즉시 확인 필요 여부
+          ${phase === 'market_hours' || phase === 'post_market' ? 
+            '🔴 **높은 우선순위** - 거래시간 중 또는 직후 실패' : 
+            '🟡 **보통 우선순위** - 장외 시간 실패'}
+          
+          ### 🔍 확인 사항
+          - [ ] KRX ETS 사이트 정상 운영 확인
+          - [ ] 거래시간 중 시스템 점검 여부
+          - [ ] Google Sheets API 상태
+          - [ ] 네트워크 연결 상태
+          
+          ### 📊 다음 수집 예정
+          ${phase === 'market_hours' ? '12:30 (장 마감 후)' :
+            phase === 'post_market' ? '15:00 (일일 최종)' :
+            phase === 'daily_final' ? '내일 10:30 (장 시작 후)' :
+            '10:30 (장 시작 후)'}
+          
+          ---
+          **실행 로그**: [여기서 확인](${context.payload.repository.html_url}/actions/runs/${context.runId})
+          `;
+          
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: title,
+            body: body,
+            labels: labels
+          });
+
+---
+
+# .github/workflows/weekend_data_check.yml (주말/공휴일 체크)
+name: 주말 및 공휴일 데이터 체크
+
+on:
+  schedule:
+    # 토요일 오전 9시에 주간 데이터 정리
+    - cron: '0 0 * * 6'
+  workflow_dispatch:
+
+jobs:
+  weekend-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 코드 체크아웃
+      uses: actions/checkout@v4
+      
+    - name: Python 환경 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: 주간 데이터 요약
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+      run: |
+        echo "📅 주간 데이터 요약 생성 중..."
+        
+        python -c "
+        import gspread
+        import json
+        import os
+        import pandas as pd
+        from datetime import datetime, timedelta
+        
+        # Google Sheets 연결
+        creds = json.loads(os.environ['GOOGLE_SHEETS_CREDS'])
+        gc = gspread.service_account_from_dict(creds)
+        sheet = gc.open_by_key(os.environ['KAU_SHEET_ID']).worksheet('ets.KRX')
+        
+        # 지난주 데이터 분석
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        
+        if len(df) > 0:
+            df['날짜'] = pd.to_datetime(df['날짜'])
+            
+            # 지난주 월-금 데이터
+            today = datetime.now()
+            last_monday = today - timedelta(days=today.weekday() + 7)
+            last_friday = last_monday + timedelta(days=4)
+            
+            week_data = df[(df['날짜'] >= last_monday.date()) & (df['날짜'] <= last_friday.date())]
+            
+            if len(week_data) > 0:
+                # 숫자 컬럼 변환
+                for col in ['현재가', '거래량', '거래대금']:
+                    week_data[col] = pd.to_numeric(week_data[col].astype(str).str.replace(',', ''), errors='coerce')
+                
+                # 주간 통계
+                total_volume = week_data['거래량'].sum()
+                avg_price = week_data[week_data['거래량'] > 0]['현재가'].mean()
+                trading_days = week_data['날짜'].dt.date.nunique()
+                
+                print(f'📊 지난주 거래 요약:')
+                print(f'  • 거래일수: {trading_days}일')
+                print(f'  • 총 거래량: {total_volume:,.0f} 톤')
+                print(f'  • 평균 가격: {avg_price:,.0f} 원')
+                
+                # GitHub Actions 요약
+                with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+                    f.write(f'''
+        ## 📊 주간 KRX ETS 거래 요약
+        
+        **기간**: {last_monday.strftime('%Y-%m-%d')} ~ {last_friday.strftime('%Y-%m-%d')}
+        
+        - **거래일수**: {trading_days}일
+        - **총 거래량**: {total_volume:,.0f} 톤  
+        - **평균 가격**: {avg_price:,.0f} 원
+        
+        ### 다음주 수집 일정
+        - **월-금**: 10:30, 12:30, 15:00 (KST)
+        - **거래시간**: 10:00-12:00
+        - **호가접수**: 09:00-12:00
+        ''')
+            else:
+                print('⚠️ 지난주 데이터가 없습니다.')
+        else:
+            print('❌ 데이터가 없습니다.')
+        "
+        
+    - name: 다음주 준비
+      run: |
+        echo "🔄 다음주 수집을 위한 시스템 준비 완료"
+        echo "📅 다음 수집: 월요일 10:30 KST"
