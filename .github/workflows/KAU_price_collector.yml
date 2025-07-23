@@ -108,20 +108,15 @@ jobs:
         echo "💹 거래시간 여부: ${IS_TRADING_HOURS}"
         echo "📈 KRX 거래시간: 10:00-12:00 (평일)"
         
-    - name: 실시간 데이터 수집 스크립트 생성
-      env:
-        DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
-        TEST_MODE: ${{ github.event.inputs.test_mode }}
+    - name: Python 스크립트 헤더 생성
       run: |
-        echo "📝 실시간 수집 스크립트 생성..."
+        echo "#!/usr/bin/env python3" > improved_krx_collector.py
+        echo "# 개선된 KRX ETS 실시간 데이터 수집기" >> improved_krx_collector.py
+        echo "" >> improved_krx_collector.py
         
-        # Python 스크립트 생성
-        cat > improved_krx_collector.py << 'PYTHON_SCRIPT_EOF'
-#!/usr/bin/env python3
-"""
-개선된 실시간 KRX ETS 데이터 수집기
-"""
-
+    - name: Python 라이브러리 임포트 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
 import requests
 import gspread
 import json
@@ -141,6 +136,11 @@ TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
 log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+EOF
+
+    - name: KRX 수집기 클래스 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
 
 class ImprovedKRXCollector:
     def __init__(self):
@@ -157,7 +157,6 @@ class ImprovedKRXCollector:
         self.base_url = "https://ets.krx.co.kr"
         
     def get_real_krx_data(self) -> List[Dict]:
-        """다중 방법으로 실시간 데이터 수집"""
         logger.info("=== 개선된 KRX ETS 데이터 수집 시작 ===")
         
         # 방법 1: 메인 페이지 직접 파싱
@@ -183,7 +182,6 @@ class ImprovedKRXCollector:
         return self._get_realistic_sample_data()
     
     def _try_main_page_parsing(self) -> List[Dict]:
-        """메인 페이지에서 직접 데이터 파싱"""
         try:
             url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
             response = self.session.get(url, timeout=30)
@@ -196,12 +194,10 @@ class ImprovedKRXCollector:
             return []
     
     def _try_ajax_requests(self) -> List[Dict]:
-        """다양한 AJAX 요청 시도"""
         try:
             ajax_url = f"{self.base_url}/contents/ETS/99/ETS99000001.jspx"
             current_date = datetime.now().strftime('%Y%m%d')
             
-            # 여러 파라미터 세트 시도
             param_sets = [
                 {
                     'bld': 'ETS/03/03010000/ets03010000_04',
@@ -230,14 +226,12 @@ class ImprovedKRXCollector:
                     )
                     
                     if response.status_code == 200:
-                        # JSON 응답 처리
                         if 'json' in response.headers.get('content-type', ''):
                             data = response.json()
                             result = self._parse_json_data(data)
                             if result:
                                 return result
                         
-                        # HTML 응답 처리
                         result = self._parse_html_content(response.text, f'ajax_{i}')
                         if result:
                             return result
@@ -253,7 +247,6 @@ class ImprovedKRXCollector:
             return []
     
     def _try_alternative_urls(self) -> List[Dict]:
-        """대체 URL들 시도"""
         alternative_urls = [
             f"{self.base_url}/contents/ETS/03/03010000/ETS03010000M.jsp"
         ]
@@ -270,14 +263,17 @@ class ImprovedKRXCollector:
                 continue
         
         return []
+EOF
+
+    - name: HTML 파싱 메소드 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
     
     def _parse_html_content(self, html_content: str, source: str) -> List[Dict]:
-        """HTML 콘텐츠 파싱"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             result_list = []
             
-            # 다양한 테이블 찾기 시도
             table_selectors = [
                 'table[id*="gridtable"]',
                 'table[summary*="배출권"]',
@@ -289,7 +285,6 @@ class ImprovedKRXCollector:
             for selector in table_selectors:
                 tables = soup.select(selector)
                 for t in tables:
-                    # 배출권 관련 테이블인지 확인
                     if (t.find(string=re.compile(r'종목명|현재가|KAU|KCU')) or
                         t.find('td', string=re.compile(r'KAU|KCU|KOC'))):
                         table = t
@@ -302,7 +297,6 @@ class ImprovedKRXCollector:
                     logger.debug(f"테이블을 찾을 수 없음 - {source}")
                 return []
             
-            # 테이블 행 처리
             rows = []
             tbody = table.find('tbody')
             if tbody:
@@ -325,7 +319,6 @@ class ImprovedKRXCollector:
             return []
     
     def _parse_table_row(self, cells: List, source: str) -> Optional[Dict]:
-        """테이블 행 파싱"""
         try:
             cell_texts = [cell.get_text(strip=True) for cell in cells]
             
@@ -356,11 +349,14 @@ class ImprovedKRXCollector:
         except Exception as e:
             logger.debug(f"행 파싱 실패: {e}")
             return None
+EOF
+
+    - name: JSON 파싱 및 유틸리티 메소드 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
     
     def _parse_json_data(self, json_data: Dict) -> List[Dict]:
-        """JSON 데이터 파싱"""
         try:
-            # JSON 구조에서 데이터 배열 찾기
             data_array = None
             for key in ['result', 'data', 'list', 'items']:
                 if key in json_data and isinstance(json_data[key], list):
@@ -387,9 +383,7 @@ class ImprovedKRXCollector:
             return []
     
     def _parse_json_item(self, item: Dict) -> Optional[Dict]:
-        """JSON 아이템 파싱"""
         try:
-            # 필드 매핑
             symbol = item.get('isu_cd') or item.get('symbol') or item.get('itemCd')
             current_price = item.get('tdd_clsprc') or item.get('currentPrice')
             
@@ -417,11 +411,9 @@ class ImprovedKRXCollector:
             return None
     
     def _get_realistic_sample_data(self) -> List[Dict]:
-        """실제 시세를 반영한 샘플 데이터"""
         today = datetime.now().strftime('%Y-%m-%d')
         current_time = datetime.now().strftime('%H:%M:%S')
         
-        # 실제 웹사이트에서 확인된 현재 시세 반영
         return [
             {
                 'date': today,
@@ -456,7 +448,6 @@ class ImprovedKRXCollector:
         ]
     
     def _extract_number(self, text: str) -> float:
-        """텍스트에서 숫자 추출"""
         try:
             if not text or text in ['-', '']:
                 return 0.0
@@ -466,7 +457,6 @@ class ImprovedKRXCollector:
             return 0.0
     
     def _safe_float(self, value) -> float:
-        """안전한 float 변환"""
         try:
             if isinstance(value, (int, float)):
                 return float(value)
@@ -475,6 +465,11 @@ class ImprovedKRXCollector:
             return 0.0
         except:
             return 0.0
+EOF
+
+    - name: Google Sheets 클래스 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
 
 class GoogleSheetsUpdater:
     def __init__(self, credentials_json: str, sheet_id: str):
@@ -509,7 +504,6 @@ class GoogleSheetsUpdater:
                 ]
                 self.worksheet.update('A1:M1', [headers])
                 
-                # 헤더 서식
                 self.worksheet.format('A1:M1', {
                     'backgroundColor': {'red': 0.1, 'green': 0.5, 'blue': 0.8},
                     'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
@@ -535,7 +529,6 @@ class GoogleSheetsUpdater:
             current_date = data[0]['date']
             logger.info(f"데이터 업데이트: {current_date}, {len(data)}개 종목")
             
-            # 기존 오늘 데이터 삭제
             all_values = self.worksheet.get_all_values()
             rows_to_delete = []
             
@@ -548,7 +541,6 @@ class GoogleSheetsUpdater:
                 for row_num in reversed(rows_to_delete):
                     self.worksheet.delete_rows(row_num)
             
-            # 새 데이터 추가
             new_rows = []
             for item in data:
                 row = [
@@ -570,12 +562,16 @@ class GoogleSheetsUpdater:
         except Exception as e:
             logger.error(f"데이터 업데이트 실패: {e}")
             return False
+EOF
+
+    - name: 메인 함수 추가
+      run: |
+        cat >> improved_krx_collector.py << 'EOF'
 
 def main():
     try:
         logger.info("=== 개선된 KRX ETS 데이터 수집 시작 ===")
         
-        # 환경변수 확인
         creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
         sheet_id = os.getenv('KAU_SHEET_ID')
         market_phase = os.getenv('MARKET_PHASE', 'unknown')
@@ -587,16 +583,13 @@ def main():
         logger.info(f"디버그 모드: {DEBUG_MODE}")
         logger.info(f"테스트 모드: {TEST_MODE}")
         
-        # 데이터 수집
         collector = ImprovedKRXCollector()
         data = collector.get_real_krx_data()
         
         if data:
-            # Google Sheets 업데이트
             updater = GoogleSheetsUpdater(creds_json, sheet_id)
             success = updater.update_data(data)
             
-            # 결과 출력
             total_volume = sum(item['volume'] for item in data)
             active_count = len([item for item in data if item['volume'] > 0])
             
@@ -607,7 +600,6 @@ def main():
             print(f"🕐 수집시간: {datetime.now().strftime('%H:%M:%S')} KST")
             print(f"💾 주요 데이터소스: {data[0].get('data_source', 'unknown')}")
             
-            # 주요 종목 표시
             active_data = [d for d in data if d['volume'] > 0]
             if active_data:
                 print("\n📋 활성 거래 종목:")
@@ -635,9 +627,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-PYTHON_SCRIPT_EOF
-        
-        echo "✅ 개선된 수집 스크립트 생성 완료"
+EOF
 
     - name: 환경변수 검증
       env:
@@ -727,7 +717,6 @@ PYTHON_SCRIPT_EOF
             gc = gspread.service_account_from_dict(creds)
             sheet = gc.open_by_key(os.environ['KAU_SHEET_ID']).worksheet('ets.KRX')
             
-            # 오늘 데이터 확인
             today = datetime.now().strftime('%Y-%m-%d')
             all_data = sheet.get_all_records()
             today_data = [r for r in all_data if r.get('날짜') == today]
@@ -736,12 +725,10 @@ PYTHON_SCRIPT_EOF
                 print(f'📈 오늘({today}) 수집 결과:')
                 print(f'  • 총 종목: {len(today_data)}개')
                 
-                # 활성 거래 분석
                 active = [r for r in today_data if r.get('거래량', 0) > 0]
                 print(f'  • 활성 거래: {len(active)}개')
                 
                 if active:
-                    # 총 거래량 계산
                     total_vol = sum(r.get('거래량', 0) for r in active)
                     total_price = sum(r.get('현재가', 0) for r in active)
                     avg_price = total_price / len(active) if len(active) > 0 else 0
@@ -749,11 +736,9 @@ PYTHON_SCRIPT_EOF
                     print(f'  • 총 거래량: {total_vol:,} 톤')
                     print(f'  • 평균 가격: {avg_price:,.0f} 원')
                     
-                    # 최대 거래량 종목
                     max_volume_item = max(active, key=lambda x: x.get('거래량', 0))
                     print(f'  • 최대 거래량: {max_volume_item.get(\"종목명\", \"Unknown\")} ({max_volume_item.get(\"거래량\", 0):,}톤)')
                 
-                # 최종 수집 시간과 데이터 소스
                 latest_time = today_data[-1].get('수집시간', 'Unknown')
                 data_source = today_data[-1].get('데이터소스', 'unknown')
                 print(f'  • 최종 수집: {latest_time}')
@@ -788,10 +773,7 @@ PYTHON_SCRIPT_EOF
           echo "- **실제 시세 반영**: 샘플 데이터도 현재 시세 반영" >> $GITHUB_STEP_SUMMARY
           echo "- **테스트 모드**: 실제 업데이트 없이 테스트 가능" >> $GITHUB_STEP_SUMMARY
           echo "- **수집 주기 단축**: 5분마다 수집으로 실시간성 향상" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📈 거래시간 정보" >> $GITHUB_STEP_SUMMARY
-          echo "- **매매거래**: 10:00-12:00 KST" >> $GITHUB_STEP_SUMMARY
-          echo "- **수집 주기**: 거래시간 중 5분마다" >> $GITHUB_STEP_SUMMARY
+          echo "- **모듈화된 스크립트**: YAML 충돌 없는 안정적인 구조" >> $GITHUB_STEP_SUMMARY
         else
           echo "**결과**: ❌ 실패" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
