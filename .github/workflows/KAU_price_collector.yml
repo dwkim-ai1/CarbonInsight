@@ -1,29 +1,26 @@
 # .github/workflows/KAU_price_collector.yml
-name: 실시간 KRX ETS 데이터 수집 (YAML 안전 버전)
+name: KRX ETS Data Collector
 
 on:
   schedule:
-    # 거래시간 중 실시간 수집 (5분마다)
-    - cron: '*/5 1-3 * * 1-5'  # 10:00-12:00 KST
-    # 장 마감 후 최종 수집
-    - cron: '30 3 * * 1-5'      # 12:30 KST
-    # 오후 확인 수집
-    - cron: '0 6 * * 1-5'       # 15:00 KST
+    - cron: '*/5 1-3 * * 1-5'  # Every 5 minutes during trading hours (10:00-12:00 KST)
+    - cron: '30 3 * * 1-5'     # 12:30 KST - After market close
+    - cron: '0 6 * * 1-5'      # 15:00 KST - Afternoon check
     
   workflow_dispatch:
     inputs:
       force_collection:
-        description: '강제 수집 (거래시간 무시)'
+        description: 'Force collection (ignore trading hours)'
         required: false
         default: false
         type: boolean
       debug_mode:
-        description: '디버그 모드 (상세 로그)'
+        description: 'Enable debug logging'
         required: false
         default: false
         type: boolean
       test_mode:
-        description: '테스트 모드 (실제 업데이트 안함)'
+        description: 'Test mode (no actual updates)'
         required: false
         default: false
         type: boolean
@@ -33,21 +30,20 @@ permissions:
   actions: read
 
 jobs:
-  collect-real-time-data:
+  collect-data:
     runs-on: ubuntu-latest
     
     steps:
-    - name: 저장소 체크아웃
+    - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Python 환경 설정
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
         
-    - name: 의존성 설치
+    - name: Install dependencies
       run: |
-        echo "📦 필수 패키지 설치..."
         python -m pip install --upgrade pip
         pip install requests==2.31.0
         pip install gspread==5.12.0
@@ -56,12 +52,10 @@ jobs:
         pip install beautifulsoup4==4.12.2
         pip install lxml==4.9.3
         pip install pandas==2.1.3
-        echo "✅ 패키지 설치 완료"
         
-    - name: 시장 상태 및 거래시간 확인
+    - name: Check market status
       id: market_check
       run: |
-        # 현재 시간 (KST)
         CURRENT_HOUR=$(TZ=Asia/Seoul date +%H)
         CURRENT_MINUTE=$(TZ=Asia/Seoul date +%M)
         CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
@@ -72,14 +66,12 @@ jobs:
         echo "current_hour=${CURRENT_HOUR}" >> $GITHUB_OUTPUT
         echo "current_date=${CURRENT_DATE}" >> $GITHUB_OUTPUT
         
-        # 평일 여부
         IS_WEEKDAY="false"
         if [ "${CURRENT_DAY}" -le 5 ]; then
           IS_WEEKDAY="true"
         fi
         echo "is_weekday=${IS_WEEKDAY}" >> $GITHUB_OUTPUT
         
-        # 거래시간 분석
         IS_TRADING_HOURS="false"
         MARKET_PHASE="closed"
         
@@ -99,196 +91,29 @@ jobs:
         echo "is_trading_hours=${IS_TRADING_HOURS}" >> $GITHUB_OUTPUT
         echo "market_phase=${MARKET_PHASE}" >> $GITHUB_OUTPUT
         
-        echo "🕐 현재 시간: ${CURRENT_TIME} KST"
-        echo "📅 날짜: ${CURRENT_DATE}"
-        echo "📊 시장 상태: ${MARKET_PHASE}"
-        echo "💹 거래시간 여부: ${IS_TRADING_HOURS}"
-        echo "📈 KRX 거래시간: 10:00-12:00 (평일)"
+        echo "Current time: ${CURRENT_TIME} KST"
+        echo "Date: ${CURRENT_DATE}"
+        echo "Market phase: ${MARKET_PHASE}"
+        echo "Trading hours: ${IS_TRADING_HOURS}"
 
-    - name: 기존 Python 스크립트 개선
-      run: |
-        echo "📝 기존 Python 스크립트 개선 중..."
-        
-        # 기존 KAU_price_collector.py를 개선된 버전으로 수정
-        cp KAU_price_collector.py improved_krx_collector.py
-        
-        # 디버그 모드와 테스트 모드 지원 추가
-        sed -i '1i#!/usr/bin/env python3' improved_krx_collector.py
-        sed -i '2i# 개선된 KRX ETS 실시간 데이터 수집기 (GitHub Actions 버전)' improved_krx_collector.py
-        sed -i '3i\' improved_krx_collector.py
-        
-        # 환경변수 읽기 코드 추가
-        cat > env_config.py << 'EOF'
-import os
-import logging
-
-DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
-TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
-
-log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
-logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
-EOF
-        
-        echo "✅ 스크립트 준비 완료"
-
-    - name: 샘플 데이터 업데이트 스크립트 생성
-      run: |
-        echo "📝 간단한 수집 스크립트 생성..."
-        
-        cat > simple_collector.py << 'SIMPLE_EOF'
-#!/usr/bin/env python3
-import os
-import sys
-import json
-import logging
-from datetime import datetime
-import gspread
-
-# 환경변수 읽기
-DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
-TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'
-
-log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
-logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-def get_sample_data():
-    """실제 시세를 반영한 샘플 데이터"""
-    today = datetime.now().strftime('%Y-%m-%d')
-    current_time = datetime.now().strftime('%H:%M:%S')
-    
-    return [
-        {
-            'date': today,
-            'symbol': 'KAU24',
-            'current_price': 8860,
-            'change': -20,
-            'change_rate': -0.23,
-            'open_price': 8880,
-            'high_price': 8880,
-            'low_price': 8850,
-            'volume': 58666,
-            'trading_value': 520171440,
-            'weighted_avg': 8867,
-            'collection_time': current_time,
-            'data_source': 'github_actions_sample'
-        },
-        {
-            'date': today,
-            'symbol': 'KAU25',
-            'current_price': 8650,
-            'change': 0,
-            'change_rate': 0.00,
-            'open_price': 0,
-            'high_price': 0,
-            'low_price': 0,
-            'volume': 0,
-            'trading_value': 0,
-            'weighted_avg': 0,
-            'collection_time': current_time,
-            'data_source': 'github_actions_sample'
-        }
-    ]
-
-def update_sheets(data):
-    """Google Sheets 업데이트"""
-    try:
-        creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
-        sheet_id = os.getenv('KAU_SHEET_ID')
-        
-        if not creds_json or not sheet_id:
-            raise ValueError("환경변수 누락")
-        
-        if TEST_MODE:
-            logger.info("테스트 모드: 실제 업데이트 건너뜀")
-            return True
-        
-        creds_dict = json.loads(creds_json)
-        gc = gspread.service_account_from_dict(creds_dict)
-        spreadsheet = gc.open_by_key(sheet_id)
-        
-        try:
-            worksheet = spreadsheet.worksheet('ets.KRX')
-        except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title='ets.KRX', rows=1000, cols=13)
-            headers = ['날짜', '종목명', '현재가', '대비', '등락률', '시가', '고가', '저가', '거래량', '거래대금', '가중평균', '수집시간', '데이터소스']
-            worksheet.update('A1:M1', [headers])
-        
-        # 오늘 데이터 삭제
-        current_date = data[0]['date']
-        all_values = worksheet.get_all_values()
-        rows_to_delete = [i for i, row in enumerate(all_values[1:], start=2) if len(row) > 0 and row[0] == current_date]
-        
-        for row_num in reversed(rows_to_delete):
-            worksheet.delete_rows(row_num)
-        
-        # 새 데이터 추가
-        new_rows = []
-        for item in data:
-            row = [item['date'], item['symbol'], item['current_price'], item['change'], item['change_rate'], 
-                   item['open_price'], item['high_price'], item['low_price'], item['volume'], 
-                   item['trading_value'], item['weighted_avg'], item['collection_time'], item['data_source']]
-            new_rows.append(row)
-        
-        worksheet.append_rows(new_rows)
-        logger.info(f"{len(new_rows)}개 행 업데이트 완료")
-        return True
-        
-    except Exception as e:
-        logger.error(f"업데이트 실패: {e}")
-        return False
-
-def main():
-    logger.info("=== 간단 KRX 데이터 수집 시작 ===")
-    logger.info(f"디버그 모드: {DEBUG_MODE}")
-    logger.info(f"테스트 모드: {TEST_MODE}")
-    
-    data = get_sample_data()
-    success = update_sheets(data)
-    
-    if success or TEST_MODE:
-        total_volume = sum(item['volume'] for item in data)
-        active_count = len([item for item in data if item['volume'] > 0])
-        
-        print(f"✅ 데이터 수집 성공!")
-        print(f"📊 총 종목: {len(data)}개")
-        print(f"🔥 활성 종목: {active_count}개")
-        print(f"📈 총 거래량: {total_volume:,} 톤")
-        print(f"🕐 수집시간: {datetime.now().strftime('%H:%M:%S')} KST")
-        logger.info("✅ 수집 완료")
-    else:
-        logger.error("❌ 수집 실패")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-SIMPLE_EOF
-        
-        chmod +x simple_collector.py
-        echo "✅ 간단 수집 스크립트 생성 완료"
-
-    - name: 환경변수 검증
+    - name: Verify environment variables
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
       run: |
-        echo "🔍 환경변수 검증..."
-        
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
-          echo "❌ GOOGLE_SHEETS_CREDS 누락"
+          echo "ERROR: GOOGLE_SHEETS_CREDS not found"
           exit 1
-        else
-          echo "✅ GOOGLE_SHEETS_CREDS 확인 (${#GOOGLE_SHEETS_CREDS} chars)"
         fi
         
         if [ -z "$KAU_SHEET_ID" ]; then
-          echo "❌ KAU_SHEET_ID 누락"
+          echo "ERROR: KAU_SHEET_ID not found"
           exit 1
-        else
-          echo "✅ KAU_SHEET_ID: $KAU_SHEET_ID"
         fi
+        
+        echo "Environment variables verified"
 
-    - name: 데이터 수집 실행
+    - name: Check trading hours and execute
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
@@ -296,117 +121,91 @@ SIMPLE_EOF
         DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
         TEST_MODE: ${{ github.event.inputs.test_mode }}
       run: |
-        echo "🚀 KRX 데이터 수집 시작..."
-        echo "📊 시장 단계: ${{ steps.market_check.outputs.market_phase }}"
-        echo "⏰ 현재 시간: ${{ steps.market_check.outputs.current_time }} KST"
-        echo "💹 거래시간: ${{ steps.market_check.outputs.is_trading_hours }}"
-        echo "🔧 디버그 모드: ${{ github.event.inputs.debug_mode }}"
-        echo "🧪 테스트 모드: ${{ github.event.inputs.test_mode }}"
+        echo "Market phase: ${{ steps.market_check.outputs.market_phase }}"
+        echo "Current time: ${{ steps.market_check.outputs.current_time }} KST"
+        echo "Trading hours: ${{ steps.market_check.outputs.is_trading_hours }}"
+        echo "Debug mode: ${{ github.event.inputs.debug_mode }}"
+        echo "Test mode: ${{ github.event.inputs.test_mode }}"
         
-        # 주말 체크
+        # Skip on weekends
         if [ "${{ steps.market_check.outputs.is_weekday }}" = "false" ]; then
-          echo "📅 주말이므로 수집 건너뜀"
+          echo "Skipping: Weekend"
           exit 0
         fi
         
-        # 거래시간 체크 (강제 수집이 아닌 경우)
+        # Check trading hours unless forced
         if [ "${{ github.event.inputs.force_collection }}" != "true" ]; then
           case "${{ steps.market_check.outputs.market_phase }}" in
             "closed")
-              echo "🔒 시장 마감 - 수집 건너뜀"
+              echo "Skipping: Market closed"
               exit 0
               ;;
             "trading"|"just_closed"|"post_trading")
-              echo "📈 수집 진행..."
+              echo "Proceeding: Active trading period"
               ;;
             *)
-              echo "⏰ 거래시간 외 - 제한적 수집"
+              echo "Proceeding: Limited collection"
               ;;
           esac
         else
-          echo "🔧 강제 수집 모드"
+          echo "Force collection mode enabled"
         fi
         
-        # 기존 스크립트 시도 후 실패하면 간단 버전 사용
-        echo "1️⃣ 기존 스크립트 시도..."
-        if [ -f "KAU_price_collector.py" ]; then
-          python KAU_price_collector.py || echo "기존 스크립트 실패"
-        fi
-        
-        echo "2️⃣ 간단 버전 실행..."
-        python simple_collector.py
+        # Execute the Python script
+        echo "Starting KRX data collection..."
+        python KAU_price_collector.py
 
-    - name: 수집 결과 분석
+    - name: Run analysis script
       if: always()
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
         TEST_MODE: ${{ github.event.inputs.test_mode }}
       run: |
-        echo "📊 수집 결과 분석 중..."
-        
         if [ "$TEST_MODE" = "true" ]; then
-          echo "🧪 테스트 모드로 실행됨 - 실제 데이터 업데이트 없음"
+          echo "Test mode: Skipping analysis"
           exit 0
         fi
         
-        # Python으로 간단한 분석
-        python3 -c "
-import gspread
-import json
-import os
-from datetime import datetime
+        echo "Running analysis script..."
+        if [ -f "analyze_results.py" ]; then
+          python analyze_results.py
+        else
+          echo "Analysis script not found, skipping detailed analysis"
+        fi
 
-try:
-    creds = json.loads(os.environ['GOOGLE_SHEETS_CREDS'])
-    gc = gspread.service_account_from_dict(creds)
-    sheet = gc.open_by_key(os.environ['KAU_SHEET_ID']).worksheet('ets.KRX')
-    
-    today = datetime.now().strftime('%Y-%m-%d')
-    all_data = sheet.get_all_records()
-    today_data = [r for r in all_data if r.get('날짜') == today]
-    
-    if today_data:
-        print(f'📈 오늘({today}) 수집 결과: {len(today_data)}개 종목')
-        active = [r for r in today_data if r.get('거래량', 0) > 0]
-        print(f'🔥 활성 거래: {len(active)}개')
-        if today_data:
-            print(f'⏰ 최종 수집: {today_data[-1].get(\"수집시간\", \"Unknown\")}')
-            print(f'💾 데이터 소스: {today_data[-1].get(\"데이터소스\", \"unknown\")}')
-    else:
-        print(f'⚠️ 오늘({today}) 데이터 없음')
-except Exception as e:
-    print(f'❌ 분석 실패: {e}')
-        "
-
-    - name: 실행 결과 요약
+    - name: Generate summary
       if: always()
       run: |
-        echo "## 🚀 KRX ETS 수집 결과 (YAML 안전 버전)" >> $GITHUB_STEP_SUMMARY
+        echo "## KRX ETS Data Collection Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**실행 시간**: ${{ steps.market_check.outputs.current_time }} KST" >> $GITHUB_STEP_SUMMARY
-        echo "**날짜**: ${{ steps.market_check.outputs.current_date }}" >> $GITHUB_STEP_SUMMARY
-        echo "**시장 상태**: ${{ steps.market_check.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
-        echo "**거래시간**: ${{ steps.market_check.outputs.is_trading_hours }}" >> $GITHUB_STEP_SUMMARY
-        echo "**디버그 모드**: ${{ github.event.inputs.debug_mode }}" >> $GITHUB_STEP_SUMMARY
-        echo "**테스트 모드**: ${{ github.event.inputs.test_mode }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Execution Time**: ${{ steps.market_check.outputs.current_time }} KST" >> $GITHUB_STEP_SUMMARY
+        echo "**Date**: ${{ steps.market_check.outputs.current_date }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Market Phase**: ${{ steps.market_check.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Trading Hours**: ${{ steps.market_check.outputs.is_trading_hours }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Debug Mode**: ${{ github.event.inputs.debug_mode }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Test Mode**: ${{ github.event.inputs.test_mode }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         if [ $? -eq 0 ]; then
-          echo "**결과**: ✅ 성공" >> $GITHUB_STEP_SUMMARY
+          echo "**Status**: Success" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔧 특징" >> $GITHUB_STEP_SUMMARY
-          echo "- **YAML 안전**: HERE 문서 최소화로 문법 오류 제거" >> $GITHUB_STEP_SUMMARY
-          echo "- **이중 안전망**: 기존 스크립트 + 간단 백업 스크립트" >> $GITHUB_STEP_SUMMARY
-          echo "- **실제 시세 반영**: KAU24 현재 시세 8,860원 반영" >> $GITHUB_STEP_SUMMARY
-          echo "- **테스트 모드**: 안전한 테스트 환경" >> $GITHUB_STEP_SUMMARY
-          echo "- **수집 주기**: 5분마다 실시간 수집" >> $GITHUB_STEP_SUMMARY
+          echo "### Trading Schedule" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trading Hours**: 10:00-12:00 KST (Weekdays)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Collection Frequency**: Every 5 minutes during trading" >> $GITHUB_STEP_SUMMARY
+          echo "- **Post-Market**: 12:30 KST" >> $GITHUB_STEP_SUMMARY
+          echo "- **Afternoon Check**: 15:00 KST" >> $GITHUB_STEP_SUMMARY
         else
-          echo "**결과**: ❌ 실패" >> $GITHUB_STEP_SUMMARY
+          echo "**Status**: Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Troubleshooting" >> $GITHUB_STEP_SUMMARY
+          echo "- Check KRX website accessibility" >> $GITHUB_STEP_SUMMARY
+          echo "- Verify Google Sheets API credentials" >> $GITHUB_STEP_SUMMARY
+          echo "- Run with debug mode for detailed logs" >> $GITHUB_STEP_SUMMARY
         fi
         
         if [ $? -eq 0 ]; then
-          echo "::notice::✅ YAML 안전 버전 KRX 데이터 수집 성공!"
+          echo "::notice::KRX data collection completed successfully"
         else
-          echo "::warning::❌ KRX 데이터 수집 실패"
+          echo "::warning::KRX data collection failed"
         fi
