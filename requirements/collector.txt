@@ -1,0 +1,18 @@
+# 기본 패키지 포함
+-r base.txt
+
+# 웹 스크래핑 (무거운 패키지들)
+playwright==1.40.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# OCR 백업 시스템 (매우 무거움)
+easyocr==1.7.0
+opencv-python-headless==4.8.1.78
+Pillow==10.1.0
+numpy==1.24.4
+
+# 추가 유틸리티
+python-dotenv==1.0.0
+setuptools==69.0.3
+wheel==0.42.0
