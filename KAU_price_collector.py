@@ -106,12 +106,12 @@ class PlaywrightKRXCollector:
                 'max_retries': 3, 'timeout': 45000, 'wait_timeout': 30000, 'high_accuracy': False, 'headless': True
             }
 
-    async def initialize_browser(self):
-        """브라우저 초기화"""
+async def initialize_browser(self):
+        """브라우저 초기화 (안정성 강화)"""
         try:
             self.playwright = await async_playwright().start()
             
-            # 브라우저 설정
+            # 브라우저 설정 (안정성 최우선)
             browser_config = {
                 'headless': self.trading_config['headless'],
                 'args': [
@@ -122,19 +122,43 @@ class PlaywrightKRXCollector:
                     '--disable-extensions',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding'
+                    '--disable-renderer-backgrounding',
+                    '--disable-features=TranslateUI',
+                    '--disable-background-networking',
+                    '--disable-sync',
+                    '--ignore-certificate-errors',
+                    '--ignore-ssl-errors',
+                    '--allow-running-insecure-content'
                 ]
             }
             
-            self.browser = await self.playwright.chromium.launch(**browser_config)
+            # 브라우저 실행 시도 (여러 방법)
+            try:
+                self.browser = await self.playwright.chromium.launch(**browser_config)
+                logger.info("✅ Chromium 브라우저 실행 성공")
+            except Exception as e:
+                logger.warning(f"Chromium 실행 실패, 기본 설정으로 재시도: {e}")
+                # 최소 설정으로 재시도
+                minimal_config = {
+                    'headless': True,
+                    'args': ['--no-sandbox', '--disable-dev-shm-usage']
+                }
+                self.browser = await self.playwright.chromium.launch(**minimal_config)
+                logger.info("✅ 최소 설정으로 브라우저 실행 성공")
             
             # 컨텍스트 설정 (한국 환경)
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                locale='ko-KR',
-                timezone_id='Asia/Seoul',
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
+            context_config = {
+                'viewport': {'width': 1920, 'height': 1080},
+                'locale': 'ko-KR',
+                'timezone_id': 'Asia/Seoul',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+            
+            try:
+                self.context = await self.browser.new_context(**context_config)
+            except Exception as e:
+                logger.warning(f"고급 컨텍스트 설정 실패, 기본 설정 사용: {e}")
+                self.context = await self.browser.new_context()
             
             # 페이지 생성
             self.page = await self.context.new_page()
@@ -147,6 +171,10 @@ class PlaywrightKRXCollector:
             
         except Exception as e:
             logger.error(f"❌ 브라우저 초기화 실패: {e}")
+            logger.error("🔧 해결 방법:")
+            logger.error("   1. GitHub Actions에서 ubuntu-22.04 사용")
+            logger.error("   2. Playwright 브라우저 수동 재설치")
+            logger.error("   3. 의존성 패키지 확인")
             return False
 
     async def _setup_network_monitoring(self):
