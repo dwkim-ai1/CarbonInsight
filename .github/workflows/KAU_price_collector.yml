@@ -1,7 +1,7 @@
 # .github/workflows/KAU_price_collector.yml
 # 모든 Deprecated 오류 수정 + 안정성 강화 버전
 
-name: KRX ETS Data Collector (Fixed)
+name: KRX ETS Data Collector
 
 on:
   schedule:
