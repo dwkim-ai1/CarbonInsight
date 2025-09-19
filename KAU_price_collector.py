@@ -127,7 +127,7 @@ class RealKRXCollector:
             logger.error("🚨 예상치 못한 오류로 인한 수집 실패")
             return []  # 빈 리스트 반환으로 명확한 실패 표시
 
-def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
+    def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
         """정확한 KRX 테이블 구조 기반 HTML 파싱 - 모든 행 검사"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
