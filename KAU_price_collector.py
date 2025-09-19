@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-표 구조 문제 해결된 KRX ETS 데이터 수집기
+샘플 데이터 제거 완료 - 순수 실패 처리 KRX ETS 데이터 수집기
 1. Google Sheets 컬럼 구조 정확히 정렬
 2. 헤더-데이터 완벽 매핑
-3. 실시간 데이터 우선, 샘플 데이터는 최후 수단
+3. 실제 데이터만 수집, 실패시 명확한 실패 처리
 4. 상세한 디버깅 및 검증 시스템
 """
 
@@ -83,7 +83,7 @@ class RealKRXCollector:
             }
 
     def get_real_krx_data(self) -> List[Dict]:
-        """개선된 실제 KRX ETS 데이터 수집"""
+        """개선된 실제 KRX ETS 데이터 수집 - 실패시 빈 리스트 반환"""
         try:
             config = self.trading_config
             logger.info("=== 실제 KRX ETS 데이터 수집 시작 ===")
@@ -521,7 +521,7 @@ class EnhancedSheetsManager:
 
 
 def main():
-    """개선된 메인 실행 함수"""
+    """개선된 메인 실행 함수 - 실패시 명확한 실패 처리"""
     try:
         logger.info("=== 개선된 KRX ETS 실시간 데이터 수집 시작 ===")
         
@@ -559,23 +559,6 @@ def main():
             for i, item in enumerate(real_data):
                 logger.info(f"종목 {i+1}: {item['symbol']} - {item['current_price']:,}원 "
                           f"(거래량: {item['volume']:,}톤, 소스: {item.get('data_source', 'unknown')})")
-        else:
-            # 실제 데이터 수집 실패시 명확하게 실패 처리
-            logger.error("❌ KRX 데이터 수집 완전 실패")
-            logger.error("🔍 수집된 데이터: 0개")
-            logger.error("📊 분석 결과:")
-            logger.error("   • 테이블 발견: 성공")
-            logger.error("   • 데이터 행 파싱: 실패 (0개 종목)")
-            logger.error("   • 재시도 횟수: 3회 모두 실패")
-            
-            print("❌ KRX 데이터 수집 실패!")
-            print("🔍 원인 분석:")
-            print("   • 현재 거래시간이 아닐 수 있습니다")
-            print("   • KRX 웹사이트 구조가 변경되었을 수 있습니다") 
-            print("   • 네트워크 연결에 문제가 있을 수 있습니다")
-            print("📞 문제 지속시 GitHub Issues에 신고하세요")
-            
-            sys.exit(1)  # 명확한 실패로 종료
             
             if test_mode:
                 logger.info("테스트 모드: Google Sheets 업데이트 건너뜀")
@@ -656,14 +639,26 @@ def main():
                 
             else:
                 logger.error("❌ Google Sheets 업데이트 실패")
+                print("❌ Google Sheets 업데이트 실패")
                 sys.exit(1)
                 
         else:
-            # 이 블록은 실행되지 않아야 함 (위에서 이미 sys.exit(1) 호출)
-            logger.error("❌ 예상치 못한 데이터 없음 상태")
-            print("❌ KRX에서 데이터를 가져올 수 없습니다")
-            print("🔍 시스템 오류 또는 예상치 못한 상황입니다")
-            sys.exit(1)
+            # 실제 데이터 수집 실패시 명확하게 실패 처리
+            logger.error("❌ KRX 데이터 수집 완전 실패")
+            logger.error("🔍 수집된 데이터: 0개")
+            logger.error("📊 분석 결과:")
+            logger.error("   • 테이블 발견: 성공")
+            logger.error("   • 데이터 행 파싱: 실패 (0개 종목)")
+            logger.error("   • 재시도 횟수: 3회 모두 실패")
+            
+            print("❌ KRX 데이터 수집 실패!")
+            print("🔍 원인 분석:")
+            print("   • 현재 거래시간이 아닐 수 있습니다")
+            print("   • KRX 웹사이트 구조가 변경되었을 수 있습니다") 
+            print("   • 네트워크 연결에 문제가 있을 수 있습니다")
+            print("📞 문제 지속시 GitHub Issues에 신고하세요")
+            
+            sys.exit(1)  # 명확한 실패로 종료
             
     except Exception as e:
         logger.error(f"❌ 실행 중 오류: {e}")
