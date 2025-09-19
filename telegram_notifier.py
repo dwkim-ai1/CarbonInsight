@@ -339,6 +339,7 @@ def main():
         sheet_id = os.getenv('KAU_SHEET_ID')
         collection_status = os.getenv('COLLECTION_STATUS', '')
         collection_message = os.getenv('COLLECTION_MESSAGE', '')
+        force_telegram = os.getenv('FORCE_TELEGRAM', 'false').lower() == 'true'
         
         if not telegram_bot_token or not telegram_chat_id:
             logger.error("텔레그램 인증 정보가 없습니다")
@@ -350,6 +351,7 @@ def main():
         
         logger.info(f"수집 상태: {collection_status}")
         logger.info(f"수집 메시지: {collection_message}")
+        logger.info(f"강제 텔레그램 전송: {force_telegram}")
         
         # 텔레그램 알림 시스템 초기화
         telegram = TelegramNotifier(telegram_bot_token, telegram_chat_id)
@@ -369,12 +371,16 @@ def main():
         should_alert = (
             analysis.get('status') in ['FAILED', 'ERROR', 'NO_DATA'] or  # 심각한 오류
             analysis.get('failed_collections', 0) > 0 or  # 부분 실패
-            collection_status == 'failed'  # GitHub Action 실패
+            collection_status == 'failed' or  # GitHub Action 실패
+            force_telegram  # 강제 전송 플래그
         )
         
         # 메시지 생성
         if should_alert:
-            logger.info("⚠️ 알림 조건 충족 - 상세 요약 전송")
+            if force_telegram:
+                logger.info("🚀 강제 텔레그램 전송 요청 - 요약 전송")
+            else:
+                logger.info("⚠️ 알림 조건 충족 - 상세 요약 전송")
             message = MessageFormatter.format_daily_summary(analysis, trends, collection_status)
         else:
             # 성공시에도 간단한 요약 전송 (15시에만)
