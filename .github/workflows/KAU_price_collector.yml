@@ -1,36 +1,23 @@
 # .github/workflows/KAU_price_collector.yml
-# 모든 Deprecated 오류 수정 + 안정성 강화 버전
+# Playwright 기반 + OCR 백업 + 최적화된 KRX 데이터 수집 시스템
 
-name: KRX ETS Data Collector
+name: KRX ETS Data Collector (Playwright)
 
 on:
   schedule:
-    # KST 09:00-12:00 (10분 간격) = UTC 00:00-03:00
-    # 한국 배출권 거래시간 최적화 (총 19회 실행/일)
+    # KST 거래시간 최적화 (Playwright 기반 안정성 향상)
     
-    # 09:00-09:50 (주문접수 - 단일가 매매)
+    # 09:00-09:50 (주문접수)
     - cron: '0 0 * * 1-5'     # KST 09:00
-    - cron: '10 0 * * 1-5'    # KST 09:10
-    - cron: '20 0 * * 1-5'    # KST 09:20
     - cron: '30 0 * * 1-5'    # KST 09:30
-    - cron: '40 0 * * 1-5'    # KST 09:40
-    - cron: '50 0 * * 1-5'    # KST 09:50
     
     # 10:00-10:50 (시가 체결 + 실시간 거래)
     - cron: '0 1 * * 1-5'     # KST 10:00 ⭐ 시가 체결
-    - cron: '10 1 * * 1-5'    # KST 10:10
-    - cron: '20 1 * * 1-5'    # KST 10:20
     - cron: '30 1 * * 1-5'    # KST 10:30
-    - cron: '40 1 * * 1-5'    # KST 10:40
-    - cron: '50 1 * * 1-5'    # KST 10:50
     
     # 11:00-11:50 (실시간 거래 + 종가 준비)
     - cron: '0 2 * * 1-5'     # KST 11:00
-    - cron: '10 2 * * 1-5'    # KST 11:10
-    - cron: '20 2 * * 1-5'    # KST 11:20
     - cron: '30 2 * * 1-5'    # KST 11:30 ⭐ 종가 준비
-    - cron: '40 2 * * 1-5'    # KST 11:40
-    - cron: '50 2 * * 1-5'    # KST 11:50
     
     # 12:00 (종가 체결)
     - cron: '0 3 * * 1-5'     # KST 12:00 ⭐⭐ 종가 체결
@@ -46,7 +33,7 @@ on:
         default: false
         type: boolean
       debug_mode:
-        description: '디버그 모드 활성화'
+        description: '디버그 모드 (브라우저 시각적 모드)'
         required: false
         default: false
         type: boolean
@@ -60,20 +47,23 @@ on:
         required: false
         default: false
         type: boolean
+      use_ocr_backup:
+        description: 'OCR 백업 시스템 강제 사용'
+        required: false
+        default: false
+        type: boolean
 
-# 필요한 최소 권한만 부여 (보안 강화)
+# 필요한 최소 권한만 부여
 permissions:
   contents: read
   actions: write
 
 env:
-  # 전역 시간대 설정
   TZ: Asia/Seoul
-  # Python 버전 통일
   PYTHON_VERSION: '3.9'
 
 jobs:
-  # Job 1: 거래 조건 확인 (초경량)
+  # Job 1: 거래 조건 확인
   check-trading-conditions:
     runs-on: ubuntu-latest
     outputs:
@@ -91,7 +81,6 @@ jobs:
       run: |
         echo "=== 한국 배출권 거래시간 분석 ($(date '+%Y-%m-%d %H:%M:%S') KST) ==="
         
-        # 현재 시간 정보
         CURRENT_HOUR=$(date +%H)
         CURRENT_MINUTE=$(date +%M)
         CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
@@ -101,7 +90,6 @@ jobs:
         echo "📅 현재: ${CURRENT_KST} KST"
         echo "📊 요일: ${CURRENT_DAY} (1=월, 5=금)"
         
-        # 출력 변수 설정
         echo "current_time=${CURRENT_TIME}" >> $GITHUB_OUTPUT
         echo "current_kst=${CURRENT_KST}" >> $GITHUB_OUTPUT
         
@@ -125,7 +113,7 @@ jobs:
               MARKET_PHASE="pre_trading"
               TRADING_PHASE="order_acceptance"
               EXECUTION_PRIORITY="medium"
-              echo "📝 주문접수 시간 (단일가 매매 준비)"
+              echo "📝 주문접수 시간 (Playwright 동적 로딩 대응)"
               ;;
             10)
               SHOULD_RUN="true"
@@ -133,11 +121,11 @@ jobs:
               if [ "${CURRENT_MINUTE}" -eq 0 ]; then
                 TRADING_PHASE="opening_price_decision"
                 EXECUTION_PRIORITY="critical"
-                echo "🔥 시가 체결 시점 - 최우선"
+                echo "🔥 시가 체결 시점 - Playwright Visual 모드"
               else
                 TRADING_PHASE="real_time_trading"
                 EXECUTION_PRIORITY="high"
-                echo "⚡ 실시간 복수가격 매매"
+                echo "⚡ 실시간 거래 - Playwright 고속 모드"
               fi
               ;;
             11)
@@ -146,11 +134,11 @@ jobs:
               if [ "${CURRENT_MINUTE}" -lt 30 ]; then
                 TRADING_PHASE="real_time_trading"
                 EXECUTION_PRIORITY="high"
-                echo "⚡ 실시간 복수가격 매매"
+                echo "⚡ 실시간 거래 - DOM + AJAX 멀티 추출"
               else
                 TRADING_PHASE="closing_preparation"
                 EXECUTION_PRIORITY="high"
-                echo "📊 종가 준비 (단일가 매매)"
+                echo "📊 종가 준비 - OCR 백업 활성화"
               fi
               ;;
             12)
@@ -159,7 +147,7 @@ jobs:
                 MARKET_PHASE="market_close"
                 TRADING_PHASE="closing_price_decision"
                 EXECUTION_PRIORITY="critical"
-                echo "🏁 종가 체결 시점 - 최우선"
+                echo "🏁 종가 체결 시점 - 모든 방법 동원"
               else
                 MARKET_PHASE="post_trading"
                 TRADING_PHASE="market_closed"
@@ -188,10 +176,9 @@ jobs:
           MARKET_PHASE="manual_execution"
           TRADING_PHASE="manual"
           EXECUTION_PRIORITY="high"
-          echo "🔧 수동 실행 - 강제 수집"
+          echo "🔧 수동 실행 - Playwright 강제 수집"
         fi
         
-        # 출력 설정
         echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
         echo "market_phase=${MARKET_PHASE}" >> $GITHUB_OUTPUT
         echo "trading_phase=${TRADING_PHASE}" >> $GITHUB_OUTPUT
@@ -199,44 +186,81 @@ jobs:
         echo "execution_priority=${EXECUTION_PRIORITY}" >> $GITHUB_OUTPUT
         
         echo ""
-        echo "=== 실행 결정 ==="
+        echo "=== Playwright 실행 결정 ==="
         echo "✅ 실행: ${SHOULD_RUN}"
         echo "📈 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
         echo "🎯 우선도: ${EXECUTION_PRIORITY}"
-        echo "📱 일일요약: ${IS_DAILY_SUMMARY}"
 
-  # Job 2: 데이터 수집 (조건부 실행)
+  # Job 2: Playwright 기반 데이터 수집
   collect-krx-data:
     needs: check-trading-conditions
     runs-on: ubuntu-latest
     if: needs.check-trading-conditions.outputs.should_run == 'true'
     
-    # 타임아웃 설정 (최대 10분)
-    timeout-minutes: 10
+    timeout-minutes: 15  # Playwright + OCR을 위해 시간 연장
     
     outputs:
       collection_status: ${{ steps.collection.outputs.status }}
       collection_message: ${{ steps.collection.outputs.message }}
-      data_quality: ${{ steps.collection.outputs.data_quality }}
+      extraction_methods: ${{ steps.collection.outputs.extraction_methods }}
       
     steps:
     - name: 저장소 체크아웃
       uses: actions/checkout@v4
       
-    - name: Python 환경 설정 (최신 버전)
+    - name: Python 환경 설정 (Playwright 최적화)
       uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         cache: 'pip'
         cache-dependency-path: 'requirements.txt'
         
-    - name: 의존성 설치 (캐시 최적화)
+    - name: 시스템 의존성 설치 (OCR + Playwright)
       run: |
-        echo "⚡ Python ${{ env.PYTHON_VERSION }} 환경 설정"
+        echo "🔧 시스템 의존성 설치 중..."
+        
+        # OCR을 위한 시스템 패키지
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgl1-mesa-glx \
+          libglib2.0-0 \
+          libsm6 \
+          libxext6 \
+          libxrender-dev \
+          libgomp1 \
+          libglib2.0-0 \
+          libnss3-dev \
+          libgconf-2-4 \
+          libxss1 \
+          libappindicator1 \
+          fonts-liberation \
+          libappindicator3-1 \
+          libasound2 \
+          libdrm2 \
+          libgtk-3-0 \
+          libxcomposite1 \
+          libxdamage1 \
+          libxrandr2 \
+          libgbm1 \
+          libxss1 \
+          libasound2
+        
+        echo "✅ 시스템 의존성 설치 완료"
+        
+    - name: Python 패키지 설치 (캐시 최적화)
+      run: |
+        echo "⚡ Python ${{ env.PYTHON_VERSION }} 패키지 설치"
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        echo "✅ 패키지 설치 완료"
+        echo "✅ Python 패키지 설치 완료"
+        
+    - name: Playwright 브라우저 설치
+      run: |
+        echo "🌐 Playwright 브라우저 설치 중..."
+        python -m playwright install chromium
+        python -m playwright install-deps chromium
+        echo "✅ Playwright 브라우저 설치 완료"
         
     - name: 환경변수 검증 (보안 강화)
       env:
@@ -263,13 +287,12 @@ jobs:
         
         if [ $ERROR_COUNT -gt 0 ]; then
           echo "❌ 필수 환경변수 ${ERROR_COUNT}개 누락!"
-          echo "💡 GitHub Settings → Secrets and variables → Actions 확인"
           exit 1
         fi
         
         echo "✅ 모든 필수 환경변수 확인됨"
 
-    - name: KRX 데이터 수집 실행
+    - name: Playwright 기반 KRX 데이터 수집
       id: collection
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
@@ -280,38 +303,57 @@ jobs:
         CURRENT_KST: ${{ needs.check-trading-conditions.outputs.current_kst }}
         DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
         TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
+        USE_OCR_BACKUP: ${{ github.event.inputs.use_ocr_backup || 'false' }}
       run: |
-        echo "=== KRX 배출권 데이터 수집 시작 ==="
+        echo "=== Playwright 기반 KRX 배출권 데이터 수집 시작 ==="
+        echo "🌐 수집 방법: DOM + AJAX + OCR 백업"
         echo "📊 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
         echo "🎯 우선도: ${EXECUTION_PRIORITY}"
         echo "⏰ 시간: ${CURRENT_KST} KST"
         echo "🔧 디버그: ${DEBUG_MODE}"
         echo "🧪 테스트: ${TEST_MODE}"
+        echo "📷 OCR 강제: ${USE_OCR_BACKUP}"
         
         # 시작 시간 기록
         START_TIME=$(date +%s)
         
-        # 거래 단계별 환경변수 설정
+        # 거래 단계별 Playwright 설정
         case "${TRADING_PHASE}" in
           "opening_price_decision"|"closing_price_decision")
-            echo "🔥 중요 시점 - 고정밀 모드"
-            export HIGH_ACCURACY_MODE=true
+            echo "🔥 중요 시점 - Visual 모드 + 모든 추출 방법"
+            export PLAYWRIGHT_HEADLESS=false
             export MAX_RETRIES=5
+            export ENABLE_OCR_BACKUP=true
+            export ENABLE_SCREENSHOT=true
             ;;
           "real_time_trading")
-            echo "⚡ 실시간 거래 - 고속 모드"
-            export FAST_UPDATE_MODE=true
+            echo "⚡ 실시간 거래 - 고속 Headless 모드"
+            export PLAYWRIGHT_HEADLESS=true
             export MAX_RETRIES=3
+            export ENABLE_AJAX_MONITORING=true
+            ;;
+          "manual")
+            echo "🔧 수동 실행 - 전체 기능 활성화"
+            export PLAYWRIGHT_HEADLESS=$([[ "${DEBUG_MODE}" == "true" ]] && echo "false" || echo "true")
+            export MAX_RETRIES=5
+            export ENABLE_OCR_BACKUP=true
             ;;
           *)
             echo "📋 표준 모드"
+            export PLAYWRIGHT_HEADLESS=true
             export MAX_RETRIES=2
             ;;
         esac
         
-        # Python 스크립트 실행
-        echo "🚀 데이터 수집 스크립트 실행..."
+        # OCR 강제 사용 설정
+        if [ "${USE_OCR_BACKUP}" = "true" ]; then
+          export ENABLE_OCR_BACKUP=true
+          export PLAYWRIGHT_HEADLESS=false
+          echo "📷 OCR 백업 시스템 강제 활성화"
+        fi
+        
+        echo "🚀 Playwright 데이터 수집 스크립트 실행..."
         
         if python KAU_price_collector.py; then
           # 성공 처리
@@ -319,27 +361,28 @@ jobs:
           DURATION=$((END_TIME - START_TIME))
           
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "message=데이터 수집 성공 (${DURATION}초, ${TRADING_PHASE})" >> $GITHUB_OUTPUT
-          echo "data_quality=high" >> $GITHUB_OUTPUT
+          echo "message=Playwright 기반 데이터 수집 성공 (${DURATION}초)" >> $GITHUB_OUTPUT
+          echo "extraction_methods=playwright_multi" >> $GITHUB_OUTPUT
           
-          echo "✅ 데이터 수집 성공!"
+          echo "✅ Playwright 데이터 수집 성공!"
           echo "⏱️ 실행 시간: ${DURATION}초"
           
           # 거래 단계별 성공 메시지
           case "${TRADING_PHASE}" in
             "opening_price_decision")
-              echo "🎉 시가 데이터 수집 완료!"
-              echo "::notice::🔥 시가 체결 데이터 수집 성공"
+              echo "🎉 시가 데이터 Playwright 수집 완료!"
+              echo "::notice::🔥 시가 체결 - Playwright 멀티 추출 성공"
               ;;
             "closing_price_decision")
-              echo "🎉 종가 데이터 수집 완료!"
-              echo "::notice::🏁 종가 체결 데이터 수집 성공"
+              echo "🎉 종가 데이터 Playwright 수집 완료!"
+              echo "::notice::🏁 종가 체결 - Playwright + OCR 성공"
               ;;
             "real_time_trading")
-              echo "⚡ 실시간 거래 데이터 업데이트!"
+              echo "⚡ 실시간 Playwright 거래 데이터 업데이트!"
+              echo "::notice::⚡ 실시간 - Playwright DOM+AJAX 성공"
               ;;
             "analysis_time")
-              echo "📊 일일 요약 데이터 수집 완료!"
+              echo "📊 일일 요약 Playwright 데이터 수집 완료!"
               ;;
           esac
           
@@ -349,32 +392,32 @@ jobs:
           DURATION=$((END_TIME - START_TIME))
           
           echo "status=failed" >> $GITHUB_OUTPUT
-          echo "message=데이터 수집 실패 (${DURATION}초, ${TRADING_PHASE})" >> $GITHUB_OUTPUT
-          echo "data_quality=failed" >> $GITHUB_OUTPUT
+          echo "message=Playwright 데이터 수집 실패 (${DURATION}초)" >> $GITHUB_OUTPUT
+          echo "extraction_methods=failed" >> $GITHUB_OUTPUT
           
-          echo "❌ 데이터 수집 실패!"
+          echo "❌ Playwright 데이터 수집 실패!"
           echo "⏱️ 실행 시간: ${DURATION}초"
           
           # 중요 시점 실패는 심각하게 처리
           if [ "${EXECUTION_PRIORITY}" = "critical" ]; then
-            echo "🚨 CRITICAL: 중요 거래 시점 실패!"
-            echo "::error::🚨 ${TRADING_PHASE} 시점 데이터 수집 실패 - 즉시 확인 필요"
+            echo "🚨 CRITICAL: 중요 거래 시점 Playwright 실패!"
+            echo "::error::🚨 ${TRADING_PHASE} - Playwright 모든 방법 실패"
           else
-            echo "::warning::⚠️ ${TRADING_PHASE} 데이터 수집 실패"
+            echo "::warning::⚠️ ${TRADING_PHASE} Playwright 수집 실패"
           fi
           
           exit 1
         fi
 
-    - name: 실패 시 로그 업로드 (최신 버전)
+    - name: 스크린샷 및 로그 업로드 (실패시)
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: krx-failure-logs-${{ github.run_number }}
+        name: playwright-debug-${{ github.run_number }}
         path: |
+          screenshots/
           *.log
           /tmp/*.log
-          /var/log/*.log
         retention-days: 7
         if-no-files-found: ignore
 
@@ -390,7 +433,6 @@ jobs:
         needs.collect-krx-data.result == 'failure'
       )
     
-    # 타임아웃 설정
     timeout-minutes: 5
     
     steps:
@@ -411,7 +453,7 @@ jobs:
         pip install requests gspread google-auth pandas beautifulsoup4
         echo "✅ 알림 시스템 준비 완료"
         
-    - name: 거래시간 맞춤 텔레그램 알림
+    - name: Playwright 기반 텔레그램 알림
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
@@ -419,6 +461,7 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
         COLLECTION_STATUS: ${{ needs.collect-krx-data.outputs.collection_status || 'failed' }}
         COLLECTION_MESSAGE: ${{ needs.collect-krx-data.outputs.collection_message || 'No message' }}
+        EXTRACTION_METHODS: ${{ needs.collect-krx-data.outputs.extraction_methods || 'none' }}
         MARKET_PHASE: ${{ needs.check-trading-conditions.outputs.market_phase }}
         TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
         EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
@@ -426,7 +469,8 @@ jobs:
         FORCE_TELEGRAM: ${{ github.event.inputs.send_telegram || 'false' }}
         IS_DAILY_SUMMARY: ${{ needs.check-trading-conditions.outputs.is_daily_summary }}
       run: |
-        echo "=== 텔레그램 알림 시작 ==="
+        echo "=== Playwright 기반 텔레그램 알림 시작 ==="
+        echo "🌐 수집 방법: ${EXTRACTION_METHODS}"
         echo "📊 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
         echo "🎯 우선도: ${EXECUTION_PRIORITY}"
@@ -440,57 +484,38 @@ jobs:
           exit 0
         fi
         
-        # 거래 컨텍스트 정보 전달
-        export TRADING_CONTEXT="${TRADING_PHASE}|${EXECUTION_PRIORITY}|${CURRENT_KST}"
+        # Playwright 컨텍스트 정보 전달
+        export COLLECTION_CONTEXT="playwright|${EXTRACTION_METHODS}|${TRADING_PHASE}|${CURRENT_KST}"
         
-        echo "📤 텔레그램 알림 전송 중..."
+        echo "📤 Playwright 결과 텔레그램 알림 전송 중..."
         
         if python telegram_notifier.py; then
           echo "✅ 텔레그램 알림 전송 성공"
-          echo "::notice::📱 텔레그램 알림 전송 완료"
+          echo "::notice::📱 Playwright 기반 텔레그램 알림 완료"
         else
           echo "❌ 텔레그램 알림 전송 실패"
-          echo "::warning::📱 텔레그램 알림 전송 실패 - 봇 설정 확인 필요"
+          echo "::warning::📱 텔레그램 알림 실패 - 봇 설정 확인 필요"
         fi
 
-    - name: 워크플로우 실행 요약 생성
+    - name: Playwright 워크플로우 실행 요약
       if: always()
       run: |
-        echo "## 📊 KRX 배출권 거래시간 데이터 수집 결과" >> $GITHUB_STEP_SUMMARY
+        echo "## 🌐 Playwright 기반 KRX 배출권 데이터 수집 결과" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**🕐 실행 시간**: ${{ needs.check-trading-conditions.outputs.current_kst }} KST" >> $GITHUB_STEP_SUMMARY
         echo "**📈 시장 상태**: ${{ needs.check-trading-conditions.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
         echo "**⚡ 거래 단계**: ${{ needs.check-trading-conditions.outputs.trading_phase }}" >> $GITHUB_STEP_SUMMARY
         echo "**🎯 실행 우선도**: ${{ needs.check-trading-conditions.outputs.execution_priority }}" >> $GITHUB_STEP_SUMMARY
-        echo "**📊 수집 결과**: ${{ needs.collect-krx-data.outputs.collection_status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
-        echo "**🏆 데이터 품질**: ${{ needs.collect-krx-data.outputs.data_quality || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**🌐 수집 결과**: ${{ needs.collect-krx-data.outputs.collection_status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**🔧 추출 방법**: ${{ needs.collect-krx-data.outputs.extraction_methods || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # 거래시간 안내
-        echo "### 📈 한국 배출권 거래시간" >> $GITHUB_STEP_SUMMARY
-        echo "- **09:00-10:00**: 주문접수 (단일가 매매)" >> $GITHUB_STEP_SUMMARY
-        echo "- **10:00-11:30**: 실시간 복수가격 매매" >> $GITHUB_STEP_SUMMARY  
-        echo "- **11:30-12:00**: 단일가 매매 (종가 결정)" >> $GITHUB_STEP_SUMMARY
-        echo "- **15:00**: 일일 요약 및 텔레그램 알림" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # 다음 중요 시점
-        CURRENT_HOUR=$(date +%H)
-        echo "### ⏰ 다음 중요 시점" >> $GITHUB_STEP_SUMMARY
-        case "${CURRENT_HOUR}" in
-          09)
-            echo "- **10:00**: 시가 체결 (Critical)" >> $GITHUB_STEP_SUMMARY
-            ;;
-          10|11)
-            echo "- **12:00**: 종가 체결 (Critical)" >> $GITHUB_STEP_SUMMARY
-            ;;
-          12|13|14)
-            echo "- **15:00**: 일일 요약 (텔레그램 알림)" >> $GITHUB_STEP_SUMMARY
-            ;;
-          *)
-            echo "- **내일 09:00**: 다음 거래일 시작" >> $GITHUB_STEP_SUMMARY
-            ;;
-        esac
+        # Playwright 기능 안내
+        echo "### 🌐 Playwright 기반 다중 추출" >> $GITHUB_STEP_SUMMARY
+        echo "- **DOM 추출**: JavaScript 렌더링 후 실제 테이블 데이터" >> $GITHUB_STEP_SUMMARY
+        echo "- **AJAX 모니터링**: 네트워크 요청 실시간 캐치" >> $GITHUB_STEP_SUMMARY  
+        echo "- **OCR 백업**: 중요 시점 스크린샷 + 텍스트 인식" >> $GITHUB_STEP_SUMMARY
+        echo "- **HTML 파싱**: AJAX 응답 HTML 구조 분석" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
         # 실행 결과별 알림
@@ -500,21 +525,21 @@ jobs:
         
         if [ "${COLLECTION_STATUS}" = "success" ]; then
           if [ "${EXECUTION_PRIORITY}" = "critical" ]; then
-            echo "::notice::🔥 중요 시점 데이터 수집 성공!"
+            echo "::notice::🔥 중요 시점 Playwright 멀티 추출 성공!"
           else
-            echo "::notice::✅ 거래시간 데이터 수집 성공"
+            echo "::notice::✅ Playwright 기반 데이터 수집 성공"
           fi
         elif [ "${SHOULD_RUN}" = "false" ]; then
           echo "::notice::⏸️ 거래시간 외 - 실행 건너뜀"
         elif [ "${EXECUTION_PRIORITY}" = "critical" ]; then
-          echo "::error::🚨 중요 거래 시점 데이터 수집 실패 - 즉시 확인 필요!"
+          echo "::error::🚨 중요 시점 Playwright 수집 실패 - 즉시 확인 필요!"
         else
-          echo "::warning::⚠️ 데이터 수집 실패 - 확인 필요"
+          echo "::warning::⚠️ Playwright 데이터 수집 실패 - 확인 필요"
         fi
         
         # 추가 정보
         echo "### 🔧 문제 해결" >> $GITHUB_STEP_SUMMARY
-        echo "- **환경변수 확인**: Settings → Secrets and variables → Actions" >> $GITHUB_STEP_SUMMARY
-        echo "- **텔레그램 설정**: CARBON_TOKEN (봇), ESG_TESTER (채팅ID)" >> $GITHUB_STEP_SUMMARY
-        echo "- **수동 실행**: Actions → Run workflow" >> $GITHUB_STEP_SUMMARY
-        echo "- **로그 확인**: 실패 시 Artifacts에서 로그 다운로드" >> $GITHUB_STEP_SUMMARY
+        echo "- **Playwright 로그**: Actions에서 Debug 아티팩트 확인" >> $GITHUB_STEP_SUMMARY
+        echo "- **스크린샷**: 실패시 screenshots/ 폴더 확인" >> $GITHUB_STEP_SUMMARY
+        echo "- **OCR 백업**: 중요 시점 자동 활성화" >> $GITHUB_STEP_SUMMARY
+        echo "- **수동 테스트**: use_ocr_backup: true로 강제 테스트" >> $GITHUB_STEP_SUMMARY
