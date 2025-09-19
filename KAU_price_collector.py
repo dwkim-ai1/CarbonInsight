@@ -128,80 +128,122 @@ class RealKRXCollector:
             return []  # 빈 리스트 반환으로 명확한 실패 표시
 
     def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
-        """개선된 메인 페이지 HTML 파싱 (실제 구조 반영)"""
+        """정확한 KRX 테이블 구조 기반 HTML 파싱"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             result_list = []
             
-            # 더 정확한 테이블 선택자
+            # 🎯 KRX 배출권 테이블 정확한 선택자 (실제 HTML 구조 기반)
             table_selectors = [
-                'table[id*="gridtable"]',
-                'table[summary*="배출권"]',
-                'table[summary*="현재가"]',
-                'table'
+                'table[summary="배출권 현재가 정보 테이블입니다."]',  # 가장 정확한 선택자
+                'table[id*="gridtable"]',                           # 백업 선택자
+                'table[summary*="배출권"]',                           # 일반적 선택자  
+                'table'                                             # 최후 수단
             ]
             
             table = None
+            used_selector = None
+            
             for selector in table_selectors:
                 tables = soup.select(selector)
+                logger.debug(f"선택자 '{selector}': {len(tables)}개 테이블 발견")
+                
                 for t in tables:
-                    # 더 정확한 테이블 식별
                     summary = t.get('summary', '')
-                    table_text = t.get_text().lower()
+                    table_id = t.get('id', '')
                     
-                    if (any(keyword in summary for keyword in ['배출권', '현재가']) or 
-                        any(keyword in table_text for keyword in ['kau25', 'kcu25', '종목명', '현재가'])):
+                    # 🔍 KRX 배출권 테이블 정확한 식별
+                    if ('배출권' in summary and '현재가' in summary) or 'gridtable' in table_id:
                         table = t
-                        logger.info(f"✅ 데이터 테이블 발견: {selector}")
-                        logger.info(f"테이블 ID: {t.get('id', 'None')}")
-                        logger.info(f"테이블 요약: {summary}")
+                        used_selector = selector
+                        logger.info(f"✅ KRX 배출권 테이블 발견!")
+                        logger.info(f"   선택자: {selector}")
+                        logger.info(f"   테이블 ID: {table_id}")
+                        logger.info(f"   테이블 요약: {summary}")
                         break
+                        
                 if table:
                     break
             
             if not table:
-                logger.warning("❌ 데이터 테이블을 찾을 수 없습니다")
+                logger.error("❌ KRX 배출권 테이블을 찾을 수 없습니다")
                 return []
             
-            # 테이블 구조 분석
+            # 🏗️ 테이블 구조 정확한 분석 (thead/tbody 구조)
             thead = table.find('thead')
             tbody = table.find('tbody')
             
-            if thead:
-                headers = [th.get_text(strip=True) for th in thead.find_all(['th', 'td'])]
-                logger.info(f"테이블 헤더: {headers}")
+            logger.info(f"📋 테이블 구조 분석:")
+            logger.info(f"   thead 존재: {thead is not None}")
+            logger.info(f"   tbody 존재: {tbody is not None}")
             
-            # 데이터 행 추출
+            # 헤더 분석
+            if thead:
+                header_cells = thead.find_all(['th', 'td'])
+                headers = [cell.get_text(strip=True) for cell in header_cells]
+                logger.info(f"   헤더 ({len(headers)}개): {headers}")
+            
+            # 🎯 데이터 행 정확한 추출 (tbody 우선, 없으면 전체에서)
             if tbody:
-                data_rows = tbody.find_all('tr')
+                data_rows = tbody.find_all('tr', recursive=False)  # 직접 자식만
+                logger.info(f"📊 tbody에서 데이터 행 발견: {len(data_rows)}개")
             else:
                 all_rows = table.find_all('tr')
-                data_rows = all_rows[1:] if len(all_rows) > 1 else all_rows
+                data_rows = all_rows[1:] if len(all_rows) > 1 else []  # 헤더 제외
+                logger.info(f"📊 테이블 전체에서 데이터 행 발견: {len(data_rows)}개 (헤더 제외)")
             
-            logger.info(f"📊 발견된 데이터 행: {len(data_rows)}개")
-            
+            # 🔍 각 데이터 행 상세 분석 및 파싱
             for i, row in enumerate(data_rows):
                 try:
                     cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 8:  # 최소 8개 컬럼 필요
-                        parsed_item = self._parse_row_enhanced(cells, i)
-                        if parsed_item:
-                            result_list.append(parsed_item)
-                            logger.info(f"✅ 종목 파싱: {parsed_item['symbol']} - {parsed_item['current_price']:,.0f}원")
+                    logger.debug(f"행 {i+1}: {len(cells)}개 셀 발견")
+                    
+                    if len(cells) >= 8:  # KRX 테이블은 최소 9개 컬럼
+                        # 🎯 셀 내용 미리 확인
+                        cell_texts = [cell.get_text(strip=True) for cell in cells]
+                        logger.debug(f"행 {i+1} 내용: {cell_texts[:3]}...")  # 처음 3개만
+                        
+                        # 종목명이 있는지 확인 (첫 번째 셀)
+                        symbol_candidate = cell_texts[0] if cell_texts else ''
+                        if symbol_candidate and any(prefix in symbol_candidate for prefix in ['KAU', 'KCU', 'KOC', 'i-']):
+                            logger.info(f"🎯 유효 종목 발견: {symbol_candidate}")
+                            
+                            parsed_item = self._parse_row_enhanced(cells, i)
+                            if parsed_item:
+                                result_list.append(parsed_item)
+                                logger.info(f"✅ 종목 파싱 성공: {parsed_item['symbol']} - {parsed_item['current_price']:,}원")
+                            else:
+                                logger.warning(f"⚠️ 종목 파싱 실패: {symbol_candidate}")
+                        else:
+                            logger.debug(f"행 {i+1}: 종목명 패턴 불일치 ({symbol_candidate})")
                     else:
-                        logger.debug(f"행 {i}: 컬럼 수 부족 ({len(cells)}개)")
+                        logger.debug(f"행 {i+1}: 컬럼 수 부족 ({len(cells)}개 < 8개)")
                         
                 except Exception as e:
-                    logger.debug(f"행 {i} 파싱 실패: {e}")
+                    logger.warning(f"행 {i+1} 파싱 중 오류: {e}")
                     continue
             
-            logger.info(f"🎯 메인 페이지 파싱 완료: {len(result_list)}개 종목")
+            logger.info(f"🎯 최종 파싱 결과: {len(result_list)}개 종목 성공")
+            
+            # 🔍 파싱 실패시 추가 디버깅 정보
+            if len(result_list) == 0 and len(data_rows) > 0:
+                logger.error("🚨 데이터 행은 있지만 파싱된 종목이 없음!")
+                logger.error(f"   사용된 선택자: {used_selector}")
+                logger.error(f"   테이블 ID: {table.get('id', 'None')}")
+                logger.error(f"   발견된 행 수: {len(data_rows)}")
+                
+                # 첫 번째 행 상세 분석
+                if data_rows:
+                    first_row = data_rows[0]
+                    first_cells = first_row.find_all(['td', 'th'])
+                    first_texts = [cell.get_text(strip=True) for cell in first_cells]
+                    logger.error(f"   첫 번째 행 ({len(first_cells)}개 셀): {first_texts}")
+            
             return result_list
             
         except Exception as e:
-            logger.error(f"HTML 파싱 오류: {e}")
+            logger.error(f"HTML 파싱 중 오류: {e}")
             return []
-
     def _parse_row_enhanced(self, cells, row_index: int) -> Optional[Dict]:
         """개선된 테이블 행 파싱"""
         try:
