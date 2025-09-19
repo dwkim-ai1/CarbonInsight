@@ -22,14 +22,22 @@ from pathlib import Path
 # Playwright 및 OCR 관련
 try:
     from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError as e:
+    logging.error(f"Playwright 패키지 누락: {e}")
+    logging.error("설치 명령: pip install playwright && python -m playwright install chromium")
+    PLAYWRIGHT_AVAILABLE = False
+
+try:
     import easyocr
-    from PIL import Image, ImageEnhance
     import cv2
     import numpy as np
+    from PIL import Image, ImageEnhance
+    OCR_AVAILABLE = True
 except ImportError as e:
-    logging.error(f"필수 패키지 누락: {e}")
-    logging.error("설치 명령: pip install playwright easyocr opencv-python pillow")
-    sys.exit(1)
+    logging.warning(f"OCR 패키지 누락 (백업 기능 비활성화): {e}")
+    logging.warning("설치 명령: pip install easyocr opencv-python-headless pillow")
+    OCR_AVAILABLE = False
 
 # Google Sheets
 import gspread
@@ -212,13 +220,15 @@ class PlaywrightKRXCollector:
                         logger.info(f"✅ AJAX 추출 성공: {len(ajax_data)}개 종목")
                         return self._enhance_with_trading_info(ajax_data, config)
                     
-                    # 5단계: OCR 백업 시스템 (최후 수단)
-                    if config['high_accuracy']:  # 중요 시점에만 OCR 사용
+                    # 5단계: OCR 백업 시스템 (최후 수단 + 패키지 확인)
+                    if config['high_accuracy'] and OCR_AVAILABLE:  # 중요 시점 + OCR 가능시만
                         ocr_data = await self._ocr_backup_extraction()
                         
                         if self._validate_real_data(ocr_data):
                             logger.info(f"✅ OCR 백업 성공: {len(ocr_data)}개 종목")
                             return self._enhance_with_trading_info(ocr_data, config)
+                    elif config['high_accuracy'] and not OCR_AVAILABLE:
+                        logger.warning("⚠️ 중요 시점이지만 OCR 패키지 없음 - OCR 백업 건너뜀")
                     
                     if attempt < config['max_retries'] - 1:
                         logger.info(f"시도 {attempt + 1} 실패 - 3초 후 재시도")
@@ -444,73 +454,121 @@ class PlaywrightKRXCollector:
             return []
 
     async def _ocr_backup_extraction(self) -> List[Dict]:
-        """OCR 백업 데이터 추출"""
+        """OCR 백업 데이터 추출 (패키지 안전성 확인)"""
         try:
+            if not OCR_AVAILABLE:
+                logger.warning("OCR 패키지 없음 - OCR 백업 건너뜀")
+                return []
+            
             logger.info("📷 OCR 백업 시스템 시작...")
             
-            # OCR 리더 초기화
+            # OCR 리더 초기화 (안전성 확인)
             if not self.ocr_reader:
-                self.ocr_reader = easyocr.Reader(['ko', 'en'], gpu=False)
+                try:
+                    self.ocr_reader = easyocr.Reader(['ko', 'en'], gpu=False)
+                    logger.info("✅ EasyOCR 리더 초기화 성공")
+                except Exception as e:
+                    logger.error(f"EasyOCR 초기화 실패: {e}")
+                    return []
             
             # 페이지 스크린샷 촬영
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             screenshot_path = self.screenshots_dir / f"krx_table_{timestamp}.png"
             
-            await self.page.screenshot(path=str(screenshot_path), full_page=True)
-            logger.info(f"📸 스크린샷 저장: {screenshot_path}")
+            try:
+                await self.page.screenshot(path=str(screenshot_path), full_page=True)
+                logger.info(f"📸 스크린샷 저장: {screenshot_path}")
+            except Exception as e:
+                logger.error(f"스크린샷 촬영 실패: {e}")
+                return []
             
-            # 테이블 영역 크롭
-            table_image = await self._crop_table_area(screenshot_path)
+            # 테이블 영역 크롭 (OpenCV 안전성 확인)
+            try:
+                table_image = await self._crop_table_area(screenshot_path)
+            except Exception as e:
+                logger.warning(f"이미지 크롭 실패, 전체 이미지 사용: {e}")
+                table_image = cv2.imread(str(screenshot_path)) if OCR_AVAILABLE else None
             
-            if table_image:
-                # OCR 실행
-                ocr_results = self.ocr_reader.readtext(table_image)
-                
-                # OCR 결과를 테이블 데이터로 변환
-                extracted_data = self._parse_ocr_results(ocr_results)
-                
-                if extracted_data:
-                    logger.info(f"✅ OCR 추출 성공: {len(extracted_data)}개 종목")
-                    return extracted_data
+            if table_image is not None:
+                try:
+                    # OCR 실행
+                    ocr_results = self.ocr_reader.readtext(table_image)
+                    logger.info(f"OCR 인식 완료: {len(ocr_results)}개 텍스트 블록")
+                    
+                    # OCR 결과를 테이블 데이터로 변환
+                    extracted_data = self._parse_ocr_results(ocr_results)
+                    
+                    if extracted_data:
+                        logger.info(f"✅ OCR 추출 성공: {len(extracted_data)}개 종목")
+                        return extracted_data
+                        
+                except Exception as e:
+                    logger.error(f"OCR 처리 중 오류: {e}")
+                    return []
             
-            logger.warning("OCR 백업 추출 실패")
+            logger.warning("OCR 백업 추출 실패 - 처리할 이미지 없음")
             return []
             
         except Exception as e:
-            logger.error(f"OCR 백업 중 오류: {e}")
+            logger.error(f"OCR 백업 중 심각한 오류: {e}")
             return []
 
     async def _crop_table_area(self, screenshot_path: Path) -> Optional[np.ndarray]:
-        """테이블 영역 크롭"""
+        """테이블 영역 크롭 (OpenCV 안전성 확인)"""
         try:
+            if not OCR_AVAILABLE:
+                logger.warning("OpenCV 없음 - 이미지 크롭 건너뜀")
+                return None
+            
             # 테이블 요소의 위치 정보 가져오기
             table_selector = 'table[summary*="배출권"], .CI-GRID-AREA, table'
             
             table_element = await self.page.query_selector(table_selector)
             if not table_element:
+                logger.warning("테이블 요소를 찾을 수 없음")
                 return None
             
             # 요소의 경계 박스 가져오기
             bbox = await table_element.bounding_box()
             if not bbox:
+                logger.warning("테이블 경계 박스를 가져올 수 없음")
                 return None
             
-            # 이미지 크롭
-            image = cv2.imread(str(screenshot_path))
-            if image is None:
+            # 이미지 크롭 (OpenCV 안전 처리)
+            try:
+                image = cv2.imread(str(screenshot_path))
+                if image is None:
+                    logger.warning(f"이미지 로드 실패: {screenshot_path}")
+                    return None
+                
+                x, y, width, height = int(bbox['x']), int(bbox['y']), int(bbox['width']), int(bbox['height'])
+                
+                # 경계 검사
+                img_height, img_width = image.shape[:2]
+                x = max(0, min(x, img_width))
+                y = max(0, min(y, img_height))
+                width = min(width, img_width - x)
+                height = min(height, img_height - y)
+                
+                if width <= 0 or height <= 0:
+                    logger.warning("유효하지 않은 크롭 영역")
+                    return None
+                
+                cropped = image[y:y+height, x:x+width]
+                
+                # 이미지 전처리 (OCR 정확도 향상)
+                gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+                enhanced = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                
+                logger.info(f"이미지 크롭 성공: {width}x{height} 영역")
+                return enhanced
+                
+            except Exception as e:
+                logger.warning(f"OpenCV 이미지 처리 오류: {e}")
                 return None
-            
-            x, y, width, height = int(bbox['x']), int(bbox['y']), int(bbox['width']), int(bbox['height'])
-            cropped = image[y:y+height, x:x+width]
-            
-            # 이미지 전처리 (OCR 정확도 향상)
-            gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-            enhanced = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            
-            return enhanced
             
         except Exception as e:
-            logger.debug(f"이미지 크롭 중 오류: {e}")
+            logger.debug(f"이미지 크롭 중 전체 오류: {e}")
             return None
 
     def _parse_row_data(self, cell_texts: List[str], row_index: int) -> Optional[Dict]:
@@ -631,21 +689,36 @@ class PlaywrightKRXCollector:
             return []
 
     def _parse_ocr_results(self, ocr_results) -> List[Dict]:
-        """OCR 결과 파싱"""
+        """OCR 결과 파싱 (안전성 확인)"""
         try:
+            if not OCR_AVAILABLE or not ocr_results:
+                logger.warning("OCR 결과 없음 또는 패키지 없음")
+                return []
+            
             # OCR 결과를 테이블 형태로 정리
             extracted_data = []
             
             # OCR 텍스트 추출 및 정렬
             texts = []
-            for (bbox, text, confidence) in ocr_results:
-                if confidence > 0.5:  # 신뢰도 50% 이상만
-                    texts.append({
-                        'text': text.strip(),
-                        'x': bbox[0][0],
-                        'y': bbox[0][1],
-                        'confidence': confidence
-                    })
+            for result in ocr_results:
+                try:
+                    # EasyOCR 결과 형태: (bbox, text, confidence)
+                    if len(result) >= 3:
+                        bbox, text, confidence = result[0], result[1], result[2]
+                        if confidence > 0.5:  # 신뢰도 50% 이상만
+                            texts.append({
+                                'text': text.strip(),
+                                'x': bbox[0][0] if bbox and len(bbox) > 0 else 0,
+                                'y': bbox[0][1] if bbox and len(bbox) > 0 else 0,
+                                'confidence': confidence
+                            })
+                except Exception as e:
+                    logger.debug(f"OCR 결과 파싱 오류: {e}")
+                    continue
+            
+            if not texts:
+                logger.warning("유효한 OCR 텍스트 없음")
+                return []
             
             # Y 좌표로 행 그룹핑
             texts.sort(key=lambda x: (x['y'], x['x']))
@@ -666,12 +739,14 @@ class PlaywrightKRXCollector:
             if current_row:
                 rows.append(current_row)
             
+            logger.info(f"OCR 행 그룹핑 완료: {len(rows)}개 행")
+            
             # 각 행을 데이터로 변환
-            for row_texts in rows:
-                if len(row_texts) >= 3:  # 최소 종목명, 가격, 변동 있어야 함
-                    symbol = row_texts[0]
-                    if re.match(r'^(KAU|KCU|KOC|i-)', symbol):
-                        try:
+            for i, row_texts in enumerate(rows):
+                try:
+                    if len(row_texts) >= 3:  # 최소 종목명, 가격, 변동 있어야 함
+                        symbol = row_texts[0]
+                        if re.match(r'^(KAU|KCU|KOC|i-)', symbol):
                             parsed = {
                                 'date': datetime.now().strftime('%Y-%m-%d'),
                                 'time': datetime.now().strftime('%H:%M:%S'),
@@ -691,15 +766,17 @@ class PlaywrightKRXCollector:
                             
                             if parsed['current_price'] > 0:
                                 extracted_data.append(parsed)
+                                logger.info(f"OCR 종목 파싱 성공: {symbol} - {parsed['current_price']:,}원")
                                 
-                        except Exception as e:
-                            logger.debug(f"OCR 행 파싱 오류: {e}")
-                            continue
+                except Exception as e:
+                    logger.debug(f"OCR 행 {i} 파싱 오류: {e}")
+                    continue
             
+            logger.info(f"OCR 파싱 완료: {len(extracted_data)}개 종목 추출")
             return extracted_data
             
         except Exception as e:
-            logger.error(f"OCR 결과 파싱 오류: {e}")
+            logger.error(f"OCR 결과 파싱 중 심각한 오류: {e}")
             return []
 
     def _validate_real_data(self, data: List[Dict]) -> bool:
@@ -838,9 +915,17 @@ class EnhancedSheetsManager:
 
 
 async def main():
-    """메인 실행 함수"""
+    """메인 실행 함수 (패키지 안전성 확인)"""
     try:
         logger.info("=== Playwright 기반 KRX ETS 데이터 수집 시작 ===")
+        
+        # 필수 패키지 확인
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.error("❌ Playwright 패키지가 없습니다")
+            print("❌ Playwright 설치 필요:")
+            print("   pip install playwright")
+            print("   python -m playwright install chromium")
+            sys.exit(1)
         
         # 환경변수 확인
         creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
@@ -858,6 +943,7 @@ async def main():
         logger.info(f"🕐 수집 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
         logger.info(f"⚡ 거래 단계: {trading_phase}")
         logger.info(f"🎯 실행 우선도: {execution_priority}")
+        logger.info(f"📷 OCR 사용 가능: {'✅' if OCR_AVAILABLE else '❌'}")
         
         # Playwright 데이터 수집기 초기화
         collector = PlaywrightKRXCollector()
@@ -890,6 +976,7 @@ async def main():
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"🎯 우선도: {execution_priority}")
                 print(f"🔧 추출 방법: {list(extraction_methods.keys())}")
+                print(f"📷 OCR 지원: {'✅' if OCR_AVAILABLE else '❌ (패키지 없음)'}")
                 return
             
             # Google Sheets 저장
@@ -907,6 +994,7 @@ async def main():
                 print(f"🌐 추출 방법: {', '.join(extraction_methods.keys())}")
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"🕐 수집 시간: {now.strftime('%H:%M:%S')} KST")
+                print(f"📷 OCR 지원: {'✅' if OCR_AVAILABLE else '❌'}")
                 
                 # 활성 거래 종목 정보
                 active_data = [item for item in real_data if item['volume'] > 0]
@@ -928,7 +1016,10 @@ async def main():
             print("🔍 시도한 방법:")
             print("   • DOM 직접 추출")
             print("   • AJAX 응답 분석")
-            print("   • OCR 백업 시스템")
+            if OCR_AVAILABLE:
+                print("   • OCR 백업 시스템")
+            else:
+                print("   • OCR 백업 시스템 (패키지 없음)")
             print("📞 문제 지속시 GitHub Issues에 신고하세요")
             sys.exit(1)
             
