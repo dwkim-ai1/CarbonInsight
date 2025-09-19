@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Playwright 기반 KRX ETS 데이터 수집 결과 텔레그램 알림 시스템
-1. Playwright 멀티 추출 방법별 분석
-2. DOM, AJAX, OCR 백업 성공률 추적
-3. 동적 테이블 수집 성과 모니터링
-4. 거래시간별 맞춤 알림 메시지
+최적화된 텔레그램 알림 시스템
+1. 중복 제거 통계 포함
+2. 12:30 KST 최종 요약
+3. 맞춤형 스케줄 정보
+4. 스프레드시트 용량 절약 성과
 """
 
 import requests
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class TelegramNotifier:
     def __init__(self, bot_token: str, chat_id: str):
-        """Playwright 기반 텔레그램 알림 시스템 초기화"""
+        """최적화된 텔레그램 알림 시스템 초기화"""
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.telegram_api_url = f"https://api.telegram.org/bot{bot_token}"
@@ -50,7 +50,7 @@ class TelegramNotifier:
             url = f"{self.telegram_api_url}/sendMessage"
             payload = {
                 'chat_id': self.chat_id,
-                'text': '🔍 Playwright 기반 연결 테스트 - 이 메시지가 보이면 설정이 올바릅니다.',
+                'text': '🔍 최적화된 연결 테스트 - 중복 제거 시스템 정상 작동',
                 'disable_notification': True
             }
             
@@ -65,18 +65,6 @@ class TelegramNotifier:
                 error_desc = error_data.get('description', 'Unknown error')
                 
                 logger.error(f"❌ 채팅 접근 테스트 실패: {error_code} - {error_desc}")
-                
-                # 일반적인 에러 코드별 해결방법 안내
-                if error_code == 400:
-                    if 'chat not found' in error_desc.lower():
-                        logger.error("💡 해결방법: Chat ID가 잘못되었습니다. 올바른 Chat ID를 확인하세요.")
-                    elif 'bot was blocked' in error_desc.lower():
-                        logger.error("💡 해결방법: 봇이 차단되었습니다. 봇과의 대화를 시작하고 /start를 보내세요.")
-                elif error_code == 401:
-                    logger.error("💡 해결방법: Bot 토큰이 잘못되었습니다. @BotFather에서 올바른 토큰을 확인하세요.")
-                elif error_code == 403:
-                    logger.error("💡 해결방법: 봇에게 메시지 전송 권한이 없습니다. 봇과 먼저 대화를 시작하세요.")
-                
                 return False
                 
         except Exception as e:
@@ -94,57 +82,38 @@ class TelegramNotifier:
                 'disable_web_page_preview': True
             }
             
-            # 디버깅 정보 출력 (보안상 일부만)
-            logger.info(f"Playwright 기반 텔레그램 API 호출 시작")
-            logger.info(f"URL: {url}")
-            logger.info(f"Chat ID: {self.chat_id}")
-            logger.info(f"Bot Token 앞부분: {self.bot_token[:15]}...")
+            logger.info(f"최적화된 텔레그램 API 호출 시작")
             logger.info(f"메시지 길이: {len(message)} 문자")
             
             response = requests.post(url, json=payload, timeout=30)
-            
-            # 응답 상태 상세 로깅
-            logger.info(f"HTTP 상태 코드: {response.status_code}")
-            if response.status_code != 200:
-                logger.error(f"응답 내용: {response.text}")
-                
             response.raise_for_status()
             
             logger.info("텔레그램 메시지 전송 성공")
             return True
             
-        except requests.RequestException as e:
-            logger.error(f"텔레그램 메시지 전송 실패: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    logger.error(f"텔레그램 API 오류 상세: {error_data}")
-                except:
-                    logger.error(f"응답 텍스트: {e.response.text}")
-            return False
         except Exception as e:
-            logger.error(f"텔레그램 메시지 전송 중 예상치 못한 오류: {e}")
+            logger.error(f"텔레그램 메시지 전송 실패: {e}")
             return False
 
-class PlaywrightDataAnalyzer:
+class OptimizedDataAnalyzer:
     def __init__(self, credentials_json: str, sheet_id: str):
-        """Playwright 기반 일일 데이터 분석기 초기화"""
+        """최적화된 일일 데이터 분석기 초기화"""
         try:
             creds_dict = json.loads(credentials_json)
             self.gc = gspread.service_account_from_dict(creds_dict)
             self.sheet_id = sheet_id
             self.spreadsheet = self.gc.open_by_key(sheet_id)
             self.worksheet = self.spreadsheet.worksheet('ets.KRX')
-            logger.info("Google Sheets 연결 성공 (Playwright 데이터 분석)")
+            logger.info("Google Sheets 연결 성공 (최적화 데이터 분석)")
         except Exception as e:
             logger.error(f"Google Sheets 연결 실패: {e}")
             raise
     
-    def get_today_data(self) -> Tuple[List[Dict], Dict]:
-        """오늘 Playwright 수집 데이터 분석 및 요약 정보 반환"""
+    def get_today_optimized_data(self) -> Tuple[List[Dict], Dict]:
+        """오늘 최적화된 수집 데이터 분석"""
         try:
             today = datetime.now().strftime('%Y-%m-%d')
-            logger.info(f"오늘 날짜 Playwright 데이터 분석 시작: {today}")
+            logger.info(f"오늘 날짜 최적화 데이터 분석 시작: {today}")
             
             # 모든 데이터 가져오기
             all_data = self.worksheet.get_all_records()
@@ -152,19 +121,19 @@ class PlaywrightDataAnalyzer:
             
             # 오늘 데이터만 필터링
             today_data = [row for row in all_data if row.get('날짜') == today]
-            logger.info(f"오늘 Playwright 데이터: {len(today_data)}개 레코드")
+            logger.info(f"오늘 최적화 데이터: {len(today_data)}개 레코드")
             
-            # Playwright 기반 데이터 분석
-            analysis = self._analyze_playwright_data(today_data, today)
+            # 최적화 데이터 분석
+            analysis = self._analyze_optimized_data(today_data, today)
             
             return today_data, analysis
             
         except Exception as e:
-            logger.error(f"Playwright 데이터 분석 중 오류: {e}")
+            logger.error(f"최적화 데이터 분석 중 오류: {e}")
             return [], {}
     
-    def _analyze_playwright_data(self, today_data: List[Dict], today: str) -> Dict:
-        """Playwright 기반 데이터 분석 및 통계 생성"""
+    def _analyze_optimized_data(self, today_data: List[Dict], today: str) -> Dict:
+        """최적화된 데이터 분석 및 통계 생성"""
         try:
             analysis = {
                 'date': today,
@@ -173,7 +142,8 @@ class PlaywrightDataAnalyzer:
                 'failed_collections': 0,
                 'data_sources': {},
                 'extraction_methods': {},
-                'playwright_performance': {},
+                'optimization_performance': {},
+                'collection_frequency_stats': {},
                 'active_trading_symbols': [],
                 'collection_times': [],
                 'total_trading_volume': 0,
@@ -182,49 +152,44 @@ class PlaywrightDataAnalyzer:
                 'missing_data_count': 0,
                 'last_update_time': '',
                 'data_quality_issues': [],
-                'browser_modes': {},
-                'ocr_usage': 0,
-                'ajax_success': 0,
-                'dom_success': 0
+                'skipped_duplicates': 0,
+                'storage_efficiency': 0,
+                'unique_collection_sessions': set(),
+                'peak_trading_periods': [],
+                'final_session_time': ''
             }
             
             if not today_data:
                 analysis['status'] = 'NO_DATA'
-                analysis['message'] = '오늘 Playwright로 수집된 데이터가 없습니다.'
+                analysis['message'] = '오늘 최적화 시스템으로 수집된 데이터가 없습니다.'
                 return analysis
             
+            # 수집 세션별 분석
             for record in today_data:
                 # 기본 통계
                 analysis['unique_symbols'].add(record.get('종목명', ''))
                 
                 # 수집 시간 추적
                 collection_time = record.get('수집시간', '')
-                if collection_time and collection_time not in analysis['collection_times']:
+                if collection_time:
                     analysis['collection_times'].append(collection_time)
+                    analysis['unique_collection_sessions'].add(collection_time[:5])  # HH:MM 형태
                     if collection_time > analysis['last_update_time']:
                         analysis['last_update_time'] = collection_time
                 
-                # Playwright 데이터 소스 추적
+                # 데이터 소스 추적
                 data_source = record.get('데이터소스', 'unknown')
                 analysis['data_sources'][data_source] = analysis['data_sources'].get(data_source, 0) + 1
                 
-                # Playwright 추출 방법별 통계
+                # 추출 방법별 통계
                 if 'playwright' in data_source:
                     extraction_method = data_source.split('_')[-1] if '_' in data_source else 'unknown'
                     analysis['extraction_methods'][extraction_method] = analysis['extraction_methods'].get(extraction_method, 0) + 1
-                    
-                    # 방법별 성공 카운트
-                    if extraction_method == 'dom':
-                        analysis['dom_success'] += 1
-                    elif extraction_method == 'ajax':
-                        analysis['ajax_success'] += 1
-                    elif extraction_method == 'ocr':
-                        analysis['ocr_usage'] += 1
                 
-                # 거래 단계별 통계
+                # 거래 단계별 통계 (최적화 스케줄 반영)
                 trading_phase = record.get('거래단계', 'unknown')
                 if trading_phase != 'unknown':
-                    analysis['browser_modes'][trading_phase] = analysis['browser_modes'].get(trading_phase, 0) + 1
+                    analysis['collection_frequency_stats'][trading_phase] = analysis['collection_frequency_stats'].get(trading_phase, 0) + 1
                 
                 # 거래량/거래대금 집계
                 try:
@@ -241,44 +206,56 @@ class PlaywrightDataAnalyzer:
                             'volume': volume,
                             'price': float(str(record.get('현재가', 0)).replace(',', '')),
                             'change': float(str(record.get('대비', 0)).replace(',', '')),
-                            'extraction_method': data_source
+                            'collection_time': collection_time
                         }
                         analysis['active_trading_symbols'].append(symbol_info)
+                        
+                        # 피크 거래 시간대 분석
+                        if volume > 1000:  # 1000톤 이상
+                            analysis['peak_trading_periods'].append({
+                                'time': collection_time,
+                                'symbol': record.get('종목명', ''),
+                                'volume': volume
+                            })
+                        
                 except (ValueError, TypeError) as e:
                     analysis['missing_data_count'] += 1
                     logger.debug(f"데이터 파싱 오류: {e}")
             
-            # Playwright 성공/실패 분석
+            # 최적화 성능 분석
+            optimization_stats = self._parse_optimization_context()
+            if optimization_stats:
+                analysis['optimization_performance'] = optimization_stats
+                analysis['skipped_duplicates'] = optimization_stats.get('skipped', 0)
+                total_potential = optimization_stats.get('total', analysis['total_records'])
+                if total_potential > 0:
+                    analysis['storage_efficiency'] = round((optimization_stats.get('skipped', 0) / total_potential * 100), 1)
+            
+            # 수집 세션 분석
+            session_count = len(analysis['unique_collection_sessions'])
+            if session_count > 0:
+                analysis['collection_session_count'] = session_count
+                
+                # 12:30 최종 세션 확인
+                if any('12:3' in time for time in analysis['collection_times']):
+                    analysis['final_session_time'] = '12:30'
+                    analysis['is_final_session'] = True
+                else:
+                    analysis['is_final_session'] = False
+            
+            # 성공/실패 분석 (최적화 기준)
             playwright_sources = ['playwright_dom', 'playwright_ajax', 'playwright_ocr', 'playwright_html']
-            legacy_sources = ['realistic_sample', 'krx_main_page']  # 레거시
             
             playwright_count = sum(analysis['data_sources'].get(src, 0) for src in playwright_sources)
-            legacy_count = sum(analysis['data_sources'].get(src, 0) for src in legacy_sources)
             
             if playwright_count > 0:
                 analysis['successful_collections'] = playwright_count
-                analysis['failed_collections'] = legacy_count
-                
-                if legacy_count == 0:
-                    analysis['status'] = 'SUCCESS'
-                    analysis['message'] = f'Playwright 기반 데이터 수집 완전 성공 ({playwright_count}개)'
-                else:
-                    analysis['status'] = 'PARTIAL_SUCCESS'
-                    analysis['message'] = f'Playwright 일부 성공 ({playwright_count}개), 레거시 {legacy_count}개'
+                analysis['status'] = 'SUCCESS'
+                analysis['message'] = f'최적화 시스템 데이터 수집 성공 ({playwright_count}개)'
             else:
                 analysis['failed_collections'] = analysis['total_records']
                 analysis['status'] = 'FAILED'
-                analysis['message'] = 'Playwright 데이터 수집 실패 (레거시/샘플 데이터만 존재)'
-            
-            # Playwright 성능 분석
-            total_playwright = analysis['dom_success'] + analysis['ajax_success'] + analysis['ocr_usage']
-            if total_playwright > 0:
-                analysis['playwright_performance'] = {
-                    'dom_ratio': round((analysis['dom_success'] / total_playwright) * 100, 1),
-                    'ajax_ratio': round((analysis['ajax_success'] / total_playwright) * 100, 1),
-                    'ocr_ratio': round((analysis['ocr_usage'] / total_playwright) * 100, 1),
-                    'total_extractions': total_playwright
-                }
+                analysis['message'] = '최적화 시스템 데이터 수집 실패'
             
             # 데이터 품질 검사
             analysis['unique_symbols'] = list(analysis['unique_symbols'])
@@ -288,92 +265,47 @@ class PlaywrightDataAnalyzer:
             if missing_symbols:
                 analysis['data_quality_issues'].append(f"누락된 종목: {', '.join(missing_symbols)}")
             
-            if analysis['missing_data_count'] > 0:
-                analysis['data_quality_issues'].append(f"파싱 오류 데이터: {analysis['missing_data_count']}건")
-            
-            if analysis['ocr_usage'] > 0:
-                analysis['data_quality_issues'].append(f"OCR 백업 사용: {analysis['ocr_usage']}건 (시각적 확인 권장)")
+            if analysis['storage_efficiency'] > 0:
+                analysis['data_quality_issues'].append(f"중복 제거: {analysis['storage_efficiency']}% 용량 절약")
             
             # 활성 거래 종목 정렬 (거래량 기준)
             analysis['active_trading_symbols'].sort(key=lambda x: x['volume'], reverse=True)
             
-            logger.info(f"Playwright 데이터 분석 완료: {analysis['status']}")
-            logger.info(f"추출 방법별 성과: DOM {analysis['dom_success']}개, AJAX {analysis['ajax_success']}개, OCR {analysis['ocr_usage']}개")
+            logger.info(f"최적화 데이터 분석 완료: {analysis['status']}")
+            logger.info(f"용량 절약: {analysis['storage_efficiency']}% ({analysis['skipped_duplicates']}개 중복 제거)")
             
             return analysis
             
         except Exception as e:
-            logger.error(f"Playwright 데이터 분석 중 오류: {e}")
+            logger.error(f"최적화 데이터 분석 중 오류: {e}")
             return {
                 'date': today,
                 'status': 'ERROR',
-                'message': f'Playwright 분석 중 오류 발생: {str(e)}',
+                'message': f'최적화 분석 중 오류 발생: {str(e)}',
                 'total_records': len(today_data)
             }
-
-    def get_recent_trends(self, days: int = 7) -> Dict:
-        """최근 N일간의 Playwright 데이터 트렌드 분석"""
+    
+    def _parse_optimization_context(self) -> Dict:
+        """환경변수에서 최적화 통계 파싱"""
         try:
-            all_data = self.worksheet.get_all_records()
+            optimization_context = os.getenv('OPTIMIZATION_CONTEXT', '')
+            optimization_stats = os.getenv('OPTIMIZATION_STATS', '{}')
             
-            # 최근 N일 날짜 생성
-            recent_dates = []
-            for i in range(days):
-                date = (datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d')
-                recent_dates.append(date)
+            if optimization_stats and optimization_stats != '{}':
+                stats = json.loads(optimization_stats)
+                logger.info(f"최적화 통계 파싱 성공: {stats}")
+                return stats
             
-            trend_analysis = {
-                'period': f'최근 {days}일 (Playwright)',
-                'dates': recent_dates,
-                'daily_collection_count': {},
-                'daily_playwright_ratio': {},
-                'daily_extraction_methods': {},
-                'total_collections': 0,
-                'total_playwright_success': 0,
-                'playwright_method_trends': {
-                    'dom': 0, 'ajax': 0, 'ocr': 0, 'html': 0
-                }
-            }
-            
-            for date in recent_dates:
-                daily_data = [row for row in all_data if row.get('날짜') == date]
-                
-                if daily_data:
-                    # Playwright vs 레거시 분석
-                    playwright_count = len([row for row in daily_data if 'playwright' in row.get('데이터소스', '')])
-                    total_count = len(daily_data)
-                    playwright_ratio = (playwright_count / total_count * 100) if total_count > 0 else 0
-                    
-                    trend_analysis['daily_collection_count'][date] = total_count
-                    trend_analysis['daily_playwright_ratio'][date] = round(playwright_ratio, 1)
-                    trend_analysis['total_collections'] += total_count
-                    trend_analysis['total_playwright_success'] += playwright_count
-                    
-                    # 추출 방법별 트렌드
-                    methods = {}
-                    for row in daily_data:
-                        source = row.get('데이터소스', 'unknown')
-                        if 'playwright' in source:
-                            method = source.split('_')[-1] if '_' in source else 'other'
-                            methods[method] = methods.get(method, 0) + 1
-                            trend_analysis['playwright_method_trends'][method] = trend_analysis['playwright_method_trends'].get(method, 0) + 1
-                    
-                    trend_analysis['daily_extraction_methods'][date] = methods
-                else:
-                    trend_analysis['daily_collection_count'][date] = 0
-                    trend_analysis['daily_playwright_ratio'][date] = 0
-                    trend_analysis['daily_extraction_methods'][date] = {}
-            
-            return trend_analysis
+            return {}
             
         except Exception as e:
-            logger.error(f"Playwright 트렌드 분석 중 오류: {e}")
+            logger.debug(f"최적화 통계 파싱 오류: {e}")
             return {}
 
-class PlaywrightMessageFormatter:
+class OptimizedMessageFormatter:
     @staticmethod
-    def format_daily_summary(analysis: Dict, trends: Dict, collection_status: str) -> str:
-        """Playwright 기반 일일 요약 메시지 포맷팅"""
+    def format_optimized_daily_summary(analysis: Dict, collection_status: str) -> str:
+        """최적화된 일일 요약 메시지 포맷팅"""
         try:
             status_emoji = {
                 'SUCCESS': '✅',
@@ -385,155 +317,125 @@ class PlaywrightMessageFormatter:
             
             emoji = status_emoji.get(analysis.get('status', 'ERROR'), '❓')
             
-            # 헤더 (Playwright 기반)
-            message = f"{emoji} *KRX ETS Playwright 수집 결과*\n"
+            # 헤더 (최적화 시스템)
+            message = f"{emoji} *KRX ETS 최적화 수집 결과*\n"
             message += f"📅 날짜: `{analysis.get('date', 'Unknown')}`\n"
             message += f"⏰ 마지막 업데이트: `{analysis.get('last_update_time', 'Unknown')}`\n"
-            message += f"🌐 수집 방식: `Playwright 멀티 추출`\n\n"
+            message += f"🚀 수집 방식: `최적화 시스템 (중복 제거)`\n\n"
+            
+            # 최적화 성과
+            optimization = analysis.get('optimization_performance', {})
+            storage_efficiency = analysis.get('storage_efficiency', 0)
+            skipped_duplicates = analysis.get('skipped_duplicates', 0)
+            
+            if storage_efficiency > 0:
+                message += f"*💾 최적화 성과*\n"
+                message += f"• 용량 절약: `{storage_efficiency}%`\n"
+                message += f"• 중복 제거: `{skipped_duplicates}개`\n"
+                message += f"• 실제 업데이트: `{analysis.get('total_records', 0)}개`\n\n"
             
             # 수집 현황
             message += f"*📊 수집 현황*\n"
             message += f"• 총 레코드: `{analysis.get('total_records', 0)}개`\n"
-            message += f"• Playwright 성공: `{analysis.get('successful_collections', 0)}개`\n"
-            message += f"• 레거시/실패: `{analysis.get('failed_collections', 0)}개`\n"
+            message += f"• 성공 수집: `{analysis.get('successful_collections', 0)}개`\n"
+            message += f"• 수집 세션: `{analysis.get('collection_session_count', 0)}회`\n"
             message += f"• 상태: `{analysis.get('message', 'Unknown')}`\n\n"
             
-            # Playwright 추출 방법별 분석
-            if analysis.get('data_sources'):
-                message += f"*🔍 데이터 추출 방법*\n"
-                for source, count in analysis['data_sources'].items():
-                    source_name = {
-                        'playwright_dom': '🌐 DOM 추출',
-                        'playwright_ajax': '📡 AJAX 모니터링',
-                        'playwright_ocr': '📷 OCR 백업',
-                        'playwright_html': '📄 HTML 파싱',
-                        'krx_real_data': '🎯 KRX 실데이터',  # 레거시
-                        'realistic_sample': '🔄 샘플데이터',  # 레거시
-                        'krx_main_page': '🌐 메인페이지'  # 레거시
-                    }.get(source, f'❓ {source}')
-                    message += f"• {source_name}: `{count}개`\n"
+            # 수집 주기별 통계
+            frequency_stats = analysis.get('collection_frequency_stats', {})
+            if frequency_stats:
+                message += f"*⏰ 수집 주기별 통계*\n"
+                for phase, count in frequency_stats.items():
+                    phase_name = {
+                        'order_acceptance': '📝 주문접수 (30분)',
+                        'real_time_trading_intensive': '⚡ 실시간거래 (10분)',
+                        'closing_preparation': '📊 종가준비 (30분)',
+                        'closing_price_decision': '🏁 종가체결',
+                        'final_settlement': '🎯 최종마감',
+                        'manual': '🔧 수동실행'
+                    }.get(phase, f'❓ {phase}')
+                    message += f"• {phase_name}: `{count}건`\n"
                 message += "\n"
             
-            # Playwright 성능 분석
-            perf = analysis.get('playwright_performance', {})
-            if perf:
-                message += f"*⚡ Playwright 성능 분석*\n"
-                message += f"• DOM 추출: `{perf.get('dom_ratio', 0)}%`\n"
-                message += f"• AJAX 모니터링: `{perf.get('ajax_ratio', 0)}%`\n"
-                message += f"• OCR 백업: `{perf.get('ocr_ratio', 0)}%`\n"
-                message += f"• 총 추출: `{perf.get('total_extractions', 0)}건`\n\n"
-            
-            # 거래 현황
-            if analysis.get('active_trading_symbols'):
+            # 활성 거래 종목
+            active_symbols = analysis.get('active_trading_symbols', [])
+            if active_symbols:
                 message += f"*💹 활성 거래 종목*\n"
-                for symbol in analysis['active_trading_symbols'][:5]:  # 상위 5개만
+                for symbol in active_symbols[:5]:  # 상위 5개만
                     change_emoji = "📈" if symbol['change'] > 0 else "📉" if symbol['change'] < 0 else "➡️"
-                    extraction_emoji = {
-                        'playwright_dom': '🌐',
-                        'playwright_ajax': '📡', 
-                        'playwright_ocr': '📷',
-                        'playwright_html': '📄'
-                    }.get(symbol.get('extraction_method', ''), '❓')
+                    time_str = symbol.get('collection_time', '')[:5]  # HH:MM
                     
                     message += f"• `{symbol['symbol']}`: {symbol['price']:,.0f}원 "
-                    message += f"({symbol['change']:+.0f}) {change_emoji} `{symbol['volume']:,.0f}톤` {extraction_emoji}\n"
+                    message += f"({symbol['change']:+.0f}) {change_emoji} `{symbol['volume']:,.0f}톤` "
+                    message += f"({time_str})\n"
                 message += "\n"
             else:
                 message += f"*💹 거래 현황*\n"
                 message += f"• 오늘 활성 거래 없음\n"
                 message += f"• 총 거래량: `{analysis.get('total_trading_volume', 0):,.0f}톤`\n\n"
             
-            # 브라우저 모드별 통계
-            browser_modes = analysis.get('browser_modes', {})
-            if browser_modes:
-                message += f"*🌐 브라우저 모드별 수집*\n"
-                for mode, count in browser_modes.items():
-                    mode_name = {
-                        'opening_price_decision': '🔥 시가체결 (Visual)',
-                        'closing_price_decision': '🏁 종가체결 (OCR)',
-                        'real_time_trading': '⚡ 실시간거래 (Fast)',
-                        'order_acceptance': '📝 주문접수',
-                        'manual': '🔧 수동실행'
-                    }.get(mode, f'❓ {mode}')
-                    message += f"• {mode_name}: `{count}건`\n"
+            # 피크 거래 시간대
+            peak_periods = analysis.get('peak_trading_periods', [])
+            if peak_periods:
+                message += f"*🔥 피크 거래 시간대*\n"
+                for peak in peak_periods[:3]:  # 상위 3개만
+                    time_str = peak.get('time', '')[:5]
+                    message += f"• `{time_str}`: {peak['symbol']} `{peak['volume']:,.0f}톤`\n"
                 message += "\n"
             
+            # 12:30 최종 세션 확인
+            if analysis.get('is_final_session', False):
+                message += f"*🎯 최종 마감*\n"
+                message += f"• 12:30 KST 최종 수집 완료\n"
+                message += f"• 일일 거래 데이터 확정\n"
+                message += f"• 다음 업데이트: 내일 09:00 KST\n\n"
+            
             # 데이터 품질 이슈
-            if analysis.get('data_quality_issues'):
-                message += f"*⚠️ 데이터 품질 이슈*\n"
-                for issue in analysis['data_quality_issues']:
+            quality_issues = analysis.get('data_quality_issues', [])
+            if quality_issues:
+                message += f"*⚠️ 데이터 품질 정보*\n"
+                for issue in quality_issues:
                     message += f"• {issue}\n"
                 message += "\n"
             
-            # 최근 트렌드 (Playwright 기준)
-            if trends:
-                total_collections = trends.get('total_collections', 0)
-                total_playwright = trends.get('total_playwright_success', 0)
-                avg_playwright_ratio = ((total_playwright / total_collections * 100) if total_collections > 0 else 0)
-                
-                message += f"*📈 최근 7일 Playwright 트렌드*\n"
-                message += f"• 총 수집: `{total_collections}건`\n"
-                message += f"• Playwright 성공률: `{avg_playwright_ratio:.1f}%`\n"
-                
-                # 추출 방법별 트렌드
-                method_trends = trends.get('playwright_method_trends', {})
-                if any(method_trends.values()):
-                    message += f"• 방법별: DOM `{method_trends.get('dom', 0)}` | "
-                    message += f"AJAX `{method_trends.get('ajax', 0)}` | "
-                    message += f"OCR `{method_trends.get('ocr', 0)}`\n"
-                
-                message += "\n"
-            
-            # GitHub Action 상태 (Playwright 기반)
+            # GitHub Action 상태
             if collection_status:
                 action_emoji = "✅" if collection_status == "success" else "❌"
-                message += f"*🤖 GitHub Action (Playwright)*\n"
+                message += f"*🤖 GitHub Action*\n"
                 message += f"• 상태: {action_emoji} `{collection_status}`\n"
-                
-                # Playwright 추출 방법 정보 추가
-                extraction_methods = os.getenv('EXTRACTION_METHODS', 'unknown')
-                if extraction_methods != 'unknown':
-                    method_names = {
-                        'playwright_multi': '🌐 멀티 추출 (DOM+AJAX+OCR)',
-                        'playwright_dom': '🌐 DOM 추출',
-                        'playwright_ajax': '📡 AJAX 모니터링',
-                        'playwright_ocr': '📷 OCR 백업',
-                        'failed': '❌ 모든 방법 실패'
-                    }.get(extraction_methods, extraction_methods)
-                    message += f"• 추출 방법: `{method_names}`\n"
-                
-                message += "\n"
+                message += f"• 시스템: `최적화 시스템`\n\n"
             
             # 푸터
             message += f"---\n"
             message += f"🕒 리포트 생성: `{datetime.now().strftime('%H:%M:%S')} KST`\n"
-            message += f"🌐 수집 방식: `Playwright 기반 멀티 추출`\n"
-            message += f"🔗 [GitHub Repository](https://github.com/your-repo/krx-playwright-collector)"
+            message += f"🚀 수집 방식: `최적화 시스템 (중복 제거)`\n"
+            message += f"💾 용량 절약: `{storage_efficiency}%`\n"
+            message += f"🔗 [GitHub Repository](https://github.com/your-repo/krx-optimized-collector)"
             
             return message
             
         except Exception as e:
-            logger.error(f"Playwright 메시지 포맷팅 중 오류: {e}")
-            return f"❌ *Playwright 일일 요약 생성 실패*\n\n오류: {str(e)}\n\n📅 날짜: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            logger.error(f"최적화 메시지 포맷팅 중 오류: {e}")
+            return f"❌ *최적화 일일 요약 생성 실패*\n\n오류: {str(e)}\n\n📅 날짜: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
     @staticmethod
-    def format_error_alert(error_message: str) -> str:
-        """Playwright 오류 알림 메시지 포맷팅"""
-        message = f"🚨 *Playwright KRX 데이터 수집 오류*\n\n"
+    def format_optimization_alert(error_message: str) -> str:
+        """최적화 시스템 오류 알림 메시지"""
+        message = f"🚨 *최적화 KRX 데이터 수집 오류*\n\n"
         message += f"⏰ 시간: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} KST`\n"
         message += f"❌ 오류: `{error_message}`\n"
-        message += f"🌐 수집 방식: `Playwright 멀티 추출`\n\n"
+        message += f"🚀 시스템: `최적화 시스템 (중복 제거)`\n\n"
         message += f"🔧 확인 필요:\n"
         message += f"• GitHub Actions 로그\n"
-        message += f"• Playwright 브라우저 상태\n"
-        message += f"• OCR 백업 스크린샷\n"
-        message += f"• 네트워크 연결 상태"
+        message += f"• 최적화 알고리즘 상태\n"
+        message += f"• 중복 제거 로직\n"
+        message += f"• Google Sheets 접근 권한"
         return message
 
 def main():
-    """Playwright 기반 메인 실행 함수"""
+    """최적화된 메인 실행 함수"""
     try:
-        logger.info("=== Playwright 기반 텔레그램 일일 요약 및 알림 시작 ===")
+        logger.info("=== 최적화된 텔레그램 일일 요약 및 알림 시작 ===")
         
         # 환경변수 확인
         telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -541,8 +443,8 @@ def main():
         creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
         sheet_id = os.getenv('KAU_SHEET_ID')
         collection_status = os.getenv('COLLECTION_STATUS', '')
-        collection_message = os.getenv('COLLECTION_MESSAGE', '')
-        extraction_methods = os.getenv('EXTRACTION_METHODS', '')
+        collection_frequency = os.getenv('COLLECTION_FREQUENCY', 'unknown')
+        is_final_session = os.getenv('IS_FINAL_SESSION', 'false').lower() == 'true'
         force_telegram = os.getenv('FORCE_TELEGRAM', 'false').lower() == 'true'
         
         if not telegram_bot_token or not telegram_chat_id:
@@ -553,99 +455,80 @@ def main():
             logger.error("Google Sheets 인증 정보가 없습니다")
             return
         
-        logger.info(f"Playwright 수집 상태: {collection_status}")
-        logger.info(f"추출 방법: {extraction_methods}")
-        logger.info(f"수집 메시지: {collection_message}")
-        logger.info(f"강제 텔레그램 전송: {force_telegram}")
+        logger.info(f"수집 상태: {collection_status}")
+        logger.info(f"수집 주기: {collection_frequency}")
+        logger.info(f"최종 세션: {is_final_session}")
+        logger.info(f"강제 전송: {force_telegram}")
         
         # 텔레그램 알림 시스템 초기화
         telegram = TelegramNotifier(telegram_bot_token, telegram_chat_id)
         
-        # 텔레그램 연결 테스트 실행
-        logger.info("=== 텔레그램 연결 테스트 시작 ===")
+        # 연결 테스트
         bot_ok = telegram.test_bot_connection()
         chat_ok = telegram.test_chat_access()
         
-        if not bot_ok:
-            logger.error("❌ Bot 토큰에 문제가 있습니다")
-            print("❌ Bot 토큰 오류 - GitHub Secrets CARBON_TOKEN 확인 필요")
-            return
-            
-        if not chat_ok:
-            logger.error("❌ Chat ID에 문제가 있습니다")  
-            print("❌ Chat ID 오류 - GitHub Secrets ESG_TESTER 확인 필요")
-            print("💡 해결방법:")
-            print("   1. 텔레그램에서 봇과 대화 시작")
-            print("   2. /start 명령어 전송") 
-            print("   3. Chat ID 재확인")
+        if not bot_ok or not chat_ok:
+            logger.error("텔레그램 연결 실패")
             return
         
-        # Playwright 데이터 분석기 초기화
-        analyzer = PlaywrightDataAnalyzer(creds_json, sheet_id)
+        # 최적화된 데이터 분석기 초기화
+        analyzer = OptimizedDataAnalyzer(creds_json, sheet_id)
         
         # 오늘 데이터 분석
-        today_data, analysis = analyzer.get_today_data()
-        logger.info(f"Playwright 데이터 분석 완료: {analysis.get('status', 'Unknown')}")
+        today_data, analysis = analyzer.get_today_optimized_data()
+        logger.info(f"최적화 데이터 분석 완료: {analysis.get('status', 'Unknown')}")
         
-        # 최근 트렌드 분석
-        trends = analyzer.get_recent_trends(7)
-        logger.info(f"Playwright 트렌드 분석 완료: {len(trends)} 항목")
-        
-        # 알림 조건 확인 (Playwright 기준)
+        # 알림 조건 확인 (최적화 기준)
         should_alert = (
             analysis.get('status') in ['FAILED', 'ERROR', 'NO_DATA'] or  # 심각한 오류
-            analysis.get('failed_collections', 0) > 0 or  # 부분 실패 (레거시 데이터 혼재)
             collection_status == 'failed' or  # GitHub Action 실패
-            analysis.get('ocr_usage', 0) > 0 or  # OCR 백업 사용 (시각적 확인 필요)
-            force_telegram  # 강제 전송 플래그
+            is_final_session or  # 12:30 최종 세션
+            force_telegram  # 강제 전송
         )
         
-        # 메시지 생성
+        # 메시지 생성 및 전송
         if should_alert:
-            if force_telegram:
-                logger.info("🚀 강제 텔레그램 전송 요청 - Playwright 요약 전송")
+            if is_final_session:
+                logger.info("🎯 12:30 KST 최종 일일 요약 전송")
+            elif force_telegram:
+                logger.info("🚀 강제 텔레그램 전송")
             else:
-                logger.info("⚠️ 알림 조건 충족 - Playwright 상세 요약 전송")
-            message = PlaywrightMessageFormatter.format_daily_summary(analysis, trends, collection_status)
+                logger.info("⚠️ 알림 조건 충족 - 최적화 상세 요약 전송")
+            
+            message = OptimizedMessageFormatter.format_optimized_daily_summary(analysis, collection_status)
         else:
-            # 성공시에도 간단한 요약 전송 (15시에만)
-            current_hour = datetime.now().hour
-            if current_hour == 15:  # 15:00 KST 정기 요약
-                logger.info("📊 정기 Playwright 일일 요약 전송")
-                message = PlaywrightMessageFormatter.format_daily_summary(analysis, trends, collection_status)
-            else:
-                logger.info("✅ Playwright 정상 상태 - 알림 건너뜀")
-                return
+            logger.info("✅ 최적화 시스템 정상 상태 - 알림 건너뜀")
+            return
         
         # 텔레그램 메시지 전송
         success = telegram.send_message(message)
         
         if success:
-            logger.info("✅ Playwright 기반 텔레그램 알림 전송 성공")
-            print("✅ Playwright 텔레그램 일일 요약 전송 완료!")
+            logger.info("✅ 최적화 텔레그램 알림 전송 성공")
+            print("✅ 최적화 텔레그램 일일 요약 전송 완료!")
             print(f"📊 분석 결과: {analysis.get('status', 'Unknown')}")
-            print(f"🌐 추출 방법: {', '.join(analysis.get('extraction_methods', {}).keys())}")
+            print(f"🚀 시스템: 최적화 (중복 제거)")
+            print(f"💾 용량 절약: {analysis.get('storage_efficiency', 0)}%")
             print(f"📱 메시지 길이: {len(message)} 문자")
             
-            # Playwright 성능 정보
-            perf = analysis.get('playwright_performance', {})
-            if perf:
-                print(f"⚡ DOM: {perf.get('dom_ratio', 0)}% | AJAX: {perf.get('ajax_ratio', 0)}% | OCR: {perf.get('ocr_ratio', 0)}%")
+            if analysis.get('storage_efficiency', 0) > 0:
+                print(f"⚡ 중복 제거: {analysis.get('skipped_duplicates', 0)}개")
+                
         else:
-            logger.error("❌ Playwright 텔레그램 알림 전송 실패")
+            logger.error("❌ 최적화 텔레그램 알림 전송 실패")
             print("❌ 텔레그램 알림 전송 실패")
             
     except Exception as e:
-        logger.error(f"❌ Playwright 텔레그램 알림 시스템 오류: {e}")
+        logger.error(f"❌ 최적화 텔레그램 알림 시스템 오류: {e}")
         print(f"❌ 오류: {e}")
         
         # 긴급 오류 알림 시도
         try:
             if 'telegram' in locals():
-                error_message = PlaywrightMessageFormatter.format_error_alert(str(e))
+                error_message = OptimizedMessageFormatter.format_optimization_alert(str(e))
                 telegram.send_message(error_message)
         except:
-            pass  # 긴급 알림도 실패하면 조용히 넘어감
+            pass
 
 if __name__ == "__main__":
     main()
