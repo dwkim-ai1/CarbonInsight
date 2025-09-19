@@ -38,7 +38,7 @@ class RealKRXCollector:
         
         self.base_url = "https://ets.krx.co.kr"
         
-def get_real_krx_data(self) -> List[Dict]:
+    def get_real_krx_data(self) -> List[Dict]:
         """실제 KRX ETS 데이터 수집 (404 오류 수정버전)"""
         try:
             logger.info("=== 실제 KRX ETS 데이터 수집 시작 ===")
