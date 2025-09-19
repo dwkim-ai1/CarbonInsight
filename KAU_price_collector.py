@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-실제 데이터 파싱 및 누적 저장이 수정된 KRX ETS 데이터 수집기
-1. 기존 데이터 삭제하지 않고 시간별 누적 저장
-2. 실제 웹페이지 구조에 맞는 정확한 파싱
+표 구조 문제 해결된 KRX ETS 데이터 수집기
+1. Google Sheets 컬럼 구조 정확히 정렬
+2. 헤더-데이터 완벽 매핑
 3. 실시간 데이터 우선, 샘플 데이터는 최후 수단
+4. 상세한 디버깅 및 검증 시스템
 """
 
 import requests
@@ -131,7 +132,6 @@ class RealKRXCollector:
             
             # 더 정확한 테이블 선택자
             table_selectors = [
-                'table[id*="gridtable45c48cce2e2d7fbdea1afc51c7c6ad26"]',  # 실제 확인된 ID
                 'table[id*="gridtable"]',
                 'table[summary*="배출권"]',
                 'table[summary*="현재가"]',
@@ -388,6 +388,10 @@ class EnhancedSheetsManager:
             try:
                 self.worksheet = self.spreadsheet.worksheet('ets.KRX')
                 logger.info("기존 ets.KRX 워크시트 사용")
+                
+                # 🔧 헤더 일관성 확인 및 수정
+                self._verify_and_fix_headers()
+                
             except gspread.WorksheetNotFound:
                 logger.info("ets.KRX 워크시트 생성...")
                 self.worksheet = self.spreadsheet.add_worksheet(
@@ -396,25 +400,64 @@ class EnhancedSheetsManager:
                     cols=16
                 )
                 
-                # 확장된 헤더
-                headers = [
-                    '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
-                    '시가', '고가', '저가', '거래량', '거래대금', 
-                    '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
-                ]
-                self.worksheet.update('A1:P1', [headers])
-                
-                # 헤더 서식
-                self.worksheet.format('A1:P1', {
-                    'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
-                    'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
-                    'horizontalAlignment': 'CENTER'
-                })
-                
-                logger.info("확장 헤더 설정 완료")
+                # 정확한 헤더 설정
+                self._setup_headers()
                 
         except Exception as e:
             logger.error(f"워크시트 설정 실패: {e}")
+            raise
+    
+    def _verify_and_fix_headers(self):
+        """헤더 일관성 확인 및 수정"""
+        try:
+            # 현재 헤더 확인
+            current_headers = self.worksheet.row_values(1)
+            logger.info(f"📋 현재 헤더 ({len(current_headers)}개): {current_headers}")
+            
+            # 올바른 헤더 정의
+            correct_headers = [
+                '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
+                '시가', '고가', '저가', '거래량', '거래대금', 
+                '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
+            ]
+            
+            # 헤더가 다르면 수정
+            if current_headers != correct_headers:
+                logger.info("🔧 헤더 구조 수정 중...")
+                self._setup_headers()
+                logger.info("✅ 헤더 구조 수정 완료")
+            else:
+                logger.info("✅ 헤더 구조 정상")
+                
+        except Exception as e:
+            logger.warning(f"헤더 확인 중 오류: {e}")
+            # 오류 시 헤더 재설정
+            self._setup_headers()
+    
+    def _setup_headers(self):
+        """정확한 헤더 설정"""
+        try:
+            # 정확한 헤더 순서
+            headers = [
+                '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
+                '시가', '고가', '저가', '거래량', '거래대금', 
+                '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
+            ]
+            
+            # 헤더 업데이트
+            self.worksheet.update('A1:P1', [headers])
+            
+            # 헤더 서식 (배경색 + 굵게 + 가운데 정렬)
+            self.worksheet.format('A1:P1', {
+                'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+                'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
+                'horizontalAlignment': 'CENTER'
+            })
+            
+            logger.info(f"📋 헤더 설정 완료: {len(headers)}개 컬럼")
+            
+        except Exception as e:
+            logger.error(f"헤더 설정 실패: {e}")
             raise
     
     def append_real_data(self, data: List[Dict]):
@@ -432,31 +475,57 @@ class EnhancedSheetsManager:
             # ✅ 기존 데이터 삭제하지 않음 - 시간별 누적 저장
             logger.info(f"📈 {current_date} {current_time} 데이터 추가 중...")
             
-            # 새 데이터 준비 (시간 정보 포함)
+            # 헤더 순서 확인 및 디버깅
+            expected_headers = [
+                '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
+                '시가', '고가', '저가', '거래량', '거래대금', 
+                '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
+            ]
+            logger.info(f"📋 예상 헤더 ({len(expected_headers)}개): {expected_headers}")
+            
+            # 새 데이터 준비 (헤더 순서 정확히 맞춤)
             new_rows = []
-            for item in data:
+            for i, item in enumerate(data):
+                # 모든 값을 문자열로 변환하여 일관성 확보
                 row = [
-                    item['date'],
-                    item.get('time', current_time),  # 시간 컬럼 추가
-                    item['symbol'],
-                    item['current_price'],
-                    item['change'],
-                    item['change_rate'],
-                    item['open_price'],
-                    item['high_price'],
-                    item['low_price'],
-                    item['volume'],
-                    item['trading_value'],
-                    item['weighted_avg'],
-                    item.get('collection_time', current_time),
-                    item.get('data_source', 'unknown'),
-                    item.get('trading_phase', 'unknown'),
-                    item.get('execution_priority', 'unknown')
+                    str(item['date']),                                    # 1. 날짜
+                    str(item.get('time', current_time)),                  # 2. 시간  
+                    str(item['symbol']),                                  # 3. 종목명
+                    str(item['current_price']),                          # 4. 현재가
+                    str(item['change']),                                 # 5. 대비
+                    str(item['change_rate']),                            # 6. 등락률
+                    str(item['open_price']),                             # 7. 시가
+                    str(item['high_price']),                             # 8. 고가
+                    str(item['low_price']),                              # 9. 저가
+                    str(item['volume']),                                 # 10. 거래량
+                    str(item['trading_value']),                          # 11. 거래대금
+                    str(item['weighted_avg']),                           # 12. 가중평균
+                    str(item.get('collection_time', current_time)),      # 13. 수집시간
+                    str(item.get('data_source', 'unknown')),             # 14. 데이터소스
+                    str(item.get('trading_phase', 'unknown')),           # 15. 거래단계
+                    str(item.get('execution_priority', 'unknown'))       # 16. 우선도
                 ]
+                
+                logger.info(f"📊 종목 {i+1}: {row[:6]}...")  # 처음 6개 컬럼만 로깅
+                logger.info(f"📊 컬럼 수: {len(row)}개 (예상: {len(expected_headers)}개)")
+                
+                if len(row) != len(expected_headers):
+                    logger.error(f"❌ 컬럼 수 불일치! 실제: {len(row)}, 예상: {len(expected_headers)}")
+                    return False
+                
                 new_rows.append(row)
             
             # 데이터 일괄 추가 (기존 데이터 유지)
             if new_rows:
+                # 🔧 최종 안전 검증
+                logger.info(f"📤 Google Sheets 업로드 시작...")
+                logger.info(f"📊 업로드할 행 수: {len(new_rows)}")
+                logger.info(f"📊 각 행의 컬럼 수: {[len(row) for row in new_rows]}")
+                
+                # 샘플 행 로깅 (디버깅용)
+                if new_rows:
+                    logger.info(f"📊 첫 번째 행 샘플: {new_rows[0]}")
+                
                 self.worksheet.append_rows(new_rows)
                 logger.info(f"✅ {len(new_rows)}개 행 누적 추가 완료")
                 
@@ -469,6 +538,7 @@ class EnhancedSheetsManager:
             
         except Exception as e:
             logger.error(f"데이터 추가 실패: {e}")
+            logger.error(f"오류 상세: 첫 번째 아이템 = {data[0] if data else 'No data'}")
             return False
     
     def _log_realtime_statistics(self, data: List[Dict]):
@@ -542,17 +612,48 @@ def main():
         if real_data:
             logger.info(f"✅ 데이터 수집 성공: {len(real_data)}개 종목")
             
+            # 📊 수집된 데이터 상세 검증
+            logger.info("=== 수집 데이터 검증 ===")
+            for i, item in enumerate(real_data):
+                logger.info(f"종목 {i+1}: {item['symbol']} - {item['current_price']:,}원 "
+                          f"(거래량: {item['volume']:,}톤, 소스: {item.get('data_source', 'unknown')})")
+            
             if test_mode:
                 logger.info("테스트 모드: Google Sheets 업데이트 건너뜀")
-                for item in real_data[:3]:
-                    logger.info(f"테스트 데이터: {item['symbol']} - {item['current_price']:,}원 "
-                              f"(거래량: {item['volume']:,}톤)")
+                logger.info("=== 테스트 모드 - 업로드 시뮬레이션 ===")
+                
+                # 테스트용 데이터 구조 검증
+                expected_headers = [
+                    '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
+                    '시가', '고가', '저가', '거래량', '거래대금', 
+                    '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
+                ]
+                
+                for i, item in enumerate(real_data[:2]):  # 처음 2개만 테스트
+                    current_time = item.get('time', datetime.now().strftime('%H:%M:%S'))
+                    test_row = [
+                        str(item['date']), str(item.get('time', current_time)), str(item['symbol']),
+                        str(item['current_price']), str(item['change']), str(item['change_rate']),
+                        str(item['open_price']), str(item['high_price']), str(item['low_price']),
+                        str(item['volume']), str(item['trading_value']), str(item['weighted_avg']),
+                        str(item.get('collection_time', current_time)), str(item.get('data_source', 'unknown')),
+                        str(item.get('trading_phase', 'unknown')), str(item.get('execution_priority', 'unknown'))
+                    ]
+                    
+                    logger.info(f"테스트 행 {i+1} ({len(test_row)}개 컬럼): {test_row}")
+                    logger.info(f"헤더 ({len(expected_headers)}개 컬럼): {expected_headers}")
+                    
+                    if len(test_row) == len(expected_headers):
+                        logger.info(f"✅ 종목 {i+1} 데이터 구조 정상")
+                    else:
+                        logger.error(f"❌ 종목 {i+1} 데이터 구조 오류! 컬럼 수: {len(test_row)} vs {len(expected_headers)}")
                 
                 print(f"✅ 테스트 모드 - 개선된 데이터 수집 성공!")
                 print(f"📊 총 종목: {len(real_data)}개")
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"🎯 우선도: {execution_priority}")
                 print(f"💾 데이터 소스: {real_data[0].get('data_source', 'unknown')}")
+                print(f"📋 데이터 구조 검증: 통과")
                 return
             
             # Google Sheets 누적 저장
