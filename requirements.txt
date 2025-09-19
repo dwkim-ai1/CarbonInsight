@@ -4,10 +4,10 @@ gspread==5.12.4
 google-auth==2.23.4
 pandas==2.1.4
 
-# Playwright 웹 스크래핑 (BeautifulSoup 대체)
+# Playwright 웹 스크래핑 (Ubuntu 22.04 안정화)
 playwright==1.40.0
 
-# OCR 백업 시스템 (Ubuntu 24.04 호환)
+# OCR 백업 시스템 (Ubuntu 22.04 호환)
 easyocr==1.7.0
 opencv-python-headless==4.8.1.78  # Headless 버전 (GUI 불필요)
 Pillow==10.1.0
@@ -22,3 +22,7 @@ lxml==4.9.3
 
 # 추가 유틸리티
 python-dotenv==1.0.0
+
+# 호환성 강화 (Ubuntu 22.04)
+setuptools==69.0.3
+wheel==0.42.0
