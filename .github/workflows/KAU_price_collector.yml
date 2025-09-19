@@ -1,7 +1,7 @@
 # .github/workflows/KAU_price_collector.yml
 # KRX ETS v3.1 - Job별 최적화 + 강화된 캐시 시스템
 
-name: KRX ETS Data Collector v3.1 (Job별 최적화)
+name: KRX ETS Data Collector v3.1
 
 on:
   schedule:
