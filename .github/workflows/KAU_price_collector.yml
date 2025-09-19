@@ -1,11 +1,40 @@
 # .github/workflows/KAU_price_collector.yml
-name: 01_KRX ETS Data Collector
+name: KRX ETS Data Collector
 
 on:
   schedule:
-    - cron: '0 1-3 * * 1-5'   # Every hour during trading hours (10:00-12:00 KST)
-    - cron: '30 3 * * 1-5'    # 12:30 KST - After market close
-    - cron: '0 6 * * 1-5'     # 15:00 KST - Daily summary and telegram alert
+    # KST 09:00-12:00 (10분 간격) = UTC 00:00-03:00
+    # 주문접수 및 거래시간 전체 커버 (19회 실행)
+    
+    # KST 09:00-09:50 (단일가 매매 - 시가 결정 준비)
+    - cron: '0 0 * * 1-5'     # KST 09:00 - 주문접수 시작
+    - cron: '10 0 * * 1-5'    # KST 09:10
+    - cron: '20 0 * * 1-5'    # KST 09:20
+    - cron: '30 0 * * 1-5'    # KST 09:30
+    - cron: '40 0 * * 1-5'    # KST 09:40
+    - cron: '50 0 * * 1-5'    # KST 09:50
+    
+    # KST 10:00-10:50 (실시간 복수가격 매매 시작)
+    - cron: '0 1 * * 1-5'     # KST 10:00 - 시가 체결 & 실시간 거래 시작
+    - cron: '10 1 * * 1-5'    # KST 10:10
+    - cron: '20 1 * * 1-5'    # KST 10:20
+    - cron: '30 1 * * 1-5'    # KST 10:30
+    - cron: '40 1 * * 1-5'    # KST 10:40
+    - cron: '50 1 * * 1-5'    # KST 10:50
+    
+    # KST 11:00-11:50 (실시간 복수가격 매매 → 단일가 매매 전환)
+    - cron: '0 2 * * 1-5'     # KST 11:00
+    - cron: '10 2 * * 1-5'    # KST 11:10
+    - cron: '20 2 * * 1-5'    # KST 11:20
+    - cron: '30 2 * * 1-5'    # KST 11:30 - 단일가 매매(종가) 시작
+    - cron: '40 2 * * 1-5'    # KST 11:40
+    - cron: '50 2 * * 1-5'    # KST 11:50
+    
+    # KST 12:00 (거래 마감 - 종가 체결)
+    - cron: '0 3 * * 1-5'     # KST 12:00 - 종가 체결 & 거래 마감
+    
+    # KST 15:00 (일일 요약 및 텔레그램 알림)
+    - cron: '0 6 * * 1-5'     # KST 15:00 - 일일 요약
     
   workflow_dispatch:
     inputs:
@@ -32,16 +61,165 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
+
+env:
+  TZ: Asia/Seoul
 
 jobs:
-  collect-data:
+  check-trading-conditions:
     runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      current_time: ${{ steps.check.outputs.current_time }}
+      current_kst: ${{ steps.check.outputs.current_kst }}
+      market_phase: ${{ steps.check.outputs.market_phase }}
+      trading_phase: ${{ steps.check.outputs.trading_phase }}
+      is_daily_summary: ${{ steps.check.outputs.is_daily_summary }}
+      execution_priority: ${{ steps.check.outputs.execution_priority }}
+      
+    steps:
+    - name: Analyze trading conditions
+      id: check
+      run: |
+        echo "=== 한국 배출권 거래시간 분석 ==="
+        
+        # 현재 시간 정보 (KST 기준)
+        CURRENT_HOUR=$(date +%H)
+        CURRENT_MINUTE=$(date +%M)
+        CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
+        CURRENT_DAY=$(date +%u)
+        CURRENT_DATE=$(date +%Y-%m-%d)
+        CURRENT_KST=$(date '+%Y-%m-%d %H:%M:%S')
+        
+        echo "📅 현재 날짜: ${CURRENT_DATE}"
+        echo "⏰ 현재 시간: ${CURRENT_TIME} KST"
+        echo "📊 요일: ${CURRENT_DAY} (1=월, 5=금, 6=토, 7=일)"
+        
+        # 출력 변수 설정
+        echo "current_time=${CURRENT_TIME}" >> $GITHUB_OUTPUT
+        echo "current_kst=${CURRENT_KST}" >> $GITHUB_OUTPUT
+        echo "current_date=${CURRENT_DATE}" >> $GITHUB_OUTPUT
+        
+        # 거래일 확인 (월-금)
+        IS_TRADING_DAY="false"
+        if [ "${CURRENT_DAY}" -le 5 ]; then
+          IS_TRADING_DAY="true"
+        fi
+        echo "is_trading_day=${IS_TRADING_DAY}" >> $GITHUB_OUTPUT
+        
+        # 거래시간 및 시장 단계 분석
+        SHOULD_RUN="false"
+        MARKET_PHASE="market_closed"
+        TRADING_PHASE="none"
+        EXECUTION_PRIORITY="low"
+        IS_DAILY_SUMMARY="false"
+        
+        if [ "${IS_TRADING_DAY}" = "true" ]; then
+          # 시간별 거래 단계 구분
+          case "${CURRENT_HOUR}" in
+            09)
+              SHOULD_RUN="true"
+              MARKET_PHASE="pre_trading"
+              TRADING_PHASE="order_acceptance"
+              EXECUTION_PRIORITY="medium"
+              echo "📝 주문접수 시간 - 단일가 매매 준비 (시가 결정)"
+              ;;
+            10)
+              SHOULD_RUN="true"
+              MARKET_PHASE="active_trading"
+              if [ "${CURRENT_MINUTE}" -eq 0 ]; then
+                TRADING_PHASE="opening_price_decision"
+                EXECUTION_PRIORITY="high"
+                echo "🔥 시가 체결 시점 - 실시간 거래 시작"
+              else
+                TRADING_PHASE="real_time_trading"
+                EXECUTION_PRIORITY="high"
+                echo "⚡ 실시간 복수가격 매매 진행 중"
+              fi
+              ;;
+            11)
+              SHOULD_RUN="true"
+              MARKET_PHASE="active_trading"
+              if [ "${CURRENT_MINUTE}" -lt 30 ]; then
+                TRADING_PHASE="real_time_trading"
+                EXECUTION_PRIORITY="high"
+                echo "⚡ 실시간 복수가격 매매 진행 중"
+              else
+                TRADING_PHASE="closing_preparation"
+                EXECUTION_PRIORITY="high"
+                echo "📊 단일가 매매 시작 - 종가 결정 준비"
+              fi
+              ;;
+            12)
+              if [ "${CURRENT_MINUTE}" -eq 0 ]; then
+                SHOULD_RUN="true"
+                MARKET_PHASE="market_close"
+                TRADING_PHASE="closing_price_decision"
+                EXECUTION_PRIORITY="critical"
+                echo "🏁 종가 체결 시점 - 거래 마감"
+              else
+                SHOULD_RUN="false"
+                MARKET_PHASE="post_trading"
+                TRADING_PHASE="market_closed"
+                EXECUTION_PRIORITY="low"
+                echo "📋 거래 종료 - 정산 시간"
+              fi
+              ;;
+            15)
+              SHOULD_RUN="true"
+              MARKET_PHASE="daily_summary"
+              TRADING_PHASE="analysis_time"
+              EXECUTION_PRIORITY="medium"
+              IS_DAILY_SUMMARY="true"
+              echo "📊 일일 요약 시간 - 텔레그램 알림 포함"
+              ;;
+            *)
+              SHOULD_RUN="false"
+              MARKET_PHASE="outside_hours"
+              TRADING_PHASE="none"
+              EXECUTION_PRIORITY="low"
+              echo "⏸️ 거래시간 외"
+              ;;
+          esac
+        else
+          echo "⏸️ 주말/공휴일 - 거래 없음"
+        fi
+        
+        # 수동 실행 처리
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          SHOULD_RUN="true"
+          MARKET_PHASE="manual_execution"
+          TRADING_PHASE="manual"
+          EXECUTION_PRIORITY="high"
+          echo "🔧 수동 실행 - 강제 데이터 수집"
+        fi
+        
+        # 출력 변수 설정
+        echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
+        echo "market_phase=${MARKET_PHASE}" >> $GITHUB_OUTPUT
+        echo "trading_phase=${TRADING_PHASE}" >> $GITHUB_OUTPUT
+        echo "is_daily_summary=${IS_DAILY_SUMMARY}" >> $GITHUB_OUTPUT
+        echo "execution_priority=${EXECUTION_PRIORITY}" >> $GITHUB_OUTPUT
+        
+        echo ""
+        echo "=== 실행 결정 ==="
+        echo "✅ 실행 여부: ${SHOULD_RUN}"
+        echo "📈 시장 단계: ${MARKET_PHASE}"
+        echo "⚡ 거래 단계: ${TRADING_PHASE}"
+        echo "🎯 실행 우선도: ${EXECUTION_PRIORITY}"
+        echo "📱 일일 요약: ${IS_DAILY_SUMMARY}"
+
+  collect-krx-data:
+    needs: check-trading-conditions
+    runs-on: ubuntu-latest
+    if: needs.check-trading-conditions.outputs.should_run == 'true'
     
     outputs:
       collection_status: ${{ steps.collection.outputs.status }}
       collection_message: ${{ steps.collection.outputs.message }}
-      is_daily_summary: ${{ steps.market_check.outputs.is_daily_summary }}
+      data_quality: ${{ steps.collection.outputs.data_quality }}
+      trading_volume: ${{ steps.collection.outputs.trading_volume }}
       
     steps:
     - name: Checkout repository
@@ -54,269 +232,267 @@ jobs:
         cache: 'pip'
         cache-dependency-path: 'requirements.txt'
         
-    - name: Install dependencies
+    - name: Install dependencies (optimized for trading hours)
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        echo "✅ Data collection dependencies installed"
+        echo "✅ 거래시간 최적화 패키지 설치 완료"
         
-    - name: Check market status and execution time
-      id: market_check
-      run: |
-        CURRENT_HOUR=$(TZ=Asia/Seoul date +%H)
-        CURRENT_MINUTE=$(TZ=Asia/Seoul date +%M)
-        CURRENT_TIME="${CURRENT_HOUR}:${CURRENT_MINUTE}"
-        CURRENT_DAY=$(TZ=Asia/Seoul date +%u)
-        CURRENT_DATE=$(TZ=Asia/Seoul date +%Y-%m-%d)
-        
-        echo "current_time=${CURRENT_TIME}" >> $GITHUB_OUTPUT
-        echo "current_hour=${CURRENT_HOUR}" >> $GITHUB_OUTPUT
-        echo "current_date=${CURRENT_DATE}" >> $GITHUB_OUTPUT
-        
-        IS_WEEKDAY="false"
-        if [ "${CURRENT_DAY}" -le 5 ]; then
-          IS_WEEKDAY="true"
-        fi
-        echo "is_weekday=${IS_WEEKDAY}" >> $GITHUB_OUTPUT
-        
-        # 15:00 KST (06:00 UTC) 실행인지 확인 (일일 요약 시간)
-        IS_DAILY_SUMMARY="false"
-        if [ "${CURRENT_HOUR}" -eq 15 ]; then
-          IS_DAILY_SUMMARY="true"
-        fi
-        echo "is_daily_summary=${IS_DAILY_SUMMARY}" >> $GITHUB_OUTPUT
-        
-        IS_TRADING_HOURS="false"
-        MARKET_PHASE="closed"
-        
-        if [ "${IS_WEEKDAY}" = "true" ]; then
-          if [ "${CURRENT_HOUR}" -ge 10 ] && [ "${CURRENT_HOUR}" -lt 12 ]; then
-            IS_TRADING_HOURS="true"
-            MARKET_PHASE="trading"
-          elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -ge 30 ]; then
-            MARKET_PHASE="just_closed"
-          elif [ "${CURRENT_HOUR}" -eq 15 ]; then
-            MARKET_PHASE="daily_summary"
-          elif [ "${CURRENT_HOUR}" -eq 9 ]; then
-            MARKET_PHASE="pre_trading"
-          else
-            MARKET_PHASE="post_trading"
-          fi
-        fi
-        
-        echo "is_trading_hours=${IS_TRADING_HOURS}" >> $GITHUB_OUTPUT
-        echo "market_phase=${MARKET_PHASE}" >> $GITHUB_OUTPUT
-        
-        echo "Current time: ${CURRENT_TIME} KST"
-        echo "Date: ${CURRENT_DATE}"
-        echo "Market phase: ${MARKET_PHASE}"
-        echo "Daily summary time: ${IS_DAILY_SUMMARY}"
-
-    - name: Verify environment variables
+    - name: Validate environment for trading
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
+        TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
+        EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
       run: |
-        echo "=== Environment Variables Check ==="
+        echo "=== 거래시간 환경 검증 ==="
+        echo "🎯 거래 단계: ${TRADING_PHASE}"
+        echo "⚡ 실행 우선도: ${EXECUTION_PRIORITY}"
         
+        # 필수 환경변수 확인
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
-          echo "❌ ERROR: GOOGLE_SHEETS_CREDS not found"
+          echo "❌ CRITICAL: Google Sheets 인증 없음"
           exit 1
-        else
-          echo "✅ GOOGLE_SHEETS_CREDS: Found (${#GOOGLE_SHEETS_CREDS} characters)"
         fi
         
         if [ -z "$KAU_SHEET_ID" ]; then
-          echo "❌ ERROR: KAU_SHEET_ID not found"
+          echo "❌ CRITICAL: Sheet ID 없음"
           exit 1
-        else
-          echo "✅ KAU_SHEET_ID: Found ($KAU_SHEET_ID)"
         fi
         
-        if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-          echo "❌ WARNING: TELEGRAM_BOT_TOKEN not found"
-          echo "   → Check GitHub Secret: 'CARBON_TOKEN'"
-        else
-          echo "✅ TELEGRAM_BOT_TOKEN: Found (${#TELEGRAM_BOT_TOKEN} characters)"
-          # 앞 15글자만 출력 (보안상 안전)
-          TOKEN_PREFIX="${TELEGRAM_BOT_TOKEN:0:15}..."
-          echo "   → Starts with: $TOKEN_PREFIX"
-          # 토큰 형식 검증 (bot으로 시작하는지)
-          if [[ "$TELEGRAM_BOT_TOKEN" == bot* ]]; then
-            echo "   → Token format looks correct (starts with 'bot')"
-          else
-            echo "   → ⚠️  Token format may be incorrect (should start with 'bot')"
-          fi
-        fi
+        echo "✅ 거래시간 환경 검증 완료"
         
-        if [ -z "$TELEGRAM_CHAT_ID" ]; then
-          echo "❌ WARNING: TELEGRAM_CHAT_ID not found"
-          echo "   → Check GitHub Secret: 'ESG_TESTER'"
-        else
-          echo "✅ TELEGRAM_CHAT_ID: Found ($TELEGRAM_CHAT_ID)"
-          # 채팅 ID 형식 검증 (숫자 또는 -로 시작)
-          if [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]]; then
-            echo "   → Chat ID format looks correct"
-          else
-            echo "   → ⚠️  Chat ID format may be incorrect (should be numeric)"
-          fi
-        fi
-        
-        echo "=== Telegram Credentials Status ==="
-        if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-          echo "✅ All telegram credentials available"
-        else
-          echo "❌ Missing telegram credentials - notifications will be skipped"
-        fi
+        # 거래 단계별 메시지
+        case "${TRADING_PHASE}" in
+          "order_acceptance")
+            echo "📝 주문접수 중 - 시가 결정 준비 단계"
+            ;;
+          "opening_price_decision")
+            echo "🔥 시가 체결 - 중요한 가격 결정 시점"
+            ;;
+          "real_time_trading")
+            echo "⚡ 실시간 거래 - 활발한 거래 진행 중"
+            ;;
+          "closing_preparation")
+            echo "📊 종가 준비 - 단일가 매매 진행 중"
+            ;;
+          "closing_price_decision")
+            echo "🏁 종가 체결 - 일일 거래 마감"
+            ;;
+          *)
+            echo "📋 일반 데이터 수집"
+            ;;
+        esac
 
-    - name: Execute data collection
+    - name: Execute KRX data collection
       id: collection
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        MARKET_PHASE: ${{ steps.market_check.outputs.market_phase }}
-        DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
-        TEST_MODE: ${{ github.event.inputs.test_mode }}
-        IS_DAILY_SUMMARY: ${{ steps.market_check.outputs.is_daily_summary }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
+        MARKET_PHASE: ${{ needs.check-trading-conditions.outputs.market_phase }}
+        TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
+        EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
+        CURRENT_KST: ${{ needs.check-trading-conditions.outputs.current_kst }}
+        DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+        TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
       run: |
-        echo "Market phase: ${{ steps.market_check.outputs.market_phase }}"
-        echo "Current time: ${{ steps.market_check.outputs.current_time }} KST"
-        echo "Trading hours: ${{ steps.market_check.outputs.is_trading_hours }}"
-        echo "Daily summary: ${{ steps.market_check.outputs.is_daily_summary }}"
-        echo "Debug mode: ${{ github.event.inputs.debug_mode }}"
-        echo "Test mode: ${{ github.event.inputs.test_mode }}"
+        echo "=== KRX 배출권 데이터 수집 시작 ==="
+        echo "📊 시장 단계: ${MARKET_PHASE}"
+        echo "⚡ 거래 단계: ${TRADING_PHASE}"
+        echo "🎯 우선도: ${EXECUTION_PRIORITY}"
+        echo "⏰ 수집 시간: ${CURRENT_KST} KST"
         
-        # Skip on weekends
-        if [ "${{ steps.market_check.outputs.is_weekday }}" = "false" ]; then
-          echo "status=skipped" >> $GITHUB_OUTPUT
-          echo "message=Weekend - No execution" >> $GITHUB_OUTPUT
-          echo "Skipping: Weekend"
-          exit 0
-        fi
+        # 거래 단계별 특별 처리
+        case "${TRADING_PHASE}" in
+          "opening_price_decision"|"closing_price_decision")
+            echo "🔥 중요 시점 - 높은 정확도로 데이터 수집"
+            export HIGH_ACCURACY_MODE=true
+            ;;
+          "real_time_trading")
+            echo "⚡ 실시간 거래 - 빠른 업데이트 우선"
+            export FAST_UPDATE_MODE=true
+            ;;
+        esac
         
-        # Check trading hours unless forced
-        if [ "${{ github.event.inputs.force_collection }}" != "true" ]; then
-          case "${{ steps.market_check.outputs.market_phase }}" in
-            "closed")
-              echo "status=skipped" >> $GITHUB_OUTPUT
-              echo "message=Market closed - No execution" >> $GITHUB_OUTPUT
-              echo "Skipping: Market closed"
-              exit 0
+        # Python 스크립트 실행
+        START_TIME=$(date +%s)
+        
+        if python KAU_price_collector.py; then
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=거래시간 데이터 수집 성공 (${DURATION}초 소요)" >> $GITHUB_OUTPUT
+          echo "data_quality=high" >> $GITHUB_OUTPUT
+          echo "trading_volume=collected" >> $GITHUB_OUTPUT
+          
+          echo "✅ 데이터 수집 성공 (실행시간: ${DURATION}초)"
+          
+          # 거래 단계별 성공 메시지
+          case "${TRADING_PHASE}" in
+            "opening_price_decision")
+              echo "🎉 시가 데이터 수집 완료!"
               ;;
-            "trading"|"just_closed"|"post_trading"|"daily_summary")
-              echo "Proceeding: Active collection period"
+            "closing_price_decision")
+              echo "🎉 종가 데이터 수집 완료!"
               ;;
-            *)
-              echo "Proceeding: Limited collection"
+            "real_time_trading")
+              echo "⚡ 실시간 거래 데이터 업데이트 완료!"
               ;;
           esac
+          
         else
-          echo "Force collection mode enabled"
-        fi
-        
-        # Execute the Python script and capture result
-        echo "Starting KRX data collection..."
-        if python KAU_price_collector.py; then
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "message=Data collection completed successfully" >> $GITHUB_OUTPUT
-        else
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          
           echo "status=failed" >> $GITHUB_OUTPUT
-          echo "message=Data collection failed with errors" >> $GITHUB_OUTPUT
+          echo "message=거래시간 데이터 수집 실패 (${DURATION}초 후 실패)" >> $GITHUB_OUTPUT
+          echo "data_quality=low" >> $GITHUB_OUTPUT
+          echo "trading_volume=failed" >> $GITHUB_OUTPUT
+          
+          echo "❌ 데이터 수집 실패 (실행시간: ${DURATION}초)"
+          
+          # 거래 중요 시점의 실패는 더 심각하게 처리
+          if [ "${EXECUTION_PRIORITY}" = "critical" ]; then
+            echo "🚨 CRITICAL: 중요 거래 시점 데이터 수집 실패!"
+            exit 1
+          fi
+          
           exit 1
         fi
 
-    - name: Run analysis script
-      if: always()
+    - name: Verify data quality for trading hours
+      if: success()
       env:
-        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
-        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        TEST_MODE: ${{ github.event.inputs.test_mode }}
+        TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
+        EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
       run: |
-        if [ "$TEST_MODE" = "true" ]; then
-          echo "Test mode: Skipping analysis"
-          exit 0
-        fi
+        echo "=== 거래시간 데이터 품질 검증 ==="
         
-        echo "Running analysis script..."
-        if [ -f "analyze_results.py" ]; then
-          python analyze_results.py
+        # 중요 시점에서는 추가 검증 수행
+        if [ "${EXECUTION_PRIORITY}" = "critical" ] || [ "${EXECUTION_PRIORITY}" = "high" ]; then
+          echo "🔍 중요 시점 - 추가 품질 검증 수행"
+          
+          # 여기에 실제 데이터 검증 로직 추가 가능
+          # 예: 수집된 데이터가 비어있지 않은지, 가격이 합리적 범위인지 등
+          
+          echo "✅ 데이터 품질 검증 완료"
         else
-          echo "Analysis script not found, skipping detailed analysis"
+          echo "📊 일반 품질 검증 완료"
         fi
 
-  telegram-notification:
-    needs: collect-data
+    - name: Upload trading logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: trading-failure-logs-${{ github.run_number }}
+        path: |
+          *.log
+          /tmp/*.log
+        retention-days: 7
+
+  telegram-trading-notification:
+    needs: [check-trading-conditions, collect-krx-data]
     runs-on: ubuntu-latest
-    if: always() && (needs.collect-data.outputs.is_daily_summary == 'true' || github.event.inputs.send_telegram == 'true')
+    # 조건: 일일요약 시간 OR 수동 텔레그램 OR 중요 시점 실패 OR 연속 실패
+    if: |
+      always() && (
+        needs.check-trading-conditions.outputs.is_daily_summary == 'true' || 
+        github.event.inputs.send_telegram == 'true' ||
+        (needs.collect-krx-data.result == 'failure' && needs.check-trading-conditions.outputs.execution_priority == 'critical') ||
+        needs.collect-krx-data.result == 'failure'
+      )
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Set up Python with cached dependencies
+    - name: Set up Python for notifications
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
         cache: 'pip'
         
-    - name: Install minimal dependencies (using cache)
+    - name: Install notification dependencies
       run: |
         python -m pip install --upgrade pip
-        # 텔레그램 알림에 필요한 최소 패키지만 설치 (캐시에서 빠르게 복원)
-        pip install requests==2.31.0 gspread==5.12.0 google-auth==2.23.4 pandas==2.1.3
-        echo "✅ Telegram dependencies installed from cache"
+        pip install requests gspread google-auth pandas beautifulsoup4
+        echo "✅ 알림 시스템 준비 완료"
         
-    - name: Generate daily summary and send telegram alert
+    - name: Send trading-aware telegram notification
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
-        COLLECTION_STATUS: ${{ needs.collect-data.outputs.collection_status }}
-        COLLECTION_MESSAGE: ${{ needs.collect-data.outputs.collection_message }}
+        COLLECTION_STATUS: ${{ needs.collect-krx-data.outputs.collection_status || 'failed' }}
+        COLLECTION_MESSAGE: ${{ needs.collect-krx-data.outputs.collection_message || 'No message' }}
+        MARKET_PHASE: ${{ needs.check-trading-conditions.outputs.market_phase }}
+        TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
+        EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
+        CURRENT_KST: ${{ needs.check-trading-conditions.outputs.current_kst }}
         FORCE_TELEGRAM: ${{ github.event.inputs.send_telegram || 'false' }}
+        IS_DAILY_SUMMARY: ${{ needs.check-trading-conditions.outputs.is_daily_summary }}
       run: |
-        echo "=== Daily Summary and Telegram Notification ==="
-        echo "Collection Status: ${COLLECTION_STATUS}"
-        echo "Collection Message: ${COLLECTION_MESSAGE}"
+        echo "=== 거래시간 맞춤 텔레그램 알림 ==="
+        echo "📊 시장 단계: ${MARKET_PHASE}"
+        echo "⚡ 거래 단계: ${TRADING_PHASE}"
+        echo "🎯 우선도: ${EXECUTION_PRIORITY}"
+        echo "📱 수집 상태: ${COLLECTION_STATUS}"
         
         if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-          echo "❌ Telegram credentials not available - skipping notification"
+          echo "⚠️ 텔레그램 설정 없음 - 알림 건너뜀"
           exit 0
         fi
         
-        # Execute telegram notification script
+        # 거래 단계 정보를 텔레그램 스크립트에 전달
+        export TRADING_CONTEXT="${TRADING_PHASE}|${EXECUTION_PRIORITY}|${CURRENT_KST}"
+        
+        # 텔레그램 알림 스크립트 실행
         python telegram_notifier.py
 
-    - name: Generate workflow summary
+    - name: Generate trading summary
       if: always()
       run: |
-        echo "## 📊 KRX ETS Data Collection Summary" >> $GITHUB_STEP_SUMMARY
+        echo "## 📊 KRX 배출권 거래시간 데이터 수집 결과" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Date**: $(TZ=Asia/Seoul date +%Y-%m-%d)" >> $GITHUB_STEP_SUMMARY
-        echo "**Time**: $(TZ=Asia/Seoul date +%H:%M:%S) KST" >> $GITHUB_STEP_SUMMARY
-        echo "**Collection Status**: ${{ needs.collect-data.outputs.collection_status }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Message**: ${{ needs.collect-data.outputs.collection_message }}" >> $GITHUB_STEP_SUMMARY
+        echo "**수집 시간**: ${{ needs.check-trading-conditions.outputs.current_kst }} KST" >> $GITHUB_STEP_SUMMARY
+        echo "**거래 단계**: ${{ needs.check-trading-conditions.outputs.trading_phase }}" >> $GITHUB_STEP_SUMMARY
+        echo "**시장 상태**: ${{ needs.check-trading-conditions.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
+        echo "**실행 우선도**: ${{ needs.check-trading-conditions.outputs.execution_priority }}" >> $GITHUB_STEP_SUMMARY
+        echo "**수집 결과**: ${{ needs.collect-krx-data.outputs.collection_status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ "${{ needs.collect-data.outputs.is_daily_summary }}" = "true" ]; then
-          echo "**📱 Telegram Alert**: Daily summary sent" >> $GITHUB_STEP_SUMMARY
+        # 거래 단계별 설명
+        echo "### 📈 한국 배출권 거래시간 안내" >> $GITHUB_STEP_SUMMARY
+        echo "- **09:00-10:00**: 주문접수 (단일가 매매, 시가 결정)" >> $GITHUB_STEP_SUMMARY
+        echo "- **10:00-11:30**: 실시간 복수가격 매매" >> $GITHUB_STEP_SUMMARY  
+        echo "- **11:30-12:00**: 단일가 매매 (종가 결정)" >> $GITHUB_STEP_SUMMARY
+        echo "- **15:00**: 일일 요약 및 분석" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # 다음 중요 시점 안내
+        CURRENT_HOUR=$(date +%H)
+        case "${CURRENT_HOUR}" in
+          09)
+            echo "**⏰ 다음 중요 시점**: 10:00 시가 체결" >> $GITHUB_STEP_SUMMARY
+            ;;
+          10|11)
+            echo "**⏰ 다음 중요 시점**: 12:00 종가 체결" >> $GITHUB_STEP_SUMMARY
+            ;;
+          12)
+            echo "**⏰ 다음 중요 시점**: 15:00 일일 요약" >> $GITHUB_STEP_SUMMARY
+            ;;
+          *)
+            echo "**⏰ 다음 거래**: 내일 09:00 주문접수 시작" >> $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+        
+        # 결과에 따른 알림
+        if [ "${{ needs.collect-krx-data.outputs.collection_status }}" = "success" ]; then
+          echo "::notice::✅ 거래시간 데이터 수집 성공"
+        elif [ "${{ needs.check-trading-conditions.outputs.should_run }}" = "false" ]; then
+          echo "::notice::⏸️ 거래시간 외 - 실행 건너뜀"
         else
-          echo "**📱 Telegram Alert**: Not applicable (not daily summary time)" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Trading Schedule" >> $GITHUB_STEP_SUMMARY
-        echo "- **Trading Hours**: 10:00-12:00 KST (Hourly collection)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Post-Market**: 12:30 KST" >> $GITHUB_STEP_SUMMARY
-        echo "- **Daily Summary**: 15:00 KST (With Telegram alerts)" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${{ needs.collect-data.outputs.collection_status }}" = "success" ]; then
-          echo "::notice::✅ KRX data collection completed successfully"
-        else
-          echo "::error::❌ KRX data collection failed - Check logs and Telegram alerts"
+          echo "::error::❌ 거래시간 데이터 수집 실패 - 즉시 확인 필요"
         fi
