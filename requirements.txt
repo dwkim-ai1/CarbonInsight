@@ -1,16 +1,24 @@
-# Core dependencies (both jobs)
+# Core dependencies (모든 작업 공통)
 requests==2.31.0
 gspread==5.12.0
 google-auth==2.23.4
 pandas==2.1.3
 
-# Data collection specific
+# Playwright 웹 스크래핑 (BeautifulSoup 대체)
+playwright==1.40.0
+
+# OCR 백업 시스템
+easyocr==1.7.0
+opencv-python==4.8.1.78
+Pillow==10.1.0
+
+# 데이터 수집 보조
 google-auth-oauthlib==1.1.0
-beautifulsoup4==4.12.2
-lxml==4.9.3
 numpy==1.24.3
 
-# OCR backup method (optional - for future implementation)
-# selenium==4.15.0
-# pytesseract==0.3.10
-# Pillow==10.1.0
+# HTML 파싱 (AJAX 응답용 백업)
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# 추가 유틸리티
+python-dotenv==1.0.0
