@@ -1,5 +1,5 @@
 # .github/workflows/KAU_price_collector.yml
-name: KRX ETS Data Collector
+name: KRX ETS Data Collector (Trading Schedule)
 
 on:
   schedule:
@@ -226,7 +226,7 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Python with caching
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
         cache: 'pip'
@@ -383,7 +383,7 @@ jobs:
 
     - name: Upload trading logs on failure
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: trading-failure-logs-${{ github.run_number }}
         path: |
@@ -408,7 +408,7 @@ jobs:
       uses: actions/checkout@v4
       
     - name: Set up Python for notifications
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.9'
         cache: 'pip'
