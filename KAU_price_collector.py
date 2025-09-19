@@ -106,7 +106,7 @@ class PlaywrightKRXCollector:
                 'max_retries': 3, 'timeout': 45000, 'wait_timeout': 30000, 'high_accuracy': False, 'headless': True
             }
 
-async def initialize_browser(self):
+    async def initialize_browser(self):
         """브라우저 초기화 (안정성 강화)"""
         try:
             self.playwright = await async_playwright().start()
