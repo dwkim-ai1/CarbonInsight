@@ -116,13 +116,16 @@ class RealKRXCollector:
                     if attempt < config['max_retries'] - 1:
                         time.sleep(3)
             
-            # 모든 실제 데이터 수집 실패시에만 샘플 데이터 사용
-            logger.warning("❌ 실제 데이터 수집 실패 - 현재 시세 반영 샘플 데이터 사용")
-            return self._get_current_realistic_sample_data(config)
+            # 모든 실제 데이터 수집 실패시 명확하게 실패 처리
+            logger.error("❌ 실제 데이터 수집 완전 실패 - 모든 시도 실패")
+            logger.error("🔍 문제 분석: 테이블은 발견되나 데이터 행이 없음")
+            logger.error("💡 가능한 원인: 1) 거래시간 외 2) 웹사이트 구조 변경 3) 네트워크 문제")
+            return []  # 빈 리스트 반환으로 명확한 실패 표시
             
         except Exception as e:
-            logger.error(f"데이터 수집 중 오류: {e}")
-            return self._get_current_realistic_sample_data(self.trading_config)
+            logger.error(f"데이터 수집 중 심각한 오류: {e}")
+            logger.error("🚨 예상치 못한 오류로 인한 수집 실패")
+            return []  # 빈 리스트 반환으로 명확한 실패 표시
 
     def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
         """개선된 메인 페이지 HTML 파싱 (실제 구조 반영)"""
@@ -300,67 +303,6 @@ class RealKRXCollector:
             return float(cleaned) if cleaned else 0.0
         except (ValueError, TypeError):
             return 0.0
-
-    def _get_current_realistic_sample_data(self, config: Dict) -> List[Dict]:
-        """현재 시세를 반영한 샘플 데이터 (최후 수단)"""
-        logger.info("⚠️ 현재 시세 반영 샘플 데이터 생성")
-        
-        current_date = datetime.now().strftime('%Y-%m-%d')
-        current_time = datetime.now().strftime('%H:%M:%S')
-        
-        # 실제 웹페이지에서 확인된 현재 시세 반영 (2025-09-19 11:10 기준)
-        sample_data = [
-            {
-                'date': current_date,
-                'time': current_time,
-                'symbol': 'KAU25',
-                'current_price': 10050,  # 실제 웹페이지 데이터
-                'change': -200,
-                'change_rate': -1.95,
-                'open_price': 10050,
-                'high_price': 10050,
-                'low_price': 10000,
-                'volume': 147000,  # 실제 거래량
-                'trading_value': 1475650000,  # 실제 거래대금
-                'weighted_avg': 10038,
-                'collection_time': current_time,
-                'data_source': 'current_realistic_sample'
-            },
-            {
-                'date': current_date,
-                'time': current_time,
-                'symbol': 'KCU25',
-                'current_price': 9300,
-                'change': 0,
-                'change_rate': 0.00,
-                'open_price': 0,
-                'high_price': 0,
-                'low_price': 0,
-                'volume': 0,
-                'trading_value': 0,
-                'weighted_avg': 0,
-                'collection_time': current_time,
-                'data_source': 'current_realistic_sample'
-            },
-            {
-                'date': current_date,
-                'time': current_time,
-                'symbol': 'KOC21-26',
-                'current_price': 11000,
-                'change': 0,
-                'change_rate': 0.00,
-                'open_price': 0,
-                'high_price': 0,
-                'low_price': 0,
-                'volume': 0,
-                'trading_value': 0,
-                'weighted_avg': 0,
-                'collection_time': current_time,
-                'data_source': 'current_realistic_sample'
-            }
-        ]
-        
-        return self._enhance_with_trading_info(sample_data, config)
 
 
 class EnhancedSheetsManager:
@@ -617,6 +559,23 @@ def main():
             for i, item in enumerate(real_data):
                 logger.info(f"종목 {i+1}: {item['symbol']} - {item['current_price']:,}원 "
                           f"(거래량: {item['volume']:,}톤, 소스: {item.get('data_source', 'unknown')})")
+        else:
+            # 실제 데이터 수집 실패시 명확하게 실패 처리
+            logger.error("❌ KRX 데이터 수집 완전 실패")
+            logger.error("🔍 수집된 데이터: 0개")
+            logger.error("📊 분석 결과:")
+            logger.error("   • 테이블 발견: 성공")
+            logger.error("   • 데이터 행 파싱: 실패 (0개 종목)")
+            logger.error("   • 재시도 횟수: 3회 모두 실패")
+            
+            print("❌ KRX 데이터 수집 실패!")
+            print("🔍 원인 분석:")
+            print("   • 현재 거래시간이 아닐 수 있습니다")
+            print("   • KRX 웹사이트 구조가 변경되었을 수 있습니다") 
+            print("   • 네트워크 연결에 문제가 있을 수 있습니다")
+            print("📞 문제 지속시 GitHub Issues에 신고하세요")
+            
+            sys.exit(1)  # 명확한 실패로 종료
             
             if test_mode:
                 logger.info("테스트 모드: Google Sheets 업데이트 건너뜀")
@@ -700,8 +659,10 @@ def main():
                 sys.exit(1)
                 
         else:
-            logger.error("❌ 데이터 수집 실패")
+            # 이 블록은 실행되지 않아야 함 (위에서 이미 sys.exit(1) 호출)
+            logger.error("❌ 예상치 못한 데이터 없음 상태")
             print("❌ KRX에서 데이터를 가져올 수 없습니다")
+            print("🔍 시스템 오류 또는 예상치 못한 상황입니다")
             sys.exit(1)
             
     except Exception as e:
