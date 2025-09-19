@@ -216,37 +216,40 @@ jobs:
         cache: 'pip'
         cache-dependency-path: 'requirements.txt'
         
-    - name: 시스템 의존성 설치 (OCR + Playwright)
+    - name: 시스템 의존성 설치 (OCR + Playwright - Ubuntu 24.04 호환)
       run: |
         echo "🔧 시스템 의존성 설치 중..."
         
-        # OCR을 위한 시스템 패키지
+        # APT 패키지 목록 업데이트
         sudo apt-get update
+        
+        # OCR (EasyOCR + OpenCV)을 위한 최신 패키지
         sudo apt-get install -y \
-          libgl1-mesa-glx \
+          libgl1-mesa-dri \
           libglib2.0-0 \
           libsm6 \
           libxext6 \
-          libxrender-dev \
+          libxrender1 \
           libgomp1 \
-          libglib2.0-0 \
-          libnss3-dev \
-          libgconf-2-4 \
-          libxss1 \
-          libappindicator1 \
-          fonts-liberation \
-          libappindicator3-1 \
-          libasound2 \
-          libdrm2 \
+          python3-opencv \
+          libopencv-dev \
           libgtk-3-0 \
+          fonts-liberation \
+          fonts-dejavu-core
+        
+        # Playwright 브라우저를 위한 최신 패키지 (최소한만)
+        sudo apt-get install -y \
+          libnss3 \
+          libatk-bridge2.0-0 \
+          libdrm2 \
           libxcomposite1 \
           libxdamage1 \
           libxrandr2 \
           libgbm1 \
-          libxss1 \
-          libasound2
+          libgtk-3-0 \
+          libasound2t64
         
-        echo "✅ 시스템 의존성 설치 완료"
+        echo "✅ 시스템 의존성 설치 완료 (Ubuntu 24.04 호환)"
         
     - name: Python 패키지 설치 (캐시 최적화)
       run: |
