@@ -1,46 +1,56 @@
 #!/usr/bin/env python3
 """
-샘플 데이터 제거 완료 - 순수 실패 처리 KRX ETS 데이터 수집기
-1. Google Sheets 컬럼 구조 정확히 정렬
-2. 헤더-데이터 완벽 매핑
-3. 실제 데이터만 수집, 실패시 명확한 실패 처리
-4. 상세한 디버깅 및 검증 시스템
+Playwright 기반 KRX ETS 데이터 수집기 (BeautifulSoup 완전 대체)
+1. JavaScript 렌더링 완료 후 실제 데이터 추출
+2. 동적 테이블(CI-GRID) 완벽 지원
+3. 네트워크 요청 모니터링으로 AJAX 데이터 캐치
+4. OCR 백업 시스템 통합
+5. 실패시 명확한 실패 처리 (샘플 데이터 제거)
 """
 
-import requests
-import gspread
+import asyncio
 import json
 import os
 import logging
 import sys
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-import time
 import re
-from bs4 import BeautifulSoup
+import time
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+
+# Playwright 및 OCR 관련
+try:
+    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+    import easyocr
+    from PIL import Image, ImageEnhance
+    import cv2
+    import numpy as np
+except ImportError as e:
+    logging.error(f"필수 패키지 누락: {e}")
+    logging.error("설치 명령: pip install playwright easyocr opencv-python pillow")
+    sys.exit(1)
+
+# Google Sheets
+import gspread
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class RealKRXCollector:
+class PlaywrightKRXCollector:
     def __init__(self):
-        """실제 KRX 데이터 수집기 초기화"""
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0'
-        })
-        
+        """Playwright 기반 KRX 데이터 수집기"""
         self.base_url = "https://ets.krx.co.kr"
+        self.main_page_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
         self.trading_config = self._analyze_trading_context()
+        self.browser = None
+        self.context = None
+        self.page = None
+        
+        # OCR 백업 시스템
+        self.ocr_reader = None
+        self.screenshots_dir = Path("screenshots")
+        self.screenshots_dir.mkdir(exist_ok=True)
         
     def _analyze_trading_context(self) -> Dict:
         """거래 상황 분석"""
@@ -54,244 +64,470 @@ class RealKRXCollector:
                 'trading_phase': trading_phase,
                 'execution_priority': execution_priority,
                 'max_retries': 3,
-                'timeout': 45,
+                'timeout': 45000,  # Playwright는 밀리초 단위
+                'wait_timeout': 30000,
                 'high_accuracy': False,
-                'fast_mode': False
+                'headless': True
             }
             
             # 거래 단계별 설정
-            if trading_phase == 'opening_price_decision':
-                config.update({'max_retries': 5, 'timeout': 60, 'high_accuracy': True})
-                logger.info("🔥 시가 체결 모드 - 최고 정확도")
-            elif trading_phase == 'closing_price_decision':
-                config.update({'max_retries': 5, 'timeout': 60, 'high_accuracy': True})
-                logger.info("🏁 종가 체결 모드 - 최고 정확도")
+            if trading_phase in ['opening_price_decision', 'closing_price_decision']:
+                config.update({
+                    'max_retries': 5, 
+                    'timeout': 60000, 
+                    'wait_timeout': 45000,
+                    'high_accuracy': True,
+                    'headless': False  # 중요 시점은 시각적 확인
+                })
+                logger.info(f"🔥 {trading_phase} 모드 - 최고 정확도")
             elif trading_phase == 'real_time_trading':
-                config.update({'max_retries': 4, 'timeout': 50, 'fast_mode': True})
-                logger.info("⚡ 실시간 거래 모드 - 빠른 업데이트")
-            else:
-                logger.info("📋 표준 모드 - 기본 설정")
+                config.update({
+                    'max_retries': 4, 
+                    'timeout': 30000,
+                    'wait_timeout': 20000,
+                    'headless': True  # 빠른 처리
+                })
+                logger.info("⚡ 실시간 거래 모드 - 고속 처리")
             
-            logger.info(f"거래 설정: 재시도 {config['max_retries']}회, 타임아웃 {config['timeout']}초")
             return config
             
         except Exception as e:
             logger.warning(f"거래 상황 분석 중 오류: {e}")
             return {
                 'market_phase': 'unknown', 'trading_phase': 'unknown', 'execution_priority': 'low',
-                'max_retries': 3, 'timeout': 45, 'high_accuracy': False, 'fast_mode': False
+                'max_retries': 3, 'timeout': 45000, 'wait_timeout': 30000, 'high_accuracy': False, 'headless': True
             }
 
-    def get_real_krx_data(self) -> List[Dict]:
-        """개선된 실제 KRX ETS 데이터 수집 - 실패시 빈 리스트 반환"""
+    async def initialize_browser(self):
+        """브라우저 초기화"""
+        try:
+            self.playwright = await async_playwright().start()
+            
+            # 브라우저 설정
+            browser_config = {
+                'headless': self.trading_config['headless'],
+                'args': [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-extensions',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding'
+                ]
+            }
+            
+            self.browser = await self.playwright.chromium.launch(**browser_config)
+            
+            # 컨텍스트 설정 (한국 환경)
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                locale='ko-KR',
+                timezone_id='Asia/Seoul',
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            
+            # 페이지 생성
+            self.page = await self.context.new_page()
+            
+            # 네트워크 요청 모니터링 설정
+            await self._setup_network_monitoring()
+            
+            logger.info("✅ Playwright 브라우저 초기화 완료")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 브라우저 초기화 실패: {e}")
+            return False
+
+    async def _setup_network_monitoring(self):
+        """네트워크 요청 모니터링 설정"""
+        self.ajax_responses = []
+        
+        async def handle_response(response):
+            """AJAX 응답 캐치"""
+            try:
+                url = response.url
+                
+                # KRX AJAX 요청 감지
+                if ('ETS99000001.jspx' in url or 
+                    'json' in response.headers.get('content-type', '').lower() or
+                    'application' in response.headers.get('content-type', '').lower()):
+                    
+                    if response.status == 200:
+                        try:
+                            content = await response.text()
+                            if content and len(content) > 100:  # 의미있는 데이터만
+                                self.ajax_responses.append({
+                                    'url': url,
+                                    'content': content,
+                                    'timestamp': datetime.now(),
+                                    'headers': dict(response.headers)
+                                })
+                                logger.info(f"📡 AJAX 응답 캐치: {url[:60]}... ({len(content)} bytes)")
+                        except Exception as e:
+                            logger.debug(f"AJAX 응답 파싱 실패: {e}")
+                            
+            except Exception as e:
+                logger.debug(f"네트워크 모니터링 오류: {e}")
+        
+        self.page.on('response', handle_response)
+
+    async def get_real_krx_data(self) -> List[Dict]:
+        """Playwright 기반 실제 KRX ETS 데이터 수집"""
         try:
             config = self.trading_config
-            logger.info("=== 실제 KRX ETS 데이터 수집 시작 ===")
+            logger.info("=== Playwright 기반 KRX ETS 데이터 수집 시작 ===")
             logger.info(f"거래 단계: {config['trading_phase']}")
-            logger.info(f"실행 우선도: {config['execution_priority']}")
+            logger.info(f"브라우저 모드: {'Headless' if config['headless'] else 'Visual'}")
             
-            # 실제 데이터 수집 시도
-            for attempt in range(config['max_retries']):
-                try:
-                    logger.info(f"실제 데이터 수집 시도 {attempt + 1}/{config['max_retries']}")
-                    
-                    # 메인 페이지에서 실제 데이터 수집
-                    main_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
-                    response = self.session.get(main_url, timeout=config['timeout'])
-                    response.raise_for_status()
-                    
-                    # 개선된 HTML 파싱
-                    parsed_data = self._parse_main_page_enhanced(response.text)
-                    
-                    if self._validate_real_data(parsed_data):
-                        logger.info(f"✅ 실제 데이터 수집 성공: {len(parsed_data)}개 종목")
-                        return self._enhance_with_trading_info(parsed_data, config)
-                    
-                    if attempt < config['max_retries'] - 1:
-                        logger.info(f"시도 {attempt + 1} 데이터 부족 - 2초 후 재시도")
-                        time.sleep(2)
-                        
-                except Exception as e:
-                    logger.warning(f"시도 {attempt + 1} 실패: {e}")
-                    if attempt < config['max_retries'] - 1:
-                        time.sleep(3)
-            
-            # 모든 실제 데이터 수집 실패시 명확하게 실패 처리
-            logger.error("❌ 실제 데이터 수집 완전 실패 - 모든 시도 실패")
-            logger.error("🔍 문제 분석: 테이블은 발견되나 데이터 행이 없음")
-            logger.error("💡 가능한 원인: 1) 거래시간 외 2) 웹사이트 구조 변경 3) 네트워크 문제")
-            return []  # 빈 리스트 반환으로 명확한 실패 표시
-            
-        except Exception as e:
-            logger.error(f"데이터 수집 중 심각한 오류: {e}")
-            logger.error("🚨 예상치 못한 오류로 인한 수집 실패")
-            return []  # 빈 리스트 반환으로 명확한 실패 표시
-
-    def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
-        """정확한 KRX 테이블 구조 기반 HTML 파싱 - 모든 행 검사"""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            result_list = []
-            
-            # 🎯 KRX 배출권 테이블 정확한 선택자 (실제 HTML 구조 기반)
-            table_selectors = [
-                'table[summary="배출권 현재가 정보 테이블입니다."]',  # 가장 정확한 선택자
-                'table[id*="gridtable"]',                           # 백업 선택자
-                'table[summary*="배출권"]',                           # 일반적 선택자  
-                'table'                                             # 최후 수단
-            ]
-            
-            table = None
-            used_selector = None
-            
-            for selector in table_selectors:
-                tables = soup.select(selector)
-                logger.debug(f"선택자 '{selector}': {len(tables)}개 테이블 발견")
-                
-                for t in tables:
-                    summary = t.get('summary', '')
-                    table_id = t.get('id', '')
-                    
-                    # 🔍 KRX 배출권 테이블 정확한 식별
-                    if ('배출권' in summary and '현재가' in summary) or 'gridtable' in table_id:
-                        table = t
-                        used_selector = selector
-                        logger.info(f"✅ KRX 배출권 테이블 발견!")
-                        logger.info(f"   선택자: {selector}")
-                        logger.info(f"   테이블 ID: {table_id}")
-                        logger.info(f"   테이블 요약: {summary}")
-                        break
-                        
-                if table:
-                    break
-            
-            if not table:
-                logger.error("❌ KRX 배출권 테이블을 찾을 수 없습니다")
+            # 브라우저 초기화
+            if not await self.initialize_browser():
+                logger.error("브라우저 초기화 실패")
                 return []
             
-            # 🏗️ 테이블 구조 정확한 분석 (thead/tbody 구조)
-            thead = table.find('thead')
-            tbody = table.find('tbody')
-            
-            logger.info(f"📋 테이블 구조 분석:")
-            logger.info(f"   thead 존재: {thead is not None}")
-            logger.info(f"   tbody 존재: {tbody is not None}")
-            
-            # 헤더 분석
-            if thead:
-                header_cells = thead.find_all(['th', 'td'])
-                headers = [cell.get_text(strip=True) for cell in header_cells]
-                logger.info(f"   헤더 ({len(headers)}개): {headers}")
-            
-            # 🎯 데이터 행 정확한 추출 (tbody 우선, 없으면 전체에서)
-            if tbody:
-                data_rows = tbody.find_all('tr', recursive=False)  # 직접 자식만
-                logger.info(f"📊 tbody에서 데이터 행 발견: {len(data_rows)}개")
-            else:
-                all_rows = table.find_all('tr')
-                data_rows = all_rows[1:] if len(all_rows) > 1 else []  # 헤더 제외
-                logger.info(f"📊 테이블 전체에서 데이터 행 발견: {len(data_rows)}개 (헤더 제외)")
-            
-            # 🔍 **모든 데이터 행** 상세 분석 및 파싱 (첫 번째 행이 비어도 계속 진행)
-            empty_rows = 0
-            valid_rows = 0
-            
-            for i, row in enumerate(data_rows):
+            for attempt in range(config['max_retries']):
                 try:
-                    cells = row.find_all(['td', 'th'])
-                    logger.debug(f"행 {i+1}: {len(cells)}개 셀 발견")
+                    logger.info(f"🌐 데이터 수집 시도 {attempt + 1}/{config['max_retries']}")
                     
-                    if len(cells) >= 8:  # KRX 테이블은 최소 9개 컬럼
-                        # 🎯 셀 내용 미리 확인
-                        cell_texts = [cell.get_text(strip=True) for cell in cells]
+                    # 1단계: 메인 페이지 로드
+                    await self._load_main_page()
+                    
+                    # 2단계: 동적 테이블 로딩 대기
+                    table_loaded = await self._wait_for_table_load()
+                    
+                    if table_loaded:
+                        # 3단계: DOM에서 데이터 추출
+                        dom_data = await self._extract_from_dom()
                         
-                        # 🚨 빈 행 체크 (모든 셀이 비어있는지)
-                        is_empty_row = all(not text for text in cell_texts)
+                        if self._validate_real_data(dom_data):
+                            logger.info(f"✅ DOM 추출 성공: {len(dom_data)}개 종목")
+                            return self._enhance_with_trading_info(dom_data, config)
+                    
+                    # 4단계: AJAX 응답에서 데이터 추출 (백업)
+                    ajax_data = await self._extract_from_ajax()
+                    
+                    if self._validate_real_data(ajax_data):
+                        logger.info(f"✅ AJAX 추출 성공: {len(ajax_data)}개 종목")
+                        return self._enhance_with_trading_info(ajax_data, config)
+                    
+                    # 5단계: OCR 백업 시스템 (최후 수단)
+                    if config['high_accuracy']:  # 중요 시점에만 OCR 사용
+                        ocr_data = await self._ocr_backup_extraction()
                         
-                        if is_empty_row:
-                            empty_rows += 1
-                            logger.debug(f"행 {i+1}: 빈 행 발견 - 건너뜀 ({cell_texts[:3]}...)")
-                            continue  # 빈 행은 건너뛰고 다음 행 계속 검사
-                        
-                        valid_rows += 1
-                        logger.info(f"📋 행 {i+1} 유효 데이터: {cell_texts[:3]}...")  # 처음 3개만
-                        
-                        # 종목명이 있는지 확인 (첫 번째 셀)
-                        symbol_candidate = cell_texts[0] if cell_texts else ''
-                        if symbol_candidate and any(prefix in symbol_candidate for prefix in ['KAU', 'KCU', 'KOC', 'i-']):
-                            logger.info(f"🎯 유효 종목 발견: {symbol_candidate}")
-                            
-                            parsed_item = self._parse_row_enhanced(cells, i)
-                            if parsed_item:
-                                result_list.append(parsed_item)
-                                logger.info(f"✅ 종목 파싱 성공: {parsed_item['symbol']} - {parsed_item['current_price']:,}원")
-                            else:
-                                logger.warning(f"⚠️ 종목 파싱 실패: {symbol_candidate}")
-                        else:
-                            logger.debug(f"행 {i+1}: 종목명 패턴 불일치 ({symbol_candidate})")
-                    else:
-                        logger.debug(f"행 {i+1}: 컬럼 수 부족 ({len(cells)}개 < 8개)")
+                        if self._validate_real_data(ocr_data):
+                            logger.info(f"✅ OCR 백업 성공: {len(ocr_data)}개 종목")
+                            return self._enhance_with_trading_info(ocr_data, config)
+                    
+                    if attempt < config['max_retries'] - 1:
+                        logger.info(f"시도 {attempt + 1} 실패 - 3초 후 재시도")
+                        await asyncio.sleep(3)
                         
                 except Exception as e:
-                    logger.warning(f"행 {i+1} 파싱 중 오류: {e}")
-                    continue
+                    logger.warning(f"시도 {attempt + 1} 중 오류: {e}")
+                    if attempt < config['max_retries'] - 1:
+                        await asyncio.sleep(5)
             
-            logger.info(f"📊 행 분석 완료: 총 {len(data_rows)}개 행, 빈 행 {empty_rows}개, 유효 행 {valid_rows}개")
-            logger.info(f"🎯 최종 파싱 결과: {len(result_list)}개 종목 성공")
-            
-            # 🔍 파싱 실패시 상세 디버깅 정보
-            if len(result_list) == 0 and len(data_rows) > 0:
-                logger.error("🚨 데이터 행은 있지만 파싱된 종목이 없음!")
-                logger.error(f"   사용된 선택자: {used_selector}")
-                logger.error(f"   테이블 ID: {table.get('id', 'None')}")
-                logger.error(f"   총 발견된 행: {len(data_rows)}개")
-                logger.error(f"   빈 행: {empty_rows}개")
-                logger.error(f"   유효 행: {valid_rows}개")
-                
-                # 🔍 모든 행의 첫 번째 셀 내용 확인
-                logger.error("🔍 전체 행 분석:")
-                for i, row in enumerate(data_rows[:10]):  # 최대 10개 행만
-                    try:
-                        first_cells = row.find_all(['td', 'th'])
-                        if first_cells:
-                            first_cell_text = first_cells[0].get_text(strip=True)
-                            all_texts = [cell.get_text(strip=True) for cell in first_cells[:3]]
-                            logger.error(f"   행 {i+1}: 첫 셀 '{first_cell_text}', 처음 3개: {all_texts}")
-                    except Exception as e:
-                        logger.error(f"   행 {i+1}: 분석 오류 - {e}")
-            
-            return result_list
-            
-        except Exception as e:
-            logger.error(f"HTML 파싱 중 오류: {e}")
+            # 모든 시도 실패
+            logger.error("❌ 모든 데이터 수집 방법 실패")
+            logger.error("🔍 시도한 방법: DOM 추출, AJAX 분석, OCR 백업")
             return []
             
-    def _parse_row_enhanced(self, cells, row_index: int) -> Optional[Dict]:
-        """개선된 테이블 행 파싱"""
+        except Exception as e:
+            logger.error(f"❌ 데이터 수집 중 심각한 오류: {e}")
+            return []
+        finally:
+            await self.cleanup()
+
+    async def _load_main_page(self):
+        """메인 페이지 로드"""
         try:
-            cell_texts = [cell.get_text(strip=True) for cell in cells]
+            logger.info(f"🌐 메인 페이지 로딩: {self.main_page_url}")
             
-            # 디버깅 정보
-            logger.debug(f"행 {row_index} 셀 수: {len(cell_texts)}")
-            logger.debug(f"행 {row_index} 내용: {cell_texts[:5]}...")  # 처음 5개만 로깅
+            # 페이지 로드
+            response = await self.page.goto(
+                self.main_page_url, 
+                timeout=self.trading_config['timeout'],
+                wait_until='domcontentloaded'
+            )
             
+            if response.status != 200:
+                raise Exception(f"HTTP {response.status}")
+            
+            # 기본 요소 로딩 대기
+            await self.page.wait_for_load_state('networkidle', timeout=15000)
+            
+            logger.info("✅ 메인 페이지 로드 완료")
+            
+        except Exception as e:
+            logger.error(f"메인 페이지 로드 실패: {e}")
+            raise
+
+    async def _wait_for_table_load(self) -> bool:
+        """동적 테이블 로딩 대기"""
+        try:
+            logger.info("📊 동적 테이블 로딩 대기...")
+            
+            # 다양한 테이블 선택자 시도
+            table_selectors = [
+                'table[summary*="배출권 현재가"]',
+                'table[id*="gridtable"]',
+                '.CI-GRID-BODY-TABLE',
+                'table.CI-GRID-BODY-TABLE',
+                'table tbody tr td'
+            ]
+            
+            table_found = False
+            
+            for selector in table_selectors:
+                try:
+                    # 테이블 요소 대기
+                    await self.page.wait_for_selector(
+                        selector, 
+                        timeout=self.trading_config['wait_timeout']
+                    )
+                    
+                    # 데이터 행이 실제로 있는지 확인
+                    rows = await self.page.query_selector_all(f"{selector} tr")
+                    
+                    if len(rows) > 1:  # 헤더 + 데이터 행
+                        logger.info(f"✅ 테이블 발견: {selector} ({len(rows)}개 행)")
+                        table_found = True
+                        break
+                        
+                except Exception:
+                    continue
+            
+            if table_found:
+                # 추가 대기 (JavaScript 렌더링 완료)
+                await asyncio.sleep(2)
+                
+                # 조회 버튼 클릭 시도 (최신 데이터 로드)
+                await self._trigger_data_refresh()
+                
+                return True
+            else:
+                logger.warning("⚠️ 테이블을 찾을 수 없음")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"테이블 로딩 대기 중 오류: {e}")
+            return False
+
+    async def _trigger_data_refresh(self):
+        """데이터 새로고침 트리거"""
+        try:
+            # 조회 버튼 찾기 및 클릭
+            refresh_selectors = [
+                'button.btn-board-search',
+                'button:has-text("조회")',
+                'input[type="button"][value*="조회"]',
+                '.btn-search'
+            ]
+            
+            for selector in refresh_selectors:
+                try:
+                    button = await self.page.query_selector(selector)
+                    if button:
+                        logger.info(f"🔄 데이터 새로고침 버튼 클릭: {selector}")
+                        await button.click()
+                        await asyncio.sleep(3)  # 데이터 로딩 대기
+                        break
+                        
+                except Exception:
+                    continue
+                    
+        except Exception as e:
+            logger.debug(f"데이터 새로고침 시도 중 오류: {e}")
+
+    async def _extract_from_dom(self) -> List[Dict]:
+        """DOM에서 데이터 추출"""
+        try:
+            logger.info("📋 DOM에서 테이블 데이터 추출 중...")
+            
+            # 모든 테이블 행 찾기
+            table_selectors = [
+                'table[summary*="배출권"] tbody tr',
+                'table[id*="gridtable"] tbody tr',
+                '.CI-GRID-BODY-TABLE tbody tr',
+                'table tbody tr'
+            ]
+            
+            rows = []
+            for selector in table_selectors:
+                try:
+                    found_rows = await self.page.query_selector_all(selector)
+                    if len(found_rows) > 0:
+                        rows = found_rows
+                        logger.info(f"✅ 테이블 행 발견: {selector} ({len(rows)}개)")
+                        break
+                except Exception:
+                    continue
+            
+            if not rows:
+                logger.warning("DOM에서 테이블 행을 찾을 수 없음")
+                return []
+            
+            extracted_data = []
+            
+            for i, row in enumerate(rows):
+                try:
+                    # 각 행의 셀 데이터 추출
+                    cells = await row.query_selector_all('td')
+                    
+                    if len(cells) >= 8:  # 최소 필요 컬럼 수
+                        cell_texts = []
+                        for cell in cells:
+                            text = await cell.text_content()
+                            cell_texts.append(text.strip() if text else '')
+                        
+                        # 종목명 확인
+                        symbol = cell_texts[0] if cell_texts else ''
+                        if symbol and re.match(r'^(KAU|KCU|KOC|i-)', symbol):
+                            parsed_item = self._parse_row_data(cell_texts, i)
+                            if parsed_item:
+                                extracted_data.append(parsed_item)
+                                logger.info(f"✅ {symbol}: {parsed_item['current_price']:,}원")
+                                
+                except Exception as e:
+                    logger.debug(f"행 {i} 추출 중 오류: {e}")
+                    continue
+            
+            logger.info(f"📊 DOM 추출 완료: {len(extracted_data)}개 종목")
+            return extracted_data
+            
+        except Exception as e:
+            logger.error(f"DOM 추출 중 오류: {e}")
+            return []
+
+    async def _extract_from_ajax(self) -> List[Dict]:
+        """AJAX 응답에서 데이터 추출"""
+        try:
+            logger.info("📡 AJAX 응답 분석 중...")
+            
+            if not self.ajax_responses:
+                logger.warning("캐치된 AJAX 응답 없음")
+                return []
+            
+            for ajax_response in self.ajax_responses:
+                try:
+                    content = ajax_response['content']
+                    
+                    # JSON 형태 데이터 시도
+                    if content.strip().startswith('{') or content.strip().startswith('['):
+                        try:
+                            json_data = json.loads(content)
+                            extracted = self._parse_json_response(json_data)
+                            if extracted:
+                                logger.info(f"✅ JSON 응답에서 {len(extracted)}개 종목 추출")
+                                return extracted
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    # HTML 테이블 형태 데이터 시도
+                    if '<table' in content or '<tr' in content:
+                        extracted = self._parse_html_response(content)
+                        if extracted:
+                            logger.info(f"✅ HTML 응답에서 {len(extracted)}개 종목 추출")
+                            return extracted
+                            
+                except Exception as e:
+                    logger.debug(f"AJAX 응답 분석 오류: {e}")
+                    continue
+            
+            logger.warning("AJAX 응답에서 유효한 데이터를 찾지 못함")
+            return []
+            
+        except Exception as e:
+            logger.error(f"AJAX 추출 중 오류: {e}")
+            return []
+
+    async def _ocr_backup_extraction(self) -> List[Dict]:
+        """OCR 백업 데이터 추출"""
+        try:
+            logger.info("📷 OCR 백업 시스템 시작...")
+            
+            # OCR 리더 초기화
+            if not self.ocr_reader:
+                self.ocr_reader = easyocr.Reader(['ko', 'en'], gpu=False)
+            
+            # 페이지 스크린샷 촬영
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            screenshot_path = self.screenshots_dir / f"krx_table_{timestamp}.png"
+            
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            logger.info(f"📸 스크린샷 저장: {screenshot_path}")
+            
+            # 테이블 영역 크롭
+            table_image = await self._crop_table_area(screenshot_path)
+            
+            if table_image:
+                # OCR 실행
+                ocr_results = self.ocr_reader.readtext(table_image)
+                
+                # OCR 결과를 테이블 데이터로 변환
+                extracted_data = self._parse_ocr_results(ocr_results)
+                
+                if extracted_data:
+                    logger.info(f"✅ OCR 추출 성공: {len(extracted_data)}개 종목")
+                    return extracted_data
+            
+            logger.warning("OCR 백업 추출 실패")
+            return []
+            
+        except Exception as e:
+            logger.error(f"OCR 백업 중 오류: {e}")
+            return []
+
+    async def _crop_table_area(self, screenshot_path: Path) -> Optional[np.ndarray]:
+        """테이블 영역 크롭"""
+        try:
+            # 테이블 요소의 위치 정보 가져오기
+            table_selector = 'table[summary*="배출권"], .CI-GRID-AREA, table'
+            
+            table_element = await self.page.query_selector(table_selector)
+            if not table_element:
+                return None
+            
+            # 요소의 경계 박스 가져오기
+            bbox = await table_element.bounding_box()
+            if not bbox:
+                return None
+            
+            # 이미지 크롭
+            image = cv2.imread(str(screenshot_path))
+            if image is None:
+                return None
+            
+            x, y, width, height = int(bbox['x']), int(bbox['y']), int(bbox['width']), int(bbox['height'])
+            cropped = image[y:y+height, x:x+width]
+            
+            # 이미지 전처리 (OCR 정확도 향상)
+            gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+            enhanced = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+            return enhanced
+            
+        except Exception as e:
+            logger.debug(f"이미지 크롭 중 오류: {e}")
+            return None
+
+    def _parse_row_data(self, cell_texts: List[str], row_index: int) -> Optional[Dict]:
+        """테이블 행 데이터 파싱"""
+        try:
             if len(cell_texts) < 8:
                 return None
                 
-            # 종목명 확인 (첫 번째 컬럼)
             symbol = cell_texts[0]
             if not symbol or not re.match(r'^(KAU|KCU|KOC|i-)', symbol):
-                logger.debug(f"종목명 불일치: '{symbol}'")
                 return None
             
-            # 현재가 확인 (두 번째 컬럼)
             current_price = self._extract_number(cell_texts[1])
             if current_price <= 0:
-                logger.debug(f"{symbol}: 현재가 없음 ({cell_texts[1]})")
                 return None
             
-            # 실제 파싱된 데이터
-            parsed_data = {
+            return {
                 'date': datetime.now().strftime('%Y-%m-%d'),
                 'time': datetime.now().strftime('%H:%M:%S'),
                 'symbol': symbol,
@@ -303,49 +539,179 @@ class RealKRXCollector:
                 'low_price': self._extract_number(cell_texts[6]),
                 'volume': self._extract_number(cell_texts[7]),
                 'trading_value': self._extract_number(cell_texts[8] if len(cell_texts) > 8 else '0'),
-                'weighted_avg': 0,  # 계산 후 설정
+                'weighted_avg': 0,
                 'collection_time': datetime.now().strftime('%H:%M:%S'),
-                'data_source': 'krx_real_data'
+                'data_source': 'playwright_dom'
             }
             
-            # 가중평균 계산
-            if parsed_data['volume'] > 0 and parsed_data['trading_value'] > 0:
-                parsed_data['weighted_avg'] = round(parsed_data['trading_value'] / parsed_data['volume'], 0)
+        except Exception as e:
+            logger.debug(f"행 데이터 파싱 오류: {e}")
+            return None
+
+    def _parse_json_response(self, json_data) -> List[Dict]:
+        """JSON 응답 파싱"""
+        try:
+            # JSON 구조 분석 및 데이터 추출 로직
+            # (실제 KRX AJAX 응답 구조에 맞게 구현)
+            extracted_data = []
             
-            logger.info(f"🎯 {symbol}: {current_price:,.0f}원, 거래량: {parsed_data['volume']:,.0f}톤")
-            return parsed_data
+            # JSON 구조 탐색
+            if isinstance(json_data, dict):
+                for key, value in json_data.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        for item in value:
+                            if isinstance(item, dict):
+                                parsed = self._parse_json_item(item)
+                                if parsed:
+                                    extracted_data.append(parsed)
+            
+            return extracted_data
             
         except Exception as e:
-            logger.debug(f"행 파싱 중 오류: {e}")
+            logger.debug(f"JSON 파싱 오류: {e}")
+            return []
+
+    def _parse_json_item(self, item: Dict) -> Optional[Dict]:
+        """JSON 아이템 파싱"""
+        try:
+            # JSON 아이템에서 필요한 필드 추출
+            symbol = item.get('isu_cd', item.get('symbol', ''))
+            if not symbol or not re.match(r'^(KAU|KCU|KOC|i-)', symbol):
+                return None
+            
+            current_price = float(item.get('tdd_clsprc', item.get('current_price', 0)))
+            if current_price <= 0:
+                return None
+            
+            return {
+                'date': datetime.now().strftime('%Y-%m-%d'),
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'symbol': symbol,
+                'current_price': current_price,
+                'change': float(item.get('cmpprevdd_prc', item.get('change', 0))),
+                'change_rate': float(item.get('fluc_rt', item.get('change_rate', 0))),
+                'open_price': float(item.get('tdd_opnprc', item.get('open_price', 0))),
+                'high_price': float(item.get('tdd_hgprc', item.get('high_price', 0))),
+                'low_price': float(item.get('tdd_lwprc', item.get('low_price', 0))),
+                'volume': float(item.get('acc_trdvol', item.get('volume', 0))),
+                'trading_value': float(item.get('acc_trdval', item.get('trading_value', 0))),
+                'weighted_avg': float(item.get('wt_avg_prc', item.get('weighted_avg', 0))),
+                'collection_time': datetime.now().strftime('%H:%M:%S'),
+                'data_source': 'playwright_ajax'
+            }
+            
+        except Exception as e:
+            logger.debug(f"JSON 아이템 파싱 오류: {e}")
             return None
+
+    def _parse_html_response(self, html_content: str) -> List[Dict]:
+        """HTML 응답 파싱"""
+        try:
+            # BeautifulSoup 사용하여 HTML 파싱
+            from bs4 import BeautifulSoup
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            rows = soup.find_all('tr')
+            
+            extracted_data = []
+            
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) >= 8:
+                    cell_texts = [cell.get_text(strip=True) for cell in cells]
+                    parsed = self._parse_row_data(cell_texts, 0)
+                    if parsed:
+                        parsed['data_source'] = 'playwright_html'
+                        extracted_data.append(parsed)
+            
+            return extracted_data
+            
+        except Exception as e:
+            logger.debug(f"HTML 파싱 오류: {e}")
+            return []
+
+    def _parse_ocr_results(self, ocr_results) -> List[Dict]:
+        """OCR 결과 파싱"""
+        try:
+            # OCR 결과를 테이블 형태로 정리
+            extracted_data = []
+            
+            # OCR 텍스트 추출 및 정렬
+            texts = []
+            for (bbox, text, confidence) in ocr_results:
+                if confidence > 0.5:  # 신뢰도 50% 이상만
+                    texts.append({
+                        'text': text.strip(),
+                        'x': bbox[0][0],
+                        'y': bbox[0][1],
+                        'confidence': confidence
+                    })
+            
+            # Y 좌표로 행 그룹핑
+            texts.sort(key=lambda x: (x['y'], x['x']))
+            
+            rows = []
+            current_row = []
+            current_y = None
+            
+            for text_info in texts:
+                if current_y is None or abs(text_info['y'] - current_y) > 20:
+                    if current_row:
+                        rows.append(current_row)
+                    current_row = [text_info['text']]
+                    current_y = text_info['y']
+                else:
+                    current_row.append(text_info['text'])
+            
+            if current_row:
+                rows.append(current_row)
+            
+            # 각 행을 데이터로 변환
+            for row_texts in rows:
+                if len(row_texts) >= 3:  # 최소 종목명, 가격, 변동 있어야 함
+                    symbol = row_texts[0]
+                    if re.match(r'^(KAU|KCU|KOC|i-)', symbol):
+                        try:
+                            parsed = {
+                                'date': datetime.now().strftime('%Y-%m-%d'),
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'symbol': symbol,
+                                'current_price': self._extract_number(row_texts[1]),
+                                'change': self._extract_number(row_texts[2] if len(row_texts) > 2 else '0'),
+                                'change_rate': self._extract_number(row_texts[3] if len(row_texts) > 3 else '0'),
+                                'open_price': self._extract_number(row_texts[4] if len(row_texts) > 4 else '0'),
+                                'high_price': self._extract_number(row_texts[5] if len(row_texts) > 5 else '0'),
+                                'low_price': self._extract_number(row_texts[6] if len(row_texts) > 6 else '0'),
+                                'volume': self._extract_number(row_texts[7] if len(row_texts) > 7 else '0'),
+                                'trading_value': self._extract_number(row_texts[8] if len(row_texts) > 8 else '0'),
+                                'weighted_avg': 0,
+                                'collection_time': datetime.now().strftime('%H:%M:%S'),
+                                'data_source': 'playwright_ocr'
+                            }
+                            
+                            if parsed['current_price'] > 0:
+                                extracted_data.append(parsed)
+                                
+                        except Exception as e:
+                            logger.debug(f"OCR 행 파싱 오류: {e}")
+                            continue
+            
+            return extracted_data
+            
+        except Exception as e:
+            logger.error(f"OCR 결과 파싱 오류: {e}")
+            return []
 
     def _validate_real_data(self, data: List[Dict]) -> bool:
         """실제 데이터 검증"""
         if not data or len(data) < 3:
-            logger.warning(f"데이터 개수 부족: {len(data)}개")
             return False
             
-        # 주요 종목 존재 확인
         symbols = {item.get('symbol', '') for item in data}
         required_symbols = {'KAU25', 'KCU25'}
         found_symbols = required_symbols.intersection(symbols)
         
-        if not found_symbols:
-            logger.warning(f"주요 종목 없음. 발견된 종목: {list(symbols)[:5]}")
-            return False
-        
-        # 실제 데이터 vs 샘플 데이터 구분
-        real_data_count = 0
-        for item in data:
-            if item.get('data_source') == 'krx_real_data':
-                real_data_count += 1
-        
-        if real_data_count == 0:
-            logger.warning("실제 데이터가 없음 (모두 샘플 데이터)")
-            return False
-            
-        logger.info(f"✅ 데이터 검증 통과: {len(data)}개 종목, 실제 데이터 {real_data_count}개")
-        return True
+        return len(found_symbols) > 0
 
     def _enhance_with_trading_info(self, data: List[Dict], config: Dict) -> List[Dict]:
         """거래 정보로 데이터 강화"""
@@ -353,241 +719,128 @@ class RealKRXCollector:
             item['trading_phase'] = config['trading_phase']
             item['market_phase'] = config['market_phase']
             item['execution_priority'] = config['execution_priority']
-            item['is_critical_time'] = config['high_accuracy']
+            item['extraction_method'] = item.get('data_source', 'unknown')
             
         return data
 
     def _extract_number(self, text: str) -> float:
         """텍스트에서 숫자 추출"""
         try:
-            if not text or text == '-' or text == '0':
+            if not text or text == '-':
                 return 0.0
-            # 쉼표 제거하고 숫자만 추출
             cleaned = re.sub(r'[^\d.-]', '', text.replace(',', ''))
             return float(cleaned) if cleaned else 0.0
         except (ValueError, TypeError):
             return 0.0
 
+    async def cleanup(self):
+        """리소스 정리"""
+        try:
+            if self.page:
+                await self.page.close()
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if hasattr(self, 'playwright'):
+                await self.playwright.stop()
+            
+            logger.info("✅ 브라우저 리소스 정리 완료")
+            
+        except Exception as e:
+            logger.warning(f"리소스 정리 중 오류: {e}")
+
 
 class EnhancedSheetsManager:
+    """Google Sheets 관리자 (기존과 동일)"""
     def __init__(self, credentials_json: str, sheet_id: str):
-        """향상된 Google Sheets 관리자"""
         try:
             logger.info("Google Sheets 연결 시작...")
-            
             creds_dict = json.loads(credentials_json)
             self.gc = gspread.service_account_from_dict(creds_dict)
             self.sheet_id = sheet_id
-            
             self.spreadsheet = self.gc.open_by_key(sheet_id)
-            logger.info(f"스프레드시트 연결: {self.spreadsheet.title}")
-            
             self.setup_worksheet()
-            
         except Exception as e:
             logger.error(f"Google Sheets 연결 실패: {e}")
             raise
     
     def setup_worksheet(self):
-        """워크시트 설정"""
         try:
             try:
                 self.worksheet = self.spreadsheet.worksheet('ets.KRX')
-                logger.info("기존 ets.KRX 워크시트 사용")
-                
-                # 🔧 헤더 일관성 확인 및 수정
                 self._verify_and_fix_headers()
-                
             except gspread.WorksheetNotFound:
-                logger.info("ets.KRX 워크시트 생성...")
-                self.worksheet = self.spreadsheet.add_worksheet(
-                    title='ets.KRX', 
-                    rows=2000,  # 더 많은 행 (시간별 누적)
-                    cols=16
-                )
-                
-                # 정확한 헤더 설정
+                self.worksheet = self.spreadsheet.add_worksheet(title='ets.KRX', rows=2000, cols=16)
                 self._setup_headers()
-                
         except Exception as e:
             logger.error(f"워크시트 설정 실패: {e}")
             raise
     
     def _verify_and_fix_headers(self):
-        """헤더 일관성 확인 및 수정"""
         try:
-            # 현재 헤더 확인
             current_headers = self.worksheet.row_values(1)
-            logger.info(f"📋 현재 헤더 ({len(current_headers)}개): {current_headers}")
-            
-            # 올바른 헤더 정의
             correct_headers = [
                 '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
                 '시가', '고가', '저가', '거래량', '거래대금', 
                 '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
             ]
             
-            # 헤더가 다르면 수정
             if current_headers != correct_headers:
-                logger.info("🔧 헤더 구조 수정 중...")
                 self._setup_headers()
-                logger.info("✅ 헤더 구조 수정 완료")
-            else:
-                logger.info("✅ 헤더 구조 정상")
-                
         except Exception as e:
-            logger.warning(f"헤더 확인 중 오류: {e}")
-            # 오류 시 헤더 재설정
             self._setup_headers()
     
     def _setup_headers(self):
-        """정확한 헤더 설정"""
-        try:
-            # 정확한 헤더 순서
-            headers = [
-                '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
-                '시가', '고가', '저가', '거래량', '거래대금', 
-                '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
-            ]
-            
-            # 헤더 업데이트
-            self.worksheet.update('A1:P1', [headers])
-            
-            # 헤더 서식 (배경색 + 굵게 + 가운데 정렬)
-            self.worksheet.format('A1:P1', {
-                'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
-                'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
-                'horizontalAlignment': 'CENTER'
-            })
-            
-            logger.info(f"📋 헤더 설정 완료: {len(headers)}개 컬럼")
-            
-        except Exception as e:
-            logger.error(f"헤더 설정 실패: {e}")
-            raise
+        headers = [
+            '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
+            '시가', '고가', '저가', '거래량', '거래대금', 
+            '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
+        ]
+        
+        self.worksheet.update('A1:P1', [headers])
+        self.worksheet.format('A1:P1', {
+            'backgroundColor': {'red': 0.2, 'green': 0.6, 'blue': 0.9},
+            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
+            'horizontalAlignment': 'CENTER'
+        })
     
-    def append_real_data(self, data: List[Dict]):
-        """실시간 데이터 누적 추가 (기존 데이터 삭제 안함)"""
+    def append_real_data(self, data: List[Dict]) -> bool:
         try:
             if not data:
-                logger.warning("추가할 데이터가 없습니다")
                 return False
-            
-            logger.info(f"🔄 시간별 누적 데이터 추가: {len(data)}개 종목")
             
             current_date = data[0]['date']
             current_time = data[0].get('time', datetime.now().strftime('%H:%M:%S'))
             
-            # ✅ 기존 데이터 삭제하지 않음 - 시간별 누적 저장
-            logger.info(f"📈 {current_date} {current_time} 데이터 추가 중...")
-            
-            # 헤더 순서 확인 및 디버깅
-            expected_headers = [
-                '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
-                '시가', '고가', '저가', '거래량', '거래대금', 
-                '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
-            ]
-            logger.info(f"📋 예상 헤더 ({len(expected_headers)}개): {expected_headers}")
-            
-            # 새 데이터 준비 (헤더 순서 정확히 맞춤)
             new_rows = []
-            for i, item in enumerate(data):
-                # 모든 값을 문자열로 변환하여 일관성 확보
+            for item in data:
                 row = [
-                    str(item['date']),                                    # 1. 날짜
-                    str(item.get('time', current_time)),                  # 2. 시간  
-                    str(item['symbol']),                                  # 3. 종목명
-                    str(item['current_price']),                          # 4. 현재가
-                    str(item['change']),                                 # 5. 대비
-                    str(item['change_rate']),                            # 6. 등락률
-                    str(item['open_price']),                             # 7. 시가
-                    str(item['high_price']),                             # 8. 고가
-                    str(item['low_price']),                              # 9. 저가
-                    str(item['volume']),                                 # 10. 거래량
-                    str(item['trading_value']),                          # 11. 거래대금
-                    str(item['weighted_avg']),                           # 12. 가중평균
-                    str(item.get('collection_time', current_time)),      # 13. 수집시간
-                    str(item.get('data_source', 'unknown')),             # 14. 데이터소스
-                    str(item.get('trading_phase', 'unknown')),           # 15. 거래단계
-                    str(item.get('execution_priority', 'unknown'))       # 16. 우선도
+                    str(item['date']), str(item.get('time', current_time)), str(item['symbol']),
+                    str(item['current_price']), str(item['change']), str(item['change_rate']),
+                    str(item['open_price']), str(item['high_price']), str(item['low_price']),
+                    str(item['volume']), str(item['trading_value']), str(item['weighted_avg']),
+                    str(item.get('collection_time', current_time)), str(item.get('data_source', 'unknown')),
+                    str(item.get('trading_phase', 'unknown')), str(item.get('execution_priority', 'unknown'))
                 ]
-                
-                logger.info(f"📊 종목 {i+1}: {row[:6]}...")  # 처음 6개 컬럼만 로깅
-                logger.info(f"📊 컬럼 수: {len(row)}개 (예상: {len(expected_headers)}개)")
-                
-                if len(row) != len(expected_headers):
-                    logger.error(f"❌ 컬럼 수 불일치! 실제: {len(row)}, 예상: {len(expected_headers)}")
-                    return False
-                
                 new_rows.append(row)
             
-            # 데이터 일괄 추가 (기존 데이터 유지)
             if new_rows:
-                # 🔧 최종 안전 검증
-                logger.info(f"📤 Google Sheets 업로드 시작...")
-                logger.info(f"📊 업로드할 행 수: {len(new_rows)}")
-                logger.info(f"📊 각 행의 컬럼 수: {[len(row) for row in new_rows]}")
-                
-                # 샘플 행 로깅 (디버깅용)
-                if new_rows:
-                    logger.info(f"📊 첫 번째 행 샘플: {new_rows[0]}")
-                
                 self.worksheet.append_rows(new_rows)
-                logger.info(f"✅ {len(new_rows)}개 행 누적 추가 완료")
-                
-                # 실시간 통계
-                self._log_realtime_statistics(data)
-                
+                logger.info(f"✅ {len(new_rows)}개 행 추가 완료")
                 return True
-            
+                
             return False
             
         except Exception as e:
             logger.error(f"데이터 추가 실패: {e}")
-            logger.error(f"오류 상세: 첫 번째 아이템 = {data[0] if data else 'No data'}")
             return False
-    
-    def _log_realtime_statistics(self, data: List[Dict]):
-        """실시간 통계 정보 로깅"""
-        try:
-            total_volume = sum(item['volume'] for item in data)
-            active_items = len([item for item in data if item['volume'] > 0])
-            total_items = len(data)
-            
-            trading_phase = data[0].get('trading_phase', 'unknown') if data else 'unknown'
-            execution_priority = data[0].get('execution_priority', 'unknown') if data else 'unknown'
-            data_source = data[0].get('data_source', 'unknown') if data else 'unknown'
-            
-            logger.info("=== 실시간 거래 통계 ===")
-            logger.info(f"거래 단계: {trading_phase}")
-            logger.info(f"실행 우선도: {execution_priority}")
-            logger.info(f"총 종목 수: {total_items}개")
-            logger.info(f"활성 거래 종목: {active_items}개")
-            logger.info(f"총 거래량: {total_volume:,.0f} 톤")
-            logger.info(f"데이터 소스: {data_source}")
-            
-            if execution_priority == 'critical':
-                logger.info("🔥 중요 시점 데이터 누적 저장 완료!")
-            elif active_items > 0:
-                logger.info(f"⚡ 활발한 거래 진행 중! ({active_items}개 종목)")
-            
-            # 활성 종목 상세 정보
-            active_data = [item for item in data if item['volume'] > 0]
-            if active_data:
-                logger.info("📊 활성 거래 종목:")
-                for item in active_data:
-                    logger.info(f"  • {item['symbol']}: {item['current_price']:,}원 "
-                              f"({item['change']:+.0f}, {item['change_rate']:+.2f}%) "
-                              f"거래량: {item['volume']:,}톤")
-            
-        except Exception as e:
-            logger.warning(f"통계 로깅 중 오류: {e}")
 
 
-def main():
-    """개선된 메인 실행 함수 - 실패시 명확한 실패 처리"""
+async def main():
+    """메인 실행 함수"""
     try:
-        logger.info("=== 개선된 KRX ETS 실시간 데이터 수집 시작 ===")
+        logger.info("=== Playwright 기반 KRX ETS 데이터 수집 시작 ===")
         
         # 환경변수 확인
         creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
@@ -597,96 +850,65 @@ def main():
         if not creds_json or not sheet_id:
             raise ValueError("필수 환경변수가 설정되지 않았습니다")
         
-        # 현재 시간 및 거래 정보
+        # 거래 정보
         now = datetime.now()
-        market_phase = os.getenv('MARKET_PHASE', 'unknown')
         trading_phase = os.getenv('TRADING_PHASE', 'unknown')
         execution_priority = os.getenv('EXECUTION_PRIORITY', 'unknown')
         
-        logger.info(f"수집 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
-        logger.info(f"시장 단계: {market_phase}")
-        logger.info(f"거래 단계: {trading_phase}")
-        logger.info(f"실행 우선도: {execution_priority}")
+        logger.info(f"🕐 수집 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
+        logger.info(f"⚡ 거래 단계: {trading_phase}")
+        logger.info(f"🎯 실행 우선도: {execution_priority}")
         
-        # 개선된 데이터 수집기 초기화
-        collector = RealKRXCollector()
+        # Playwright 데이터 수집기 초기화
+        collector = PlaywrightKRXCollector()
         
-        # 실시간 데이터 수집
-        logger.info("개선된 실시간 데이터 수집 중...")
-        real_data = collector.get_real_krx_data()
+        # 데이터 수집 실행
+        real_data = await collector.get_real_krx_data()
         
         if real_data:
             logger.info(f"✅ 데이터 수집 성공: {len(real_data)}개 종목")
             
-            # 📊 수집된 데이터 상세 검증
-            logger.info("=== 수집 데이터 검증 ===")
-            for i, item in enumerate(real_data):
-                logger.info(f"종목 {i+1}: {item['symbol']} - {item['current_price']:,}원 "
-                          f"(거래량: {item['volume']:,}톤, 소스: {item.get('data_source', 'unknown')})")
+            # 수집 방법별 통계
+            extraction_methods = {}
+            for item in real_data:
+                method = item.get('data_source', 'unknown')
+                extraction_methods[method] = extraction_methods.get(method, 0) + 1
+            
+            logger.info("📊 추출 방법별 통계:")
+            for method, count in extraction_methods.items():
+                method_name = {
+                    'playwright_dom': '🌐 DOM 추출',
+                    'playwright_ajax': '📡 AJAX 분석',
+                    'playwright_ocr': '📷 OCR 백업',
+                    'playwright_html': '📄 HTML 파싱'
+                }.get(method, f'❓ {method}')
+                logger.info(f"  • {method_name}: {count}개")
             
             if test_mode:
-                logger.info("테스트 모드: Google Sheets 업데이트 건너뜀")
-                logger.info("=== 테스트 모드 - 업로드 시뮬레이션 ===")
-                
-                # 테스트용 데이터 구조 검증
-                expected_headers = [
-                    '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
-                    '시가', '고가', '저가', '거래량', '거래대금', 
-                    '가중평균', '수집시간', '데이터소스', '거래단계', '우선도'
-                ]
-                
-                for i, item in enumerate(real_data[:2]):  # 처음 2개만 테스트
-                    current_time = item.get('time', datetime.now().strftime('%H:%M:%S'))
-                    test_row = [
-                        str(item['date']), str(item.get('time', current_time)), str(item['symbol']),
-                        str(item['current_price']), str(item['change']), str(item['change_rate']),
-                        str(item['open_price']), str(item['high_price']), str(item['low_price']),
-                        str(item['volume']), str(item['trading_value']), str(item['weighted_avg']),
-                        str(item.get('collection_time', current_time)), str(item.get('data_source', 'unknown')),
-                        str(item.get('trading_phase', 'unknown')), str(item.get('execution_priority', 'unknown'))
-                    ]
-                    
-                    logger.info(f"테스트 행 {i+1} ({len(test_row)}개 컬럼): {test_row}")
-                    logger.info(f"헤더 ({len(expected_headers)}개 컬럼): {expected_headers}")
-                    
-                    if len(test_row) == len(expected_headers):
-                        logger.info(f"✅ 종목 {i+1} 데이터 구조 정상")
-                    else:
-                        logger.error(f"❌ 종목 {i+1} 데이터 구조 오류! 컬럼 수: {len(test_row)} vs {len(expected_headers)}")
-                
-                print(f"✅ 테스트 모드 - 개선된 데이터 수집 성공!")
+                print(f"✅ Playwright 기반 데이터 수집 성공!")
                 print(f"📊 총 종목: {len(real_data)}개")
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"🎯 우선도: {execution_priority}")
-                print(f"💾 데이터 소스: {real_data[0].get('data_source', 'unknown')}")
-                print(f"📋 데이터 구조 검증: 통과")
+                print(f"🔧 추출 방법: {list(extraction_methods.keys())}")
                 return
             
-            # Google Sheets 누적 저장
+            # Google Sheets 저장
             sheets_manager = EnhancedSheetsManager(creds_json, sheet_id)
-            success = sheets_manager.append_real_data(real_data)  # 기존 데이터 삭제 안함
+            success = sheets_manager.append_real_data(real_data)
             
             if success:
-                # 성공 결과 출력
                 total_volume = sum(item['volume'] for item in real_data)
                 active_items = len([item for item in real_data if item['volume'] > 0])
                 
-                print(f"✅ 실시간 데이터 누적 저장 성공!")
+                print(f"✅ Playwright 기반 데이터 수집 및 저장 성공!")
                 print(f"📊 총 종목: {len(real_data)}개")
                 print(f"🔥 활성 종목: {active_items}개")
                 print(f"📈 총 거래량: {total_volume:,} 톤")
+                print(f"🌐 추출 방법: {', '.join(extraction_methods.keys())}")
                 print(f"⚡ 거래 단계: {trading_phase}")
-                print(f"🎯 실행 우선도: {execution_priority}")
-                print(f"💾 데이터 소스: {real_data[0].get('data_source', 'unknown')}")
                 print(f"🕐 수집 시간: {now.strftime('%H:%M:%S')} KST")
                 
-                # 거래 단계별 특별 메시지
-                if execution_priority == 'critical':
-                    print(f"🔥 중요 시점 데이터 누적 저장 완료!")
-                elif execution_priority == 'high':
-                    print(f"⚡ 고우선도 데이터 누적 저장 완료!")
-                
-                # 실제 거래 종목 정보
+                # 활성 거래 종목 정보
                 active_data = [item for item in real_data if item['volume'] > 0]
                 if active_data:
                     print(f"\n📋 활성 거래 종목:")
@@ -694,35 +916,21 @@ def main():
                         print(f"  • {item['symbol']}: {item['current_price']:,}원 "
                               f"({item['change']:+.0f}, {item['change_rate']:+.2f}%) "
                               f"거래량: {item['volume']:,}톤")
-                else:
-                    print(f"\n📋 주요 종목 (현재가 기준):")
-                    for item in real_data[:5]:
-                        print(f"  • {item['symbol']}: {item['current_price']:,}원")
-                
-                logger.info("✅ 개선된 실시간 데이터 수집 및 누적 저장 완료!")
                 
             else:
-                logger.error("❌ Google Sheets 업데이트 실패")
                 print("❌ Google Sheets 업데이트 실패")
                 sys.exit(1)
                 
         else:
-            # 실제 데이터 수집 실패시 명확하게 실패 처리
-            logger.error("❌ KRX 데이터 수집 완전 실패")
-            logger.error("🔍 수집된 데이터: 0개")
-            logger.error("📊 분석 결과:")
-            logger.error("   • 테이블 발견: 성공")
-            logger.error("   • 데이터 행 파싱: 실패 (0개 종목)")
-            logger.error("   • 재시도 횟수: 3회 모두 실패")
-            
-            print("❌ KRX 데이터 수집 실패!")
-            print("🔍 원인 분석:")
-            print("   • 현재 거래시간이 아닐 수 있습니다")
-            print("   • KRX 웹사이트 구조가 변경되었을 수 있습니다") 
-            print("   • 네트워크 연결에 문제가 있을 수 있습니다")
+            # 완전 실패 처리
+            logger.error("❌ 모든 데이터 수집 방법 실패")
+            print("❌ Playwright 기반 데이터 수집 실패!")
+            print("🔍 시도한 방법:")
+            print("   • DOM 직접 추출")
+            print("   • AJAX 응답 분석")
+            print("   • OCR 백업 시스템")
             print("📞 문제 지속시 GitHub Issues에 신고하세요")
-            
-            sys.exit(1)  # 명확한 실패로 종료
+            sys.exit(1)
             
     except Exception as e:
         logger.error(f"❌ 실행 중 오류: {e}")
@@ -730,5 +938,10 @@ def main():
         sys.exit(1)
 
 
+def run_main():
+    """동기 함수에서 비동기 함수 실행"""
+    asyncio.run(main())
+
+
 if __name__ == "__main__":
-    main()
+    run_main()
