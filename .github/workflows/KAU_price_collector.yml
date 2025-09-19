@@ -1,11 +1,11 @@
 # .github/workflows/KAU_price_collector.yml
-name: KRX ETS Data Collector
+name: KRX ETS Data Collector with Telegram Alerts
 
 on:
   schedule:
-    - cron: '0 1-3 * * 1-5'   # Every hour at 00 minutes (10:00, 11:00, 12:00 KST)
-    - cron: '30 3 * * 1-5'    # 12:30 KST - After market close  
-    - cron: '0 6 * * 1-5'     # 15:00 KST - Afternoon check
+    - cron: '0 1-3 * * 1-5'   # Every hour during trading hours (10:00-12:00 KST)
+    - cron: '30 3 * * 1-5'    # 12:30 KST - After market close
+    - cron: '0 6 * * 1-5'     # 15:00 KST - Daily summary and telegram alert
     
   workflow_dispatch:
     inputs:
@@ -24,6 +24,11 @@ on:
         required: false
         default: false
         type: boolean
+      send_telegram:
+        description: 'Force send telegram summary'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,6 +38,11 @@ jobs:
   collect-data:
     runs-on: ubuntu-latest
     
+    outputs:
+      collection_status: ${{ steps.collection.outputs.status }}
+      collection_message: ${{ steps.collection.outputs.message }}
+      is_daily_summary: ${{ steps.market_check.outputs.is_daily_summary }}
+      
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -53,7 +63,7 @@ jobs:
         pip install lxml==4.9.3
         pip install pandas==2.1.3
         
-    - name: Check market status
+    - name: Check market status and execution time
       id: market_check
       run: |
         CURRENT_HOUR=$(TZ=Asia/Seoul date +%H)
@@ -72,6 +82,13 @@ jobs:
         fi
         echo "is_weekday=${IS_WEEKDAY}" >> $GITHUB_OUTPUT
         
+        # 15:00 KST (06:00 UTC) 실행인지 확인 (일일 요약 시간)
+        IS_DAILY_SUMMARY="false"
+        if [ "${CURRENT_HOUR}" -eq 15 ]; then
+          IS_DAILY_SUMMARY="true"
+        fi
+        echo "is_daily_summary=${IS_DAILY_SUMMARY}" >> $GITHUB_OUTPUT
+        
         IS_TRADING_HOURS="false"
         MARKET_PHASE="closed"
         
@@ -79,8 +96,10 @@ jobs:
           if [ "${CURRENT_HOUR}" -ge 10 ] && [ "${CURRENT_HOUR}" -lt 12 ]; then
             IS_TRADING_HOURS="true"
             MARKET_PHASE="trading"
-          elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -lt 30 ]; then
+          elif [ "${CURRENT_HOUR}" -eq 12 ] && [ "${CURRENT_MINUTE}" -ge 30 ]; then
             MARKET_PHASE="just_closed"
+          elif [ "${CURRENT_HOUR}" -eq 15 ]; then
+            MARKET_PHASE="daily_summary"
           elif [ "${CURRENT_HOUR}" -eq 9 ]; then
             MARKET_PHASE="pre_trading"
           else
@@ -94,12 +113,14 @@ jobs:
         echo "Current time: ${CURRENT_TIME} KST"
         echo "Date: ${CURRENT_DATE}"
         echo "Market phase: ${MARKET_PHASE}"
-        echo "Trading hours: ${IS_TRADING_HOURS}"
+        echo "Daily summary time: ${IS_DAILY_SUMMARY}"
 
     - name: Verify environment variables
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
+        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
       run: |
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
           echo "ERROR: GOOGLE_SHEETS_CREDS not found"
@@ -111,24 +132,39 @@ jobs:
           exit 1
         fi
         
+        if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+          echo "WARNING: Telegram bot token not found - alerts will be skipped"
+        fi
+        
+        if [ -z "$TELEGRAM_CHAT_ID" ]; then
+          echo "WARNING: Telegram chat ID not found - alerts will be skipped"
+        fi
+        
         echo "Environment variables verified"
 
-    - name: Check trading hours and execute
+    - name: Execute data collection
+      id: collection
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
         MARKET_PHASE: ${{ steps.market_check.outputs.market_phase }}
         DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
         TEST_MODE: ${{ github.event.inputs.test_mode }}
+        IS_DAILY_SUMMARY: ${{ steps.market_check.outputs.is_daily_summary }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
+        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
       run: |
         echo "Market phase: ${{ steps.market_check.outputs.market_phase }}"
         echo "Current time: ${{ steps.market_check.outputs.current_time }} KST"
         echo "Trading hours: ${{ steps.market_check.outputs.is_trading_hours }}"
+        echo "Daily summary: ${{ steps.market_check.outputs.is_daily_summary }}"
         echo "Debug mode: ${{ github.event.inputs.debug_mode }}"
         echo "Test mode: ${{ github.event.inputs.test_mode }}"
         
         # Skip on weekends
         if [ "${{ steps.market_check.outputs.is_weekday }}" = "false" ]; then
+          echo "status=skipped" >> $GITHUB_OUTPUT
+          echo "message=Weekend - No execution" >> $GITHUB_OUTPUT
           echo "Skipping: Weekend"
           exit 0
         fi
@@ -137,11 +173,13 @@ jobs:
         if [ "${{ github.event.inputs.force_collection }}" != "true" ]; then
           case "${{ steps.market_check.outputs.market_phase }}" in
             "closed")
+              echo "status=skipped" >> $GITHUB_OUTPUT
+              echo "message=Market closed - No execution" >> $GITHUB_OUTPUT
               echo "Skipping: Market closed"
               exit 0
               ;;
-            "trading"|"just_closed"|"post_trading")
-              echo "Proceeding: Active trading period"
+            "trading"|"just_closed"|"post_trading"|"daily_summary")
+              echo "Proceeding: Active collection period"
               ;;
             *)
               echo "Proceeding: Limited collection"
@@ -151,9 +189,16 @@ jobs:
           echo "Force collection mode enabled"
         fi
         
-        # Execute the Python script
+        # Execute the Python script and capture result
         echo "Starting KRX data collection..."
-        python KAU_price_collector.py
+        if python KAU_price_collector.py; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=Data collection completed successfully" >> $GITHUB_OUTPUT
+        else
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "message=Data collection failed with errors" >> $GITHUB_OUTPUT
+          exit 1
+        fi
 
     - name: Run analysis script
       if: always()
@@ -174,38 +219,74 @@ jobs:
           echo "Analysis script not found, skipping detailed analysis"
         fi
 
-    - name: Generate summary
-      if: always()
-      run: |
-        echo "## KRX ETS Data Collection Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Execution Time**: ${{ steps.market_check.outputs.current_time }} KST" >> $GITHUB_STEP_SUMMARY
-        echo "**Date**: ${{ steps.market_check.outputs.current_date }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Market Phase**: ${{ steps.market_check.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Trading Hours**: ${{ steps.market_check.outputs.is_trading_hours }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Debug Mode**: ${{ github.event.inputs.debug_mode }}" >> $GITHUB_STEP_SUMMARY
-        echo "**Test Mode**: ${{ github.event.inputs.test_mode }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+  telegram-notification:
+    needs: collect-data
+    runs-on: ubuntu-latest
+    if: always() && (needs.collect-data.outputs.is_daily_summary == 'true' || github.event.inputs.send_telegram == 'true')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
         
-        if [ $? -eq 0 ]; then
-          echo "**Status**: Success" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Trading Schedule" >> $GITHUB_STEP_SUMMARY
-          echo "- **Trading Hours**: 10:00-12:00 KST (Weekdays)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Collection Frequency**: Every 5 minutes during trading" >> $GITHUB_STEP_SUMMARY
-          echo "- **Post-Market**: 12:30 KST" >> $GITHUB_STEP_SUMMARY
-          echo "- **Afternoon Check**: 15:00 KST" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "**Status**: Failed" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Troubleshooting" >> $GITHUB_STEP_SUMMARY
-          echo "- Check KRX website accessibility" >> $GITHUB_STEP_SUMMARY
-          echo "- Verify Google Sheets API credentials" >> $GITHUB_STEP_SUMMARY
-          echo "- Run with debug mode for detailed logs" >> $GITHUB_STEP_SUMMARY
+    - name: Install dependencies for telegram
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests==2.31.0
+        pip install gspread==5.12.0
+        pip install google-auth==2.23.4
+        pip install pandas==2.1.3
+        
+    - name: Generate daily summary and send telegram alert
+      env:
+        GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+        KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
+        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
+        COLLECTION_STATUS: ${{ needs.collect-data.outputs.collection_status }}
+        COLLECTION_MESSAGE: ${{ needs.collect-data.outputs.collection_message }}
+      run: |
+        echo "=== Daily Summary and Telegram Notification ==="
+        echo "Collection Status: ${COLLECTION_STATUS}"
+        echo "Collection Message: ${COLLECTION_MESSAGE}"
+        
+        if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+          echo "❌ Telegram credentials not available - skipping notification"
+          exit 0
         fi
         
-        if [ $? -eq 0 ]; then
-          echo "::notice::KRX data collection completed successfully"
+        # Execute telegram notification script
+        python telegram_notifier.py
+
+    - name: Generate workflow summary
+      if: always()
+      run: |
+        echo "## 📊 KRX ETS Data Collection Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Date**: $(TZ=Asia/Seoul date +%Y-%m-%d)" >> $GITHUB_STEP_SUMMARY
+        echo "**Time**: $(TZ=Asia/Seoul date +%H:%M:%S) KST" >> $GITHUB_STEP_SUMMARY
+        echo "**Collection Status**: ${{ needs.collect-data.outputs.collection_status }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Message**: ${{ needs.collect-data.outputs.collection_message }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.collect-data.outputs.is_daily_summary }}" = "true" ]; then
+          echo "**📱 Telegram Alert**: Daily summary sent" >> $GITHUB_STEP_SUMMARY
         else
-          echo "::warning::KRX data collection failed"
+          echo "**📱 Telegram Alert**: Not applicable (not daily summary time)" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Trading Schedule" >> $GITHUB_STEP_SUMMARY
+        echo "- **Trading Hours**: 10:00-12:00 KST (Hourly collection)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Post-Market**: 12:30 KST" >> $GITHUB_STEP_SUMMARY
+        echo "- **Daily Summary**: 15:00 KST (With Telegram alerts)" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.collect-data.outputs.collection_status }}" = "success" ]; then
+          echo "::notice::✅ KRX data collection completed successfully"
+        else
+          echo "::error::❌ KRX data collection failed - Check logs and Telegram alerts"
         fi
