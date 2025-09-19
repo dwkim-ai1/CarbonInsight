@@ -1,5 +1,5 @@
 # .github/workflows/KAU_price_collector.yml
-name: KRX ETS Data Collector with Telegram Alerts
+name: 01_KRX ETS Data Collector
 
 on:
   schedule:
