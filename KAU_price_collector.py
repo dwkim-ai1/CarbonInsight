@@ -127,8 +127,8 @@ class RealKRXCollector:
             logger.error("🚨 예상치 못한 오류로 인한 수집 실패")
             return []  # 빈 리스트 반환으로 명확한 실패 표시
 
-    def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
-        """정확한 KRX 테이블 구조 기반 HTML 파싱"""
+def _parse_main_page_enhanced(self, html_content: str) -> List[Dict]:
+        """정확한 KRX 테이블 구조 기반 HTML 파싱 - 모든 행 검사"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             result_list = []
@@ -192,7 +192,10 @@ class RealKRXCollector:
                 data_rows = all_rows[1:] if len(all_rows) > 1 else []  # 헤더 제외
                 logger.info(f"📊 테이블 전체에서 데이터 행 발견: {len(data_rows)}개 (헤더 제외)")
             
-            # 🔍 각 데이터 행 상세 분석 및 파싱
+            # 🔍 **모든 데이터 행** 상세 분석 및 파싱 (첫 번째 행이 비어도 계속 진행)
+            empty_rows = 0
+            valid_rows = 0
+            
             for i, row in enumerate(data_rows):
                 try:
                     cells = row.find_all(['td', 'th'])
@@ -201,7 +204,17 @@ class RealKRXCollector:
                     if len(cells) >= 8:  # KRX 테이블은 최소 9개 컬럼
                         # 🎯 셀 내용 미리 확인
                         cell_texts = [cell.get_text(strip=True) for cell in cells]
-                        logger.debug(f"행 {i+1} 내용: {cell_texts[:3]}...")  # 처음 3개만
+                        
+                        # 🚨 빈 행 체크 (모든 셀이 비어있는지)
+                        is_empty_row = all(not text for text in cell_texts)
+                        
+                        if is_empty_row:
+                            empty_rows += 1
+                            logger.debug(f"행 {i+1}: 빈 행 발견 - 건너뜀 ({cell_texts[:3]}...)")
+                            continue  # 빈 행은 건너뛰고 다음 행 계속 검사
+                        
+                        valid_rows += 1
+                        logger.info(f"📋 행 {i+1} 유효 데이터: {cell_texts[:3]}...")  # 처음 3개만
                         
                         # 종목명이 있는지 확인 (첫 번째 셀)
                         symbol_candidate = cell_texts[0] if cell_texts else ''
@@ -223,27 +236,36 @@ class RealKRXCollector:
                     logger.warning(f"행 {i+1} 파싱 중 오류: {e}")
                     continue
             
+            logger.info(f"📊 행 분석 완료: 총 {len(data_rows)}개 행, 빈 행 {empty_rows}개, 유효 행 {valid_rows}개")
             logger.info(f"🎯 최종 파싱 결과: {len(result_list)}개 종목 성공")
             
-            # 🔍 파싱 실패시 추가 디버깅 정보
+            # 🔍 파싱 실패시 상세 디버깅 정보
             if len(result_list) == 0 and len(data_rows) > 0:
                 logger.error("🚨 데이터 행은 있지만 파싱된 종목이 없음!")
                 logger.error(f"   사용된 선택자: {used_selector}")
                 logger.error(f"   테이블 ID: {table.get('id', 'None')}")
-                logger.error(f"   발견된 행 수: {len(data_rows)}")
+                logger.error(f"   총 발견된 행: {len(data_rows)}개")
+                logger.error(f"   빈 행: {empty_rows}개")
+                logger.error(f"   유효 행: {valid_rows}개")
                 
-                # 첫 번째 행 상세 분석
-                if data_rows:
-                    first_row = data_rows[0]
-                    first_cells = first_row.find_all(['td', 'th'])
-                    first_texts = [cell.get_text(strip=True) for cell in first_cells]
-                    logger.error(f"   첫 번째 행 ({len(first_cells)}개 셀): {first_texts}")
+                # 🔍 모든 행의 첫 번째 셀 내용 확인
+                logger.error("🔍 전체 행 분석:")
+                for i, row in enumerate(data_rows[:10]):  # 최대 10개 행만
+                    try:
+                        first_cells = row.find_all(['td', 'th'])
+                        if first_cells:
+                            first_cell_text = first_cells[0].get_text(strip=True)
+                            all_texts = [cell.get_text(strip=True) for cell in first_cells[:3]]
+                            logger.error(f"   행 {i+1}: 첫 셀 '{first_cell_text}', 처음 3개: {all_texts}")
+                    except Exception as e:
+                        logger.error(f"   행 {i+1}: 분석 오류 - {e}")
             
             return result_list
             
         except Exception as e:
             logger.error(f"HTML 파싱 중 오류: {e}")
             return []
+            
     def _parse_row_enhanced(self, cells, row_index: int) -> Optional[Dict]:
         """개선된 테이블 행 파싱"""
         try:
