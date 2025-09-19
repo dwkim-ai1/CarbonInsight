@@ -23,6 +23,65 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.telegram_api_url = f"https://api.telegram.org/bot{bot_token}"
         
+    def test_bot_connection(self) -> bool:
+        """봇 연결 상태 테스트"""
+        try:
+            # 1. Bot 정보 확인
+            url = f"{self.telegram_api_url}/getMe"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                bot_info = response.json()
+                logger.info(f"✅ Bot 연결 성공: {bot_info['result']['username']} (@{bot_info['result']['username']})")
+                return True
+            else:
+                logger.error(f"❌ Bot 토큰 오류: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Bot 연결 테스트 실패: {e}")
+            return False
+    
+    def test_chat_access(self) -> bool:
+        """채팅 접근 권한 테스트"""
+        try:
+            # 간단한 테스트 메시지 전송
+            url = f"{self.telegram_api_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': '🔍 연결 테스트 - 이 메시지가 보이면 설정이 올바릅니다.',
+                'disable_notification': True
+            }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.info("✅ 채팅 접근 테스트 성공")
+                return True
+            else:
+                error_data = response.json() if response.headers.get('content-type') == 'application/json' else {'description': response.text}
+                error_code = error_data.get('error_code', response.status_code)
+                error_desc = error_data.get('description', 'Unknown error')
+                
+                logger.error(f"❌ 채팅 접근 테스트 실패: {error_code} - {error_desc}")
+                
+                # 일반적인 에러 코드별 해결방법 안내
+                if error_code == 400:
+                    if 'chat not found' in error_desc.lower():
+                        logger.error("💡 해결방법: Chat ID가 잘못되었습니다. 올바른 Chat ID를 확인하세요.")
+                    elif 'bot was blocked' in error_desc.lower():
+                        logger.error("💡 해결방법: 봇이 차단되었습니다. 봇과의 대화를 시작하고 /start를 보내세요.")
+                elif error_code == 401:
+                    logger.error("💡 해결방법: Bot 토큰이 잘못되었습니다. @BotFather에서 올바른 토큰을 확인하세요.")
+                elif error_code == 403:
+                    logger.error("💡 해결방법: 봇에게 메시지 전송 권한이 없습니다. 봇과 먼저 대화를 시작하세요.")
+                
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ 채팅 접근 테스트 중 오류: {e}")
+            return False
+        
     def send_message(self, message: str, parse_mode: str = "Markdown") -> bool:
         """텔레그램 메시지 전송"""
         try:
@@ -34,7 +93,20 @@ class TelegramNotifier:
                 'disable_web_page_preview': True
             }
             
+            # 디버깅 정보 출력 (보안상 일부만)
+            logger.info(f"텔레그램 API 호출 시작")
+            logger.info(f"URL: {url}")
+            logger.info(f"Chat ID: {self.chat_id}")
+            logger.info(f"Bot Token 앞부분: {self.bot_token[:15]}...")
+            logger.info(f"메시지 길이: {len(message)} 문자")
+            
             response = requests.post(url, json=payload, timeout=30)
+            
+            # 응답 상태 상세 로깅
+            logger.info(f"HTTP 상태 코드: {response.status_code}")
+            if response.status_code != 200:
+                logger.error(f"응답 내용: {response.text}")
+                
             response.raise_for_status()
             
             logger.info("텔레그램 메시지 전송 성공")
@@ -42,6 +114,12 @@ class TelegramNotifier:
             
         except requests.RequestException as e:
             logger.error(f"텔레그램 메시지 전송 실패: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    logger.error(f"텔레그램 API 오류 상세: {error_data}")
+                except:
+                    logger.error(f"응답 텍스트: {e.response.text}")
             return False
         except Exception as e:
             logger.error(f"텔레그램 메시지 전송 중 예상치 못한 오류: {e}")
@@ -355,6 +433,25 @@ def main():
         
         # 텔레그램 알림 시스템 초기화
         telegram = TelegramNotifier(telegram_bot_token, telegram_chat_id)
+        
+        # 텔레그램 연결 테스트 실행
+        logger.info("=== 텔레그램 연결 테스트 시작 ===")
+        bot_ok = telegram.test_bot_connection()
+        chat_ok = telegram.test_chat_access()
+        
+        if not bot_ok:
+            logger.error("❌ Bot 토큰에 문제가 있습니다")
+            print("❌ Bot 토큰 오류 - GitHub Secrets CARBON_TOKEN 확인 필요")
+            return
+            
+        if not chat_ok:
+            logger.error("❌ Chat ID에 문제가 있습니다")  
+            print("❌ Chat ID 오류 - GitHub Secrets ESG_TESTER 확인 필요")
+            print("💡 해결방법:")
+            print("   1. 텔레그램에서 봇과 대화 시작")
+            print("   2. /start 명령어 전송") 
+            print("   3. Chat ID 재확인")
+            return
         
         # 데이터 분석기 초기화
         analyzer = DailyAnalyzer(creds_json, sheet_id)
