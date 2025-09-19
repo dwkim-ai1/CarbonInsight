@@ -119,8 +119,8 @@ jobs:
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
-        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets['CARBON_TOKEN'] }}
+        TELEGRAM_CHAT_ID: ${{ secrets['ESG_TESTER'] }}
       run: |
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
           echo "ERROR: GOOGLE_SHEETS_CREDS not found"
