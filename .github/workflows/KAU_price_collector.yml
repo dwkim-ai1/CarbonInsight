@@ -119,28 +119,60 @@ jobs:
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets['CARBON_TOKEN'] }}
-        TELEGRAM_CHAT_ID: ${{ secrets['ESG_TESTER'] }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
       run: |
+        echo "=== Environment Variables Check ==="
+        
         if [ -z "$GOOGLE_SHEETS_CREDS" ]; then
-          echo "ERROR: GOOGLE_SHEETS_CREDS not found"
+          echo "❌ ERROR: GOOGLE_SHEETS_CREDS not found"
           exit 1
+        else
+          echo "✅ GOOGLE_SHEETS_CREDS: Found (${#GOOGLE_SHEETS_CREDS} characters)"
         fi
         
         if [ -z "$KAU_SHEET_ID" ]; then
-          echo "ERROR: KAU_SHEET_ID not found"
+          echo "❌ ERROR: KAU_SHEET_ID not found"
           exit 1
+        else
+          echo "✅ KAU_SHEET_ID: Found ($KAU_SHEET_ID)"
         fi
         
         if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-          echo "WARNING: Telegram bot token not found - alerts will be skipped"
+          echo "❌ WARNING: TELEGRAM_BOT_TOKEN not found"
+          echo "   → Check GitHub Secret: 'CARBON_TOKEN'"
+        else
+          echo "✅ TELEGRAM_BOT_TOKEN: Found (${#TELEGRAM_BOT_TOKEN} characters)"
+          # 앞 15글자만 출력 (보안상 안전)
+          TOKEN_PREFIX="${TELEGRAM_BOT_TOKEN:0:15}..."
+          echo "   → Starts with: $TOKEN_PREFIX"
+          # 토큰 형식 검증 (bot으로 시작하는지)
+          if [[ "$TELEGRAM_BOT_TOKEN" == bot* ]]; then
+            echo "   → Token format looks correct (starts with 'bot')"
+          else
+            echo "   → ⚠️  Token format may be incorrect (should start with 'bot')"
+          fi
         fi
         
         if [ -z "$TELEGRAM_CHAT_ID" ]; then
-          echo "WARNING: Telegram chat ID not found - alerts will be skipped"
+          echo "❌ WARNING: TELEGRAM_CHAT_ID not found"
+          echo "   → Check GitHub Secret: 'ESG_TESTER'"
+        else
+          echo "✅ TELEGRAM_CHAT_ID: Found ($TELEGRAM_CHAT_ID)"
+          # 채팅 ID 형식 검증 (숫자 또는 -로 시작)
+          if [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]]; then
+            echo "   → Chat ID format looks correct"
+          else
+            echo "   → ⚠️  Chat ID format may be incorrect (should be numeric)"
+          fi
         fi
         
-        echo "Environment variables verified"
+        echo "=== Telegram Credentials Status ==="
+        if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+          echo "✅ All telegram credentials available"
+        else
+          echo "❌ Missing telegram credentials - notifications will be skipped"
+        fi
 
     - name: Execute data collection
       id: collection
@@ -151,8 +183,8 @@ jobs:
         DEBUG_MODE: ${{ github.event.inputs.debug_mode }}
         TEST_MODE: ${{ github.event.inputs.test_mode }}
         IS_DAILY_SUMMARY: ${{ steps.market_check.outputs.is_daily_summary }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
-        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
       run: |
         echo "Market phase: ${{ steps.market_check.outputs.market_phase }}"
         echo "Current time: ${{ steps.market_check.outputs.current_time }} KST"
@@ -245,8 +277,8 @@ jobs:
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-        TELEGRAM_BOT_TOKEN: ${{ secrets['Carbon token'] }}
-        TELEGRAM_CHAT_ID: ${{ secrets['ESG tester'] }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.CARBON_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
         COLLECTION_STATUS: ${{ needs.collect-data.outputs.collection_status }}
         COLLECTION_MESSAGE: ${{ needs.collect-data.outputs.collection_message }}
       run: |
