@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-최적화된 KRX ETS 데이터 수집기 (중복 제거 통합)
+최적화된 KRX ETS 데이터 수집기 v3.0 (KRX 시트 추가)
 1. 기존 Playwright 기반 시스템 유지
-2. OptimizedSheetsManager 적용
-3. 중복 제거 통계 GitHub Actions 전달
-4. 12:30 KST 최종 세션 지원
+2. OptimizedSheetsManager 적용 + KRX 시트 관리
+3. 12:30 최종 세션 KRX 시트 업데이트
+4. 중복 제거 통계 GitHub Actions 전달
 """
 
 # 기존 imports 유지
@@ -116,9 +116,6 @@ class PlaywrightKRXCollector:
                 'high_accuracy': False, 'headless': True
             }
 
-    # 나머지 PlaywrightKRXCollector 메서드들은 기존과 동일하게 유지
-    # (initialize_browser, get_real_krx_data, cleanup 등)
-    
     async def initialize_browser(self):
         """브라우저 초기화 (기존과 동일)"""
         try:
@@ -230,7 +227,6 @@ class PlaywrightKRXCollector:
         finally:
             await self.cleanup()
 
-    # 기존 메서드들 (간소화하여 표시)
     async def _load_main_page(self):
         """메인 페이지 로드"""
         response = await self.page.goto(self.main_page_url, timeout=self.trading_config['timeout'], wait_until='domcontentloaded')
@@ -373,35 +369,49 @@ class PlaywrightKRXCollector:
             logger.warning(f"리소스 정리 중 오류: {e}")
 
 
-# 최적화된 Google Sheets 관리자 (위에서 정의한 클래스 사용)
+# 최적화된 Google Sheets 관리자 (KRX 시트 추가)
 class OptimizedSheetsManager:
-    """최적화된 Google Sheets 관리자 (중복 제거)"""
+    """최적화된 Google Sheets 관리자 (중복 제거 + KRX 시트)"""
     
     def __init__(self, credentials_json: str, sheet_id: str):
         try:
-            logger.info("Google Sheets 연결 시작 (최적화 버전)...")
+            logger.info("Google Sheets 연결 시작 (최적화 v3.0)...")
             creds_dict = json.loads(credentials_json)
             self.gc = gspread.service_account_from_dict(creds_dict)
             self.sheet_id = sheet_id
             self.spreadsheet = self.gc.open_by_key(sheet_id)
-            self.setup_worksheet()
+            self.setup_worksheets()
         except Exception as e:
             logger.error(f"Google Sheets 연결 실패: {e}")
             raise
     
-    def setup_worksheet(self):
+    def setup_worksheets(self):
+        """워크시트 설정 (ets.KRX + KRX)"""
         try:
+            # 1. 기존 ets.KRX 시트 설정
             try:
                 self.worksheet = self.spreadsheet.worksheet('ets.KRX')
                 self._verify_and_fix_headers()
             except gspread.WorksheetNotFound:
                 self.worksheet = self.spreadsheet.add_worksheet(title='ets.KRX', rows=2000, cols=16)
                 self._setup_headers()
+            
+            # 2. 새로운 KRX 시트 설정 (요약용)
+            try:
+                self.krx_worksheet = self.spreadsheet.worksheet('KRX')
+                self._verify_and_fix_krx_headers()
+            except gspread.WorksheetNotFound:
+                self.krx_worksheet = self.spreadsheet.add_worksheet(title='KRX', rows=1000, cols=11)
+                self._setup_krx_headers()
+                
+            logger.info("✅ 워크시트 설정 완료: ets.KRX (상세) + KRX (요약)")
+            
         except Exception as e:
             logger.error(f"워크시트 설정 실패: {e}")
             raise
     
     def _verify_and_fix_headers(self):
+        """ets.KRX 시트 헤더 확인"""
         try:
             current_headers = self.worksheet.row_values(1)
             correct_headers = [
@@ -415,6 +425,7 @@ class OptimizedSheetsManager:
             self._setup_headers()
     
     def _setup_headers(self):
+        """ets.KRX 시트 헤더 설정"""
         headers = [
             '날짜', '시간', '종목명', '현재가', '대비', '등락률', 
             '시가', '고가', '저가', '거래량', '거래대금', 
@@ -426,6 +437,33 @@ class OptimizedSheetsManager:
             'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
             'horizontalAlignment': 'CENTER'
         })
+    
+    def _verify_and_fix_krx_headers(self):
+        """KRX 시트 헤더 확인"""
+        try:
+            current_headers = self.krx_worksheet.row_values(1)
+            correct_headers = [
+                '날짜', '종목명', '현재가', '대비', '등락률', 
+                '시가', '고가', '저가', '거래량', '거래대금', '가중평균'
+            ]
+            if current_headers != correct_headers:
+                self._setup_krx_headers()
+        except Exception as e:
+            self._setup_krx_headers()
+    
+    def _setup_krx_headers(self):
+        """KRX 시트 헤더 설정 (A~K열)"""
+        headers = [
+            '날짜', '종목명', '현재가', '대비', '등락률', 
+            '시가', '고가', '저가', '거래량', '거래대금', '가중평균'
+        ]
+        self.krx_worksheet.update('A1:K1', [headers])
+        self.krx_worksheet.format('A1:K1', {
+            'backgroundColor': {'red': 0.1, 'green': 0.7, 'blue': 0.3},
+            'textFormat': {'bold': True, 'foregroundColor': {'red': 1, 'green': 1, 'blue': 1}},
+            'horizontalAlignment': 'CENTER'
+        })
+        logger.info("✅ KRX 시트 헤더 설정 완료 (A~K열)")
     
     def get_today_last_data(self, target_date: str) -> Dict[str, Dict]:
         """오늘의 최신 데이터 조회 (중복 검사용)"""
@@ -528,7 +566,7 @@ class OptimizedSheetsManager:
             
             if new_rows:
                 self.worksheet.append_rows(new_rows)
-                logger.info(f"💾 스프레드시트 업데이트: {len(new_rows)}개 행 추가")
+                logger.info(f"💾 ets.KRX 시트 업데이트: {len(new_rows)}개 행 추가")
             
             efficiency = round((stats['skipped'] / stats['total'] * 100), 1) if stats['total'] > 0 else 0
             logger.info(f"📊 최적화 결과: 추가 {stats['added']}개 | 생략 {stats['skipped']}개")
@@ -538,6 +576,77 @@ class OptimizedSheetsManager:
         except Exception as e:
             logger.error(f"최적화 데이터 추가 실패: {e}")
             return False, {'skipped': 0, 'added': 0, 'total': len(data) if data else 0}
+    
+    def update_krx_final_summary(self, data: List[Dict]) -> bool:
+        """12:30 최종 세션 KRX 시트 업데이트 (A~K열)"""
+        try:
+            if not data:
+                logger.warning("KRX 최종 요약: 데이터 없음")
+                return False
+            
+            current_date = data[0]['date']
+            logger.info(f"🎯 KRX 시트 최종 요약 업데이트: {current_date}")
+            
+            # 모든 종목 데이터 준비 (거래 없는 종목도 포함)
+            all_symbols = [
+                'KAU25', 'KCU25', 'KOC21-26', 'KOC22-27', 'KOC23-28', 'KOC24-29', 'KOC25-30',
+                'i-KCU25', 'i-KOC20-22', 'i-KOC21-26', 'i-KOC22-27', 'i-KOC23-28', 'i-KOC24-29', 'i-KOC25-30'
+            ]
+            
+            # 수집된 데이터를 딕셔너리로 변환
+            collected_data = {item['symbol']: item for item in data}
+            
+            # KRX 시트용 행 생성
+            krx_rows = []
+            for symbol in all_symbols:
+                if symbol in collected_data:
+                    # 수집된 데이터 사용
+                    item = collected_data[symbol]
+                    row = [
+                        str(item['date']),                    # A: 날짜
+                        str(item['symbol']),                  # B: 종목명
+                        str(item['current_price']),           # C: 현재가
+                        str(item['change']),                  # D: 대비
+                        str(item['change_rate']),             # E: 등락률
+                        str(item['open_price']),              # F: 시가
+                        str(item['high_price']),              # G: 고가
+                        str(item['low_price']),               # H: 저가
+                        str(item['volume']),                  # I: 거래량
+                        str(item['trading_value']),           # J: 거래대금
+                        str(item['weighted_avg'])             # K: 가중평균
+                    ]
+                else:
+                    # 거래 없는 종목 - 기본값으로 추가
+                    row = [
+                        current_date,  # A: 날짜
+                        symbol,        # B: 종목명
+                        '0',           # C: 현재가
+                        '0',           # D: 대비
+                        '0.00',        # E: 등락률
+                        '0',           # F: 시가
+                        '0',           # G: 고가
+                        '0',           # H: 저가
+                        '0',           # I: 거래량
+                        '0',           # J: 거래대금
+                        '0'            # K: 가중평균
+                    ]
+                
+                krx_rows.append(row)
+            
+            # KRX 시트에 일괄 업데이트
+            if krx_rows:
+                self.krx_worksheet.append_rows(krx_rows)
+                logger.info(f"✅ KRX 시트 최종 요약 완료: {len(krx_rows)}개 종목 (A~K열)")
+                logger.info(f"📊 수집 종목: {len(collected_data)}개")
+                logger.info(f"📋 거래없음: {len(all_symbols) - len(collected_data)}개")
+                return True
+            else:
+                logger.warning("KRX 시트 업데이트: 생성된 행 없음")
+                return False
+                
+        except Exception as e:
+            logger.error(f"KRX 시트 최종 요약 실패: {e}")
+            return False
     
     def append_real_data(self, data: List[Dict]) -> bool:
         """기존 인터페이스 호환성"""
@@ -551,9 +660,9 @@ class EnhancedSheetsManager(OptimizedSheetsManager):
 
 
 async def main():
-    """최적화된 메인 실행 함수"""
+    """최적화된 메인 실행 함수 (v3.0)"""
     try:
-        logger.info("=== 최적화된 KRX ETS 데이터 수집 시스템 시작 ===")
+        logger.info("=== 최적화된 KRX ETS 데이터 수집 시스템 v3.0 시작 ===")
         
         if not PLAYWRIGHT_AVAILABLE:
             logger.error("❌ Playwright 패키지가 없습니다")
@@ -572,12 +681,14 @@ async def main():
         trading_phase = os.getenv('TRADING_PHASE', 'unknown')
         collection_frequency = os.getenv('COLLECTION_FREQUENCY', 'standard')
         execution_priority = os.getenv('EXECUTION_PRIORITY', 'unknown')
+        is_final_session = os.getenv('IS_FINAL_SESSION', 'false').lower() == 'true'
         
         logger.info(f"🕐 수집 시작: {now.strftime('%Y-%m-%d %H:%M:%S')} KST")
         logger.info(f"⚡ 거래 단계: {trading_phase}")
         logger.info(f"📊 수집 주기: {collection_frequency}")
         logger.info(f"🎯 실행 우선도: {execution_priority}")
-        logger.info(f"🚀 시스템: 최적화 (중복 제거)")
+        logger.info(f"🎯 최종 세션: {is_final_session}")
+        logger.info(f"🚀 시스템: 최적화 v3.0 (KRX 시트 추가)")
         
         # Playwright 데이터 수집기 초기화
         collector = PlaywrightKRXCollector()
@@ -593,12 +704,21 @@ async def main():
                 print(f"📊 총 종목: {len(real_data)}개")
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"📊 수집 주기: {collection_frequency}")
-                print(f"🚀 시스템: 최적화 (중복 제거)")
+                print(f"🎯 최종 세션: {is_final_session}")
+                print(f"🚀 시스템: v3.0 (KRX 시트)")
                 return
             
             # 최적화된 Google Sheets 저장
             sheets_manager = OptimizedSheetsManager(creds_json, sheet_id)
+            
+            # 1. ets.KRX 시트에 최적화된 데이터 추가
             success, optimization_stats = sheets_manager.append_optimized_data(real_data)
+            
+            # 2. 12:30 최종 세션인 경우 KRX 시트에 요약 추가
+            krx_updated = False
+            if is_final_session:
+                logger.info("🎯 12:30 최종 세션 - KRX 시트 요약 업데이트")
+                krx_updated = sheets_manager.update_krx_final_summary(real_data)
             
             if success:
                 total_volume = sum(item['volume'] for item in real_data)
@@ -618,9 +738,13 @@ async def main():
                 print(f"⚡ 거래 단계: {trading_phase}")
                 print(f"🕐 수집 시간: {now.strftime('%H:%M:%S')} KST")
                 
-                # 12:30 최종 세션 확인
-                if now.hour == 12 and now.minute == 30:
+                # 12:30 최종 세션 결과
+                if is_final_session:
                     print(f"🎯 12:30 KST 최종 마감 세션 완료!")
+                    if krx_updated:
+                        print(f"✅ KRX 시트 요약 업데이트 성공 (A~K열)")
+                    else:
+                        print(f"⚠️ KRX 시트 요약 업데이트 실패")
                     print(f"📱 텔레그램 일일 요약 발송 예정")
                 
             else:
