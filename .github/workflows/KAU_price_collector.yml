@@ -195,7 +195,7 @@ jobs:
   # Job 2: Playwright 기반 데이터 수집
   collect-krx-data:
     needs: check-trading-conditions
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Ubuntu 24.04 패키지 호환성 문제 해결
     if: needs.check-trading-conditions.outputs.should_run == 'true'
     
     timeout-minutes: 15  # Playwright + OCR을 위해 시간 연장
