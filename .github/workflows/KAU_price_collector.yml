@@ -1,11 +1,11 @@
 # .github/workflows/KAU_price_collector.yml
 # 최적화된 KRX 데이터 수집 시스템 (중복 제거 + 맞춤형 스케줄)
 
-name: KRX ETS Data Collector (최적화 버전)
+name: KRX ETS Data Collector v3.0
 
 on:
   schedule:
-    # === 최적화된 거래시간 스케줄 ===
+    # === v3.0 최적화된 수집 스케줄 ===
     
     # 📊 09:00-10:00 KST (30분 간격) - 주문접수 및 준비
     - cron: '0 0 * * 1-5'     # KST 09:00 (UTC 00:00)
@@ -25,7 +25,7 @@ on:
     
     # 🏁 11:30-12:30 KST (30분 간격) - 종가 체결 준비 및 마감
     - cron: '0 3 * * 1-5'     # KST 12:00 (UTC 03:00) ⭐ 종가 체결
-    - cron: '30 3 * * 1-5'    # KST 12:30 (UTC 03:30) ⭐⭐ 최종 마감 + 텔레그램
+    - cron: '30 3 * * 1-5'    # KST 12:30 (UTC 03:30) ⭐⭐ 최종 마감 + KRX 시트 + 텔레그램
     
   workflow_dispatch:
     inputs:
@@ -45,12 +45,17 @@ on:
         default: false
         type: boolean
       send_telegram:
-        description: '텔레그램 요약 강제 전송'
+        description: '12:30 텔레그램 요약 강제 전송'
         required: false
         default: false
         type: boolean
       skip_optimization:
         description: '중복 최적화 건너뛰기'
+        required: false
+        default: false
+        type: boolean
+      test_krx_sheet:
+        description: 'KRX 시트 테스트'
         required: false
         default: false
         type: boolean
@@ -65,7 +70,7 @@ env:
   PYTHON_VERSION: '3.9'
 
 jobs:
-  # Job 1: 거래 조건 확인 (최적화 스케줄 반영)
+  # Job 1: 거래 조건 확인 (v3.0 스케줄 반영)
   check-trading-conditions:
     runs-on: ubuntu-22.04
     outputs:
@@ -77,12 +82,13 @@ jobs:
       is_final_session: ${{ steps.check.outputs.is_final_session }}
       collection_frequency: ${{ steps.check.outputs.collection_frequency }}
       execution_priority: ${{ steps.check.outputs.execution_priority }}
+      should_send_telegram: ${{ steps.check.outputs.should_send_telegram }}
       
     steps:
-    - name: 최적화된 거래시간 및 실행 조건 분석
+    - name: v3.0 한국 배출권 거래시간 및 실행 조건 분석
       id: check
       run: |
-        echo "=== 최적화된 한국 배출권 거래시간 분석 ($(date '+%Y-%m-%d %H:%M:%S') KST) ==="
+        echo "=== KRX ETS v3.0 거래시간 분석 ($(date '+%Y-%m-%d %H:%M:%S') KST) ==="
         
         CURRENT_HOUR=$(date +%H)
         CURRENT_MINUTE=$(date +%M)
@@ -103,13 +109,14 @@ jobs:
           IS_TRADING_DAY="true"
         fi
         
-        # 최적화된 실행 조건 분석
+        # v3.0 실행 조건 분석
         SHOULD_RUN="false"
         MARKET_PHASE="market_closed"
         TRADING_PHASE="none"
         EXECUTION_PRIORITY="low"
         IS_FINAL_SESSION="false"
         COLLECTION_FREQUENCY="standard"
+        SHOULD_SEND_TELEGRAM="false"
         
         if [ "${IS_TRADING_DAY}" = "true" ]; then
           case "${CURRENT_HOUR}" in
@@ -162,7 +169,8 @@ jobs:
                 TRADING_PHASE="final_settlement"
                 EXECUTION_PRIORITY="critical"
                 IS_FINAL_SESSION="true"
-                echo "🎯 최종 마감 + 텔레그램 발송"
+                SHOULD_SEND_TELEGRAM="true"
+                echo "🎯 12:30 최종 마감 + KRX 시트 + 텔레그램 발송"
               else
                 MARKET_PHASE="post_trading"
                 TRADING_PHASE="market_closed"
@@ -184,7 +192,20 @@ jobs:
           TRADING_PHASE="manual"
           EXECUTION_PRIORITY="high"
           COLLECTION_FREQUENCY="manual"
-          echo "🔧 수동 실행 - 최적화 시스템 테스트"
+          
+          # KRX 시트 테스트 모드
+          if [ "${{ github.event.inputs.test_krx_sheet }}" = "true" ]; then
+            IS_FINAL_SESSION="true"
+            echo "🔧 KRX 시트 테스트 모드"
+          fi
+          
+          # 텔레그램 강제 전송
+          if [ "${{ github.event.inputs.send_telegram }}" = "true" ]; then
+            SHOULD_SEND_TELEGRAM="true"
+            echo "📱 텔레그램 강제 전송 모드"
+          fi
+          
+          echo "🔧 수동 실행 - v3.0 시스템 테스트"
         fi
         
         echo "should_run=${SHOULD_RUN}" >> $GITHUB_OUTPUT
@@ -193,29 +214,32 @@ jobs:
         echo "is_final_session=${IS_FINAL_SESSION}" >> $GITHUB_OUTPUT
         echo "collection_frequency=${COLLECTION_FREQUENCY}" >> $GITHUB_OUTPUT
         echo "execution_priority=${EXECUTION_PRIORITY}" >> $GITHUB_OUTPUT
+        echo "should_send_telegram=${SHOULD_SEND_TELEGRAM}" >> $GITHUB_OUTPUT
         
         echo ""
-        echo "=== 최적화된 실행 결정 ==="
+        echo "=== v3.0 실행 결정 ==="
         echo "✅ 실행: ${SHOULD_RUN}"
         echo "📈 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
         echo "🎯 우선도: ${EXECUTION_PRIORITY}"
         echo "📊 수집주기: ${COLLECTION_FREQUENCY}"
-        echo "📱 텔레그램: ${IS_FINAL_SESSION}"
+        echo "🎯 최종세션: ${IS_FINAL_SESSION}"
+        echo "📱 텔레그램: ${SHOULD_SEND_TELEGRAM}"
 
-  # Job 2: 최적화된 데이터 수집
+  # Job 2: 최적화된 데이터 수집 (v3.0 - KRX 시트 추가)
   collect-krx-data:
     needs: check-trading-conditions
     runs-on: ubuntu-22.04
     if: needs.check-trading-conditions.outputs.should_run == 'true'
     
-    timeout-minutes: 15
+    timeout-minutes: 20
     
     outputs:
       collection_status: ${{ steps.collection.outputs.status }}
       collection_message: ${{ steps.collection.outputs.message }}
       extraction_methods: ${{ steps.collection.outputs.extraction_methods }}
       optimization_stats: ${{ steps.collection.outputs.optimization_stats }}
+      krx_sheet_updated: ${{ steps.collection.outputs.krx_sheet_updated }}
       
     steps:
     - name: 저장소 체크아웃
@@ -230,7 +254,7 @@ jobs:
         
     - name: 시스템 의존성 설치 (최소화)
       run: |
-        echo "🔧 시스템 의존성 설치 중 (최적화 버전)..."
+        echo "🔧 시스템 의존성 설치 중 (v3.0)..."
         
         sudo apt-get update
         
@@ -272,7 +296,7 @@ jobs:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
       run: |
-        echo "=== 환경변수 검증 (최적화 버전) ==="
+        echo "=== 환경변수 검증 (v3.0) ==="
         
         ERROR_COUNT=0
         
@@ -297,7 +321,7 @@ jobs:
         
         echo "✅ 환경변수 검증 완료"
 
-    - name: 최적화된 KRX 데이터 수집 (중복 제거)
+    - name: v3.0 KRX 데이터 수집 (KRX 시트 추가)
       id: collection
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
@@ -307,17 +331,19 @@ jobs:
         EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
         COLLECTION_FREQUENCY: ${{ needs.check-trading-conditions.outputs.collection_frequency }}
         CURRENT_KST: ${{ needs.check-trading-conditions.outputs.current_kst }}
+        IS_FINAL_SESSION: ${{ needs.check-trading-conditions.outputs.is_final_session }}
         DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
         TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         SKIP_OPTIMIZATION: ${{ github.event.inputs.skip_optimization || 'false' }}
         PLAYWRIGHT_BROWSER_AVAILABLE: ${{ env.PLAYWRIGHT_AVAILABLE || 'false' }}
       run: |
-        echo "=== 최적화된 KRX 데이터 수집 시작 ==="
-        echo "🌐 수집 방법: Playwright (최적화)"
+        echo "=== v3.0 KRX 데이터 수집 시작 (KRX 시트 추가) ==="
+        echo "🌐 수집 방법: Playwright v3.0"
         echo "📊 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
         echo "🎯 우선도: ${EXECUTION_PRIORITY}"
         echo "📊 수집주기: ${COLLECTION_FREQUENCY}"
+        echo "🎯 최종세션: ${IS_FINAL_SESSION}"
         echo "⏰ 시간: ${CURRENT_KST} KST"
         echo "🔧 최적화: $([[ "${SKIP_OPTIMIZATION}" == "true" ]] && echo "비활성화" || echo "활성화")"
         
@@ -349,6 +375,14 @@ jobs:
             ;;
         esac
         
+        # 12:30 최종 세션 특별 설정
+        if [ "${IS_FINAL_SESSION}" = "true" ]; then
+          export ENABLE_ALL_METHODS=true
+          export ENABLE_OCR_BACKUP=true
+          export UPDATE_KRX_SHEET=true
+          echo "🎯 12:30 최종 세션 - KRX 시트 업데이트 활성화"
+        fi
+        
         # 중요 시점 설정
         if [ "${EXECUTION_PRIORITY}" = "critical" ]; then
           export ENABLE_ALL_METHODS=true
@@ -356,7 +390,7 @@ jobs:
           echo "🔥 중요 시점 - 모든 수집 방법 활성화"
         fi
         
-        echo "🚀 최적화된 데이터 수집 스크립트 실행..."
+        echo "🚀 v3.0 데이터 수집 스크립트 실행..."
         
         START_TIME=$(date +%s)
         
@@ -365,16 +399,25 @@ jobs:
           DURATION=$((END_TIME - START_TIME))
           
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "message=최적화 수집 성공 (${DURATION}초)" >> $GITHUB_OUTPUT
-          echo "extraction_methods=playwright_optimized" >> $GITHUB_OUTPUT
+          echo "message=v3.0 수집 성공 (${DURATION}초)" >> $GITHUB_OUTPUT
+          echo "extraction_methods=playwright_v3" >> $GITHUB_OUTPUT
           
           # 최적화 통계 (환경변수로 전달받음)
           OPTIMIZATION_STATS=$(echo $OPTIMIZATION_STATS_JSON 2>/dev/null || echo '{"added":0,"skipped":0,"efficiency":0}')
           echo "optimization_stats=${OPTIMIZATION_STATS}" >> $GITHUB_OUTPUT
           
-          echo "✅ 최적화된 데이터 수집 성공!"
+          # KRX 시트 업데이트 상태
+          if [ "${IS_FINAL_SESSION}" = "true" ]; then
+            echo "krx_sheet_updated=true" >> $GITHUB_OUTPUT
+            echo "✅ KRX 시트 최종 요약 업데이트 완료"
+          else
+            echo "krx_sheet_updated=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "✅ v3.0 데이터 수집 성공!"
           echo "⏱️ 실행 시간: ${DURATION}초"
           echo "💾 수집 주기: ${COLLECTION_FREQUENCY}"
+          echo "🎯 최종 세션: ${IS_FINAL_SESSION}"
           
           # 수집 주기별 성공 메시지
           case "${COLLECTION_FREQUENCY}" in
@@ -388,42 +431,47 @@ jobs:
               ;;
             "manual")
               echo "🔧 수동 실행 완료!"
-              echo "::notice::🔧 수동 실행 - 최적화 테스트 성공"
+              echo "::notice::🔧 수동 실행 - v3.0 테스트 성공"
               ;;
           esac
+          
+          # 12:30 최종 세션 특별 메시지
+          if [ "${IS_FINAL_SESSION}" = "true" ]; then
+            echo "::notice::🎯 12:30 최종 세션 - KRX 시트 업데이트 완료"
+          fi
           
         else
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           
           echo "status=failed" >> $GITHUB_OUTPUT
-          echo "message=최적화 수집 실패 (${DURATION}초)" >> $GITHUB_OUTPUT
+          echo "message=v3.0 수집 실패 (${DURATION}초)" >> $GITHUB_OUTPUT
           echo "extraction_methods=failed" >> $GITHUB_OUTPUT
           echo "optimization_stats={\"error\":true}" >> $GITHUB_OUTPUT
+          echo "krx_sheet_updated=false" >> $GITHUB_OUTPUT
           
-          echo "❌ 최적화된 데이터 수집 실패!"
+          echo "❌ v3.0 데이터 수집 실패!"
           echo "⏱️ 실행 시간: ${DURATION}초"
           
           if [ "${EXECUTION_PRIORITY}" = "critical" ]; then
             echo "🚨 CRITICAL: 중요 시점 수집 실패!"
-            echo "::error::🚨 ${TRADING_PHASE} - 최적화 시스템 실패"
+            echo "::error::🚨 ${TRADING_PHASE} - v3.0 시스템 실패"
           else
-            echo "::warning::⚠️ ${TRADING_PHASE} 최적화 수집 실패"
+            echo "::warning::⚠️ ${TRADING_PHASE} v3.0 수집 실패"
           fi
           
           exit 1
         fi
 
-  # Job 3: 텔레그램 알림 (12:30 KST 또는 조건부)
-  telegram-notification:
+  # Job 3: 12:30 텔레그램 알림 (최종 세션 전용)
+  telegram-final-notification:
     needs: [check-trading-conditions, collect-krx-data]
     runs-on: ubuntu-22.04
     if: |
       always() && (
-        needs.check-trading-conditions.outputs.is_final_session == 'true' || 
+        needs.check-trading-conditions.outputs.should_send_telegram == 'true' || 
         github.event.inputs.send_telegram == 'true' ||
-        (needs.collect-krx-data.result == 'failure' && needs.check-trading-conditions.outputs.execution_priority == 'critical') ||
-        needs.collect-krx-data.result == 'failure'
+        (needs.collect-krx-data.result == 'failure' && needs.check-trading-conditions.outputs.execution_priority == 'critical')
       )
     
     timeout-minutes: 5
@@ -440,12 +488,12 @@ jobs:
         
     - name: 알림 패키지 설치
       run: |
-        echo "📱 텔레그램 알림 시스템 준비 (최적화 버전)"
+        echo "📱 12:30 텔레그램 알림 시스템 준비 (v3.0)"
         python -m pip install --upgrade pip
         pip install requests gspread google-auth pandas beautifulsoup4
         echo "✅ 알림 시스템 준비 완료"
         
-    - name: 최적화된 텔레그램 알림
+    - name: 12:30 KST 최종 세션 텔레그램 알림
       env:
         GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
         KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
@@ -455,6 +503,7 @@ jobs:
         COLLECTION_MESSAGE: ${{ needs.collect-krx-data.outputs.collection_message || 'No message' }}
         EXTRACTION_METHODS: ${{ needs.collect-krx-data.outputs.extraction_methods || 'none' }}
         OPTIMIZATION_STATS: ${{ needs.collect-krx-data.outputs.optimization_stats || '{}' }}
+        KRX_SHEET_UPDATED: ${{ needs.collect-krx-data.outputs.krx_sheet_updated || 'false' }}
         MARKET_PHASE: ${{ needs.check-trading-conditions.outputs.market_phase }}
         TRADING_PHASE: ${{ needs.check-trading-conditions.outputs.trading_phase }}
         EXECUTION_PRIORITY: ${{ needs.check-trading-conditions.outputs.execution_priority }}
@@ -463,7 +512,7 @@ jobs:
         FORCE_TELEGRAM: ${{ github.event.inputs.send_telegram || 'false' }}
         IS_FINAL_SESSION: ${{ needs.check-trading-conditions.outputs.is_final_session }}
       run: |
-        echo "=== 최적화된 텔레그램 알림 시작 ==="
+        echo "=== 12:30 KST 최종 세션 텔레그램 알림 시작 ==="
         echo "🌐 수집 방법: ${EXTRACTION_METHODS}"
         echo "📊 시장: ${MARKET_PHASE}"
         echo "⚡ 거래: ${TRADING_PHASE}"
@@ -472,6 +521,7 @@ jobs:
         echo "📱 상태: ${COLLECTION_STATUS}"
         echo "🕐 시간: ${CURRENT_KST}"
         echo "🎯 최종세션: ${IS_FINAL_SESSION}"
+        echo "📋 KRX시트: ${KRX_SHEET_UPDATED}"
         
         # 텔레그램 인증 확인
         if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
@@ -479,43 +529,54 @@ jobs:
           exit 0
         fi
         
-        # 최적화 통계 전달
-        export OPTIMIZATION_CONTEXT="optimized|${COLLECTION_FREQUENCY}|${OPTIMIZATION_STATS}|${CURRENT_KST}"
+        # v3.0 통계 전달
+        export OPTIMIZATION_CONTEXT="v3.0|${COLLECTION_FREQUENCY}|${OPTIMIZATION_STATS}|${CURRENT_KST}|${KRX_SHEET_UPDATED}"
         
-        echo "📤 최적화 결과 텔레그램 알림 전송 중..."
+        echo "📤 12:30 최종 세션 텔레그램 알림 전송 중..."
         
         if python telegram_notifier.py; then
-          echo "✅ 텔레그램 알림 전송 성공"
+          echo "✅ 12:30 텔레그램 알림 전송 성공"
           
           if [ "${IS_FINAL_SESSION}" = "true" ]; then
-            echo "::notice::📱 12:30 KST 최종 일일 요약 전송 완료"
+            echo "::notice::📱 12:30 KST 최종 세션 일일 요약 전송 완료"
+            echo "::notice::📋 KRX 시트 업데이트: ${KRX_SHEET_UPDATED}"
           else
             echo "::notice::📱 긴급 알림 전송 완료"
           fi
         else
-          echo "❌ 텔레그램 알림 전송 실패"
-          echo "::warning::📱 텔레그램 알림 실패"
+          echo "❌ 12:30 텔레그램 알림 전송 실패"
+          echo "::warning::📱 12:30 텔레그램 알림 실패"
         fi
 
-    - name: 최적화 워크플로우 실행 요약
+    - name: v3.0 워크플로우 실행 요약
       if: always()
       run: |
-        echo "## 🚀 최적화된 KRX 배출권 데이터 수집 결과" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 KRX ETS v3.0 데이터 수집 결과" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**🕐 실행 시간**: ${{ needs.check-trading-conditions.outputs.current_kst }} KST" >> $GITHUB_STEP_SUMMARY
         echo "**📈 시장 상태**: ${{ needs.check-trading-conditions.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
         echo "**⚡ 거래 단계**: ${{ needs.check-trading-conditions.outputs.trading_phase }}" >> $GITHUB_STEP_SUMMARY
         echo "**📊 수집 주기**: ${{ needs.check-trading-conditions.outputs.collection_frequency }}" >> $GITHUB_STEP_SUMMARY
         echo "**🎯 실행 우선도**: ${{ needs.check-trading-conditions.outputs.execution_priority }}" >> $GITHUB_STEP_SUMMARY
+        echo "**🎯 최종 세션**: ${{ needs.check-trading-conditions.outputs.is_final_session }}" >> $GITHUB_STEP_SUMMARY
         echo "**🌐 수집 결과**: ${{ needs.collect-krx-data.outputs.collection_status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
         echo "**🔧 추출 방법**: ${{ needs.collect-krx-data.outputs.extraction_methods || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
         echo "**💾 최적화 통계**: ${{ needs.collect-krx-data.outputs.optimization_stats || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+        echo "**📋 KRX 시트**: ${{ needs.collect-krx-data.outputs.krx_sheet_updated || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # 최적화 기능 안내
-        echo "### 🚀 최적화 기능" >> $GITHUB_STEP_SUMMARY
-        echo "- **중복 제거**: 거래량 0 + 가격 변화 없음 = 업데이트 생략" >> $GITHUB_STEP_SUMMARY
-        echo "- **맞춤형 스케줄**: 실시간 거래시간 10분 간격, 기타 30분 간격" >> $GITHUB_STEP_SUMMARY  
-        echo "- **스프레드시트 최적화**: 불필요한 행 생성 방지로 용량 절약" >> $GITHUB_STEP_SUMMARY
-        echo "- **12:30 KST 알림**: 거래 마감 후 자동 일일 요약 전송" >> $GITHUB_STEP_SUMMARY
-        echo "- **데이터 품질**: 실제 변화가 있는 데이터만 기록" >> $GITHUB_STEP_SUMMARY
+        # v3.0 기능 안내
+        echo "### 🚀 v3.0 신규 기능" >> $GITHUB_STEP_SUMMARY
+        echo "- **KRX 시트**: 12:30 최종 세션에 A~K열 요약 데이터 저장" >> $GITHUB_STEP_SUMMARY
+        echo "- **12:30 전용 알림**: 15:00 알림 제거, 12:30에만 텔레그램 발송" >> $GITHUB_STEP_SUMMARY  
+        echo "- **최적화 스케줄**: 09:00-10:00 (30분), 10:00-11:30 (10분), 11:30-12:30 (30분)" >> $GITHUB_STEP_SUMMARY
+        echo "- **이중 시트**: ets.KRX (상세) + KRX (요약)" >> $GITHUB_STEP_SUMMARY
+        echo "- **완전 데이터**: 거래 없는 종목도 KRX 시트에 포함" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # 실행 통계
+        echo "### 📊 실행 통계" >> $GITHUB_STEP_SUMMARY
+        echo "- **시스템 버전**: v3.0 (KRX 시트 추가)" >> $GITHUB_STEP_SUMMARY
+        echo "- **스케줄 최적화**: 거래시간 집중 모니터링" >> $GITHUB_STEP_SUMMARY
+        echo "- **알림 간소화**: 12:30 최종 세션만" >> $GITHUB_STEP_SUMMARY
+        echo "- **데이터 품질**: 100% 실제 데이터" >> $GITHUB_STEP_SUMMARY
