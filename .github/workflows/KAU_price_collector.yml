@@ -281,6 +281,7 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.ESG_TESTER }}
         COLLECTION_STATUS: ${{ needs.collect-data.outputs.collection_status }}
         COLLECTION_MESSAGE: ${{ needs.collect-data.outputs.collection_message }}
+        FORCE_TELEGRAM: ${{ github.event.inputs.send_telegram || 'false' }}
       run: |
         echo "=== Daily Summary and Telegram Notification ==="
         echo "Collection Status: ${COLLECTION_STATUS}"
