@@ -1,0 +1,47 @@
+name: KAU NGMS Participant Collector
+
+on:
+  schedule:
+    # 매월 1일 02:00 (UTC) → 한국시간 11:00
+    - cron: "0 2 1 * *"
+  workflow_dispatch:
+
+jobs:
+  ngms-collector:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies (Chrome)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            chromium-browser \
+            chromium-chromedriver
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/requirements_participant.txt
+
+      - name: Run NGMS participant collector
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+          NGMS_DOWNLOAD_DIR: tmp_downloads
+        run: |
+          python -m KAU_participant.run_ngms
+
+      - name: Upload download artifacts (optional debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngms-xlsx
+          path: tmp_downloads/*.xlsx
