@@ -11,19 +11,22 @@ This script:
 import asyncio
 import os
 import sys
-from typing import Dict, Any
+import tempfile
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ngms_scraper import run_scraper
+from ngms_scraper import NGMSScraper
 from google_sheets_handler import create_handler_from_env
-from utils import setup_logging, get_current_timestamp
+from utils import setup_logging, get_current_timestamp, ensure_directory
 
 logger = setup_logging()
 
+# Debug directory for GitHub Actions
+DEBUG_DIR = os.environ.get('DEBUG_DIR', '/tmp/ngms_debug')
 
-async def main() -> Dict[str, Any]:
+
+async def main() -> dict:
     """
     Main execution function
     
@@ -41,6 +44,12 @@ async def main() -> Dict[str, Any]:
         'errors': []
     }
     
+    # Ensure debug directory exists
+    debug_mode = os.environ.get('DEBUG_MODE', 'true').lower() == 'true'
+    if debug_mode:
+        ensure_directory(DEBUG_DIR)
+        logger.info(f"디버그 모드 활성화 - 저장 위치: {DEBUG_DIR}")
+    
     try:
         # Step 1: Initialize Google Sheets handler
         logger.info("\n[1/3] Google Sheets 연결 중...")
@@ -49,8 +58,24 @@ async def main() -> Dict[str, Any]:
         
         # Step 2: Download data from NGMS
         logger.info("\n[2/3] NGMS 데이터 다운로드 중...")
-        debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
-        downloaded_data = await run_scraper(debug_mode=debug_mode)
+        
+        # Create scraper with debug directory
+        download_dir = tempfile.mkdtemp()
+        scraper = NGMSScraper(
+            download_dir=download_dir,
+            debug_mode=debug_mode
+        )
+        
+        # Override debug directory to use the shared location
+        if debug_mode:
+            scraper.debug_dir = DEBUG_DIR
+            ensure_directory(scraper.debug_dir)
+        
+        try:
+            await scraper.initialize()
+            downloaded_data = await scraper.download_all()
+        finally:
+            await scraper.close()
         
         if not downloaded_data:
             raise Exception("다운로드된 데이터가 없습니다")
@@ -88,6 +113,14 @@ async def main() -> Dict[str, Any]:
         error_msg = f"전체 프로세스 실패: {str(e)}"
         logger.error(error_msg)
         results['errors'].append(error_msg)
+        
+        # Save error log
+        if debug_mode:
+            try:
+                with open(os.path.join(DEBUG_DIR, 'error.log'), 'w') as f:
+                    f.write(f"{get_current_timestamp()}\n{error_msg}\n")
+            except:
+                pass
     
     # Print summary
     logger.info("\n" + "=" * 60)
