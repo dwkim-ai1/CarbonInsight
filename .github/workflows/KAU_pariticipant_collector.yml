@@ -5,6 +5,23 @@ on:
     # 매월 1일 02:00 UTC (한국시간 11:00)
     - cron: "0 2 1 * *"
   workflow_dispatch:
+    inputs:
+      plan_period:
+        description: "할당대상업체: 계획기간 (예: 4). 비우면 최신(기본 전체조건)"
+        required: false
+        default: ""
+      designation_year:
+        description: "할당/목표관리: 지정연도 (예: 2025). 비우면 최신(기본 전체조건)"
+        required: false
+        default: ""
+      emission_year:
+        description: "명세서배출량통계: 배출년도 (예: 2024). 비우면 최신연도(첫 행)"
+        required: false
+        default: ""
+      manual_append_only:
+        description: "true면 NGMS_*는 건드리지 않고 히스토리 시트(할당/목표/명세서)에만 append"
+        required: false
+        default: "false"
 
 jobs:
   ngms-collector:
@@ -22,17 +39,23 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements/requirements_NGMS.txt
+          python -m pip install -r requirements/requirements_participant.txt
 
       - name: Install Playwright Chromium
         run: |
           python -m playwright install --with-deps chromium
 
-      - name: Run NGMS participant collector
+      - name: Run NGMS collector
         env:
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
           NGMS_DOWNLOAD_DIR: tmp_downloads
+
+          # workflow_dispatch inputs (schedule이면 빈 값)
+          PLAN_PERIOD: ${{ github.event.inputs.plan_period }}
+          DESIGNATION_YEAR: ${{ github.event.inputs.designation_year }}
+          EMISSION_YEAR: ${{ github.event.inputs.emission_year }}
+          MANUAL_APPEND_ONLY: ${{ github.event.inputs.manual_append_only }}
         run: |
           python -m KAU_participant.run_ngms
 
