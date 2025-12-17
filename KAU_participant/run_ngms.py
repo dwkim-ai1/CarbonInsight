@@ -1,81 +1,126 @@
-import os
-from pathlib import Path
+# KAU_participant/run_ngms.py
+from __future__ import annotations
 
-from KAU_participant.gsheet import (
-    get_gspread_client,
-    now_kst_str,
-    upsert_worksheet,
-    overwrite_worksheet,
-    read_worksheet_df,
-    df_fingerprint,
-    append_snapshot,
-)
+import argparse
+from pathlib import Path
+from datetime import datetime
+
+import pandas as pd
+
 from KAU_participant.ngms_collect import (
     collect_allocated,
-    collect_target_mgmt,
+    collect_target_managed,
     collect_statement_stats,
+    collect_public_stats,
 )
 
-# 현재값(덮어쓰기)
-CUR_ALLOC = "NGMS_할당대상업체"
-CUR_TARGET = "NGMS_목표관리대상업체"
-CUR_STATS = "NGMS_명세서배출량통계"
 
-# 히스토리(누적)
-HIS_ALLOC = "할당대상업체"
-HIS_TARGET = "목표관리대상업체"
-HIS_STATS = "명세서배출량통계"
+def _ensure_dir(p: Path) -> Path:
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-def attach_meta(df, hint):
-    df = df.copy()
-    df["수집일시"] = now_kst_str()
-    df["원본업데이트표시"] = hint
-    return df
+def _stamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def update_with_history(ss, cur_name, his_name, new_df):
-    ws_cur = upsert_worksheet(ss, cur_name)
-    ws_his = upsert_worksheet(ss, his_name)
-
-    old_df = read_worksheet_df(ws_cur)
-    ignore = ["수집일시", "원본업데이트표시"]
-
-    if df_fingerprint(old_df, ignore) != df_fingerprint(new_df, ignore):
-        append_snapshot(ws_his, new_df)
-
-    overwrite_worksheet(ws_cur, new_df)
+def _save_df(df: pd.DataFrame, out_path: Path) -> str:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return str(out_path)
 
 
 def main():
-    download_dir = Path(os.environ.get("NGMS_DOWNLOAD_DIR", "tmp_downloads"))
-    plan_period = os.environ.get("PLAN_PERIOD", "")
-    designation_year = os.environ.get("DESIGNATION_YEAR", "")
-    emission_year = os.environ.get("EMISSION_YEAR", "")
-    manual_only = os.environ.get("MANUAL_APPEND_ONLY", "false").lower() == "true"
+    parser = argparse.ArgumentParser(description="NGMS 정보공개 데이터 수집 (Excel 다운로드 기반)")
+    parser.add_argument(
+        "--download-dir",
+        default="downloads/ngms",
+        help="playwright 다운로드 디렉토리 (기본: downloads/ngms)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/ngms",
+        help="결과 CSV 저장 디렉토리 (기본: outputs/ngms)",
+    )
+    parser.add_argument(
+        "--plan-period",
+        default=None,
+        help="계획기간(예: 3차, 4차 등). ngms_collect에서 지원하는 값으로 입력",
+    )
+    parser.add_argument(
+        "--designation-year",
+        type=int,
+        default=None,
+        help="지정연도(예: 2024). ngms_collect에서 지원하는 값으로 입력",
+    )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="특정 항목만 실행: allocated|target|statement|public (콤마로 복수 가능)",
+    )
 
-    alloc_df, alloc_hint = collect_allocated(download_dir, plan_period, designation_year)
-    target_df, target_hint = collect_target_mgmt(download_dir, designation_year)
-    stats_df, stats_hint = collect_statement_stats(download_dir, emission_year)
+    args = parser.parse_args()
 
-    alloc_df = attach_meta(alloc_df, alloc_hint)
-    target_df = attach_meta(target_df, target_hint)
-    stats_df = attach_meta(stats_df, stats_hint)
+    download_dir = _ensure_dir(Path(args.download_dir))
+    output_dir = _ensure_dir(Path(args.output_dir))
+    run_tag = _stamp()
 
-    ss = get_gspread_client().open_by_key(os.environ["KAU_SHEET_ID"])
+    only = None
+    if args.only:
+        only = {x.strip().lower() for x in args.only.split(",") if x.strip()}
 
-    if manual_only:
-        append_snapshot(upsert_worksheet(ss, HIS_ALLOC), alloc_df)
-        append_snapshot(upsert_worksheet(ss, HIS_TARGET), target_df)
-        append_snapshot(upsert_worksheet(ss, HIS_STATS), stats_df)
-        print("수동 실행: 히스토리 시트에만 append 완료")
-        return
+    results = []
 
-    update_with_history(ss, CUR_ALLOC, HIS_ALLOC, alloc_df)
-    update_with_history(ss, CUR_TARGET, HIS_TARGET, target_df)
-    update_with_history(ss, CUR_STATS, HIS_STATS, stats_df)
+    def should_run(key: str) -> bool:
+        return (only is None) or (key in only)
 
-    print("월간 실행 완료: NGMS_* overwrite + 변경 시 히스토리 누적")
+    # 1) 할당대상업체
+    if should_run("allocated"):
+        df, hint = collect_allocated(
+            download_dir=str(download_dir),
+            plan_period=args.plan_period,
+            designation_year=args.designation_year,
+        )
+        out = output_dir / f"{run_tag}_allocated.csv"
+        results.append(("allocated", _save_df(df, out), hint))
+
+    # 2) 목표관리대상업체
+    if should_run("target"):
+        df, hint = collect_target_managed(
+            download_dir=str(download_dir),
+            plan_period=args.plan_period,
+            designation_year=args.designation_year,
+        )
+        out = output_dir / f"{run_tag}_target_managed.csv"
+        results.append(("target", _save_df(df, out), hint))
+
+    # 3) 명세서배출량통계
+    if should_run("statement"):
+        df, hint = collect_statement_stats(
+            download_dir=str(download_dir),
+            plan_period=args.plan_period,
+            designation_year=args.designation_year,
+        )
+        out = output_dir / f"{run_tag}_statement_stats.csv"
+        results.append(("statement", _save_df(df, out), hint))
+
+    # 4) 공공부문 배출량통계
+    if should_run("public"):
+        df, hint = collect_public_stats(
+            download_dir=str(download_dir),
+            plan_period=args.plan_period,
+            designation_year=args.designation_year,
+        )
+        out = output_dir / f"{run_tag}_public_stats.csv"
+        results.append(("public", _save_df(df, out), hint))
+
+    # 요약 출력
+    print("\n=== NGMS Collect Summary ===")
+    for key, path, hint in results:
+        print(f"- {key}: {path}")
+        if hint:
+            print(f"  hint: {hint}")
+    print("=== Done ===\n")
 
 
 if __name__ == "__main__":
