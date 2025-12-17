@@ -14,7 +14,7 @@ on:
       debug_mode:
         description: 'Enable debug mode (saves screenshots and HTML)'
         required: false
-        default: 'false'
+        default: 'true'
         type: boolean
 
 env:
@@ -24,6 +24,7 @@ jobs:
   update-ngms-data:
     name: Update NGMS Data
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     
     steps:
       - name: Checkout repository
@@ -46,25 +47,41 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
       
+      - name: Create debug directory
+        run: mkdir -p /tmp/ngms_debug
+      
       - name: Run NGMS Data Update
+        id: update
+        continue-on-error: true
         env:
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
-          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'true' }}
         run: |
           cd KAU_participant
-          python main.py
+          python main.py 2>&1 | tee /tmp/ngms_debug/execution.log
+      
+      - name: Collect debug artifacts
+        if: always()
+        run: |
+          # Copy any debug files from temp directories
+          find /tmp -name "*.png" -o -name "*.html" -o -name "*.xlsx" 2>/dev/null | head -50 | xargs -I {} cp {} /tmp/ngms_debug/ 2>/dev/null || true
+          ls -la /tmp/ngms_debug/ || true
       
       - name: Upload debug artifacts
-        if: failure() || github.event.inputs.debug_mode == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-artifacts-${{ github.run_number }}
-          path: |
-            KAU_participant/debug/
-            /tmp/**/debug/
-          retention-days: 7
+          name: ngms-debug-${{ github.run_number }}
+          path: /tmp/ngms_debug/
+          retention-days: 14
           if-no-files-found: ignore
+      
+      - name: Check result
+        if: steps.update.outcome == 'failure'
+        run: |
+          echo "NGMS update failed. Check debug artifacts for details."
+          exit 1
       
       - name: Create summary
         if: always()
@@ -73,12 +90,16 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Run Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Python Version**: ${{ env.PYTHON_VERSION }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Debug Mode**: ${{ github.event.inputs.debug_mode || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Debug Mode**: ${{ github.event.inputs.debug_mode || 'true' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Result**: ${{ steps.update.outcome }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Data Types Updated" >> $GITHUB_STEP_SUMMARY
+          echo "### Data Types" >> $GITHUB_STEP_SUMMARY
           echo "- 할당대상업체 (ETS Allocation Targets)" >> $GITHUB_STEP_SUMMARY
           echo "- 목표관리대상업체 (Target Management Companies)" >> $GITHUB_STEP_SUMMARY
           echo "- 명세서배출량통계 (Emission Statistics)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Debug Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "Debug files have been uploaded. Check the artifacts for screenshots and HTML dumps." >> $GITHUB_STEP_SUMMARY
 
   notify-on-failure:
     name: Notify on Failure
@@ -99,7 +120,13 @@ jobs:
             - **Date**: ${new Date().toISOString()}
             - **Branch**: ${context.ref}
             
-            Please check the workflow logs for details.
+            ### Next Steps
+            1. Download and review the debug artifacts from the failed run
+            2. Check screenshots and HTML dumps for page structure changes
+            3. Update selectors in \`config.py\` if needed
+            4. Re-run the workflow manually with debug mode enabled
+            
+            Please check the workflow logs and debug artifacts for details.
             `;
             
             // Check if similar issue exists
