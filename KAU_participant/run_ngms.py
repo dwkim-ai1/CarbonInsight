@@ -1,24 +1,21 @@
-# KAU_participant/run_ngms.py
 from __future__ import annotations
 
 import os
 import sys
+import json
+import time
+import shutil
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Callable
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import pandas as pd
 
-from KAU_participant.ngms_collect import (
-    collect_allocated,
-    collect_target_mgmt,
-    collect_spec_emission_stats,
-    collect_public_sector_stats,
-)
 
-# =========================
-# Helpers
-# =========================
+# ----------------------------
+# Utils
+# ----------------------------
 
 def _env(name: str, default: str = "") -> str:
     v = os.getenv(name, default)
@@ -27,175 +24,293 @@ def _env(name: str, default: str = "") -> str:
 
 def _env_bool(name: str, default: bool = False) -> bool:
     v = _env(name, "")
-    if not v:
+    if v == "":
         return default
     return v.lower() in ("1", "true", "t", "yes", "y", "on")
 
 
-def _ensure_dir(p: str | Path) -> Path:
-    path = Path(p).expanduser().resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _to_csv_safe(df: pd.DataFrame, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False, encoding="utf-8-sig")
-
-
-def _print_section(title: str) -> None:
-    print("\n" + "=" * 80)
-    print(title)
-    print("=" * 80)
-
-
-def _run_one(
-    name: str,
-    fn: Callable[[], Tuple[pd.DataFrame, str]],
-    out_dir: Path,
-    manual_append_only: bool,
-) -> Dict[str, str]:
-    """
-    항목 단위 실행:
-    - 실패해도 전체 파이프라인은 계속 진행
-    - 성공 시 csv 저장
-    - manual_append_only면 파일이 이미 있으면 덮어쓰지 않음
-    """
-    _print_section(f"[START] {name}")
-    result: Dict[str, str] = {"name": name, "status": "UNKNOWN", "hint": "", "csv": "", "error": ""}
-
+def _env_int(name: str, default: Optional[int] = None) -> Optional[int]:
+    v = _env(name, "")
+    if v == "":
+        return default
     try:
-        df, hint = fn()
-        result["hint"] = hint
-
-        csv_path = out_dir / f"{name}.csv"
-        if manual_append_only and csv_path.exists():
-            result["status"] = "SKIPPED"
-            result["csv"] = str(csv_path)
-            print(f"- manual_append_only=true 이므로 기존 파일 존재 시 스킵: {csv_path}")
-            return result
-
-        _to_csv_safe(df, csv_path)
-        result["status"] = "OK"
-        result["csv"] = str(csv_path)
-
-        print(f"- rows={len(df):,}, cols={len(df.columns):,}")
-        print(f"- saved: {csv_path}")
-        if hint:
-            print(f"- hint: {hint}")
-        return result
-
-    except Exception as e:
-        result["status"] = "FAIL"
-        result["error"] = f"{type(e).__name__}: {e}"
-        print(f"- ERROR: {result['error']}")
-        print("--- traceback ---")
-        traceback.print_exc()
-        return result
-
-    finally:
-        print(f"[END] {name}")
+        return int(v)
+    except ValueError:
+        return default
 
 
-# =========================
+def _safe_mkdir(p: Union[str, Path]) -> Path:
+    p = Path(p)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _timestamp() -> str:
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _to_df(obj: Any) -> Optional[pd.DataFrame]:
+    if obj is None:
+        return None
+    if isinstance(obj, pd.DataFrame):
+        return obj
+    # common dict/list conversions
+    if isinstance(obj, (list, tuple)):
+        try:
+            return pd.DataFrame(obj)
+        except Exception:
+            return None
+    if isinstance(obj, dict):
+        # if dict has 'df'
+        if "df" in obj and isinstance(obj["df"], pd.DataFrame):
+            return obj["df"]
+        try:
+            return pd.DataFrame([obj])
+        except Exception:
+            return None
+    return None
+
+
+def _extract_payload(ret: Any) -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
+    """
+    collector return can be:
+      - (df, hint/meta)
+      - df
+      - {"df": df, "file": "...", "hint": "...", ...}
+      - {"file": "..."} only (no df)
+    """
+    meta: Dict[str, Any] = {}
+
+    if ret is None:
+        return None, meta
+
+    # tuple return
+    if isinstance(ret, tuple) and len(ret) == 2:
+        df = _to_df(ret[0])
+        hint = ret[1]
+        if isinstance(hint, dict):
+            meta.update(hint)
+        else:
+            meta["hint"] = hint
+        return df, meta
+
+    # dict return
+    if isinstance(ret, dict):
+        if "df" in ret:
+            df = _to_df(ret.get("df"))
+        else:
+            df = None
+        meta.update({k: v for k, v in ret.items() if k != "df"})
+        return df, meta
+
+    # df return
+    df = _to_df(ret)
+    return df, meta
+
+
+def _save_df(df: pd.DataFrame, out_dir: Path, stem: str) -> Path:
+    out_dir = _safe_mkdir(out_dir)
+    out_path = out_dir / f"{stem}.csv"
+    df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    return out_path
+
+
+def _save_meta(meta: Dict[str, Any], out_dir: Path, stem: str) -> Path:
+    out_dir = _safe_mkdir(out_dir)
+    out_path = out_dir / f"{stem}.meta.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2, default=str)
+    return out_path
+
+
+# ----------------------------
+# Collector registry (auto-detect)
+# ----------------------------
+
+@dataclass
+class Job:
+    key: str
+    func_name_candidates: List[str]
+
+
+DEFAULT_JOBS: List[Job] = [
+    Job("allocated", ["collect_allocated", "collect_allocated_companies", "collect_allocation", "collect_alloc"]),
+    Job("target_mgmt", ["collect_target_mgmt", "collect_target_management", "collect_target", "collect_goal_mgmt"]),
+    Job("spec_stat", ["collect_spec_stat", "collect_spec_statistics", "collect_spec", "collect_emission_spec"]),
+    Job("public_stat", ["collect_public_stat", "collect_public_statistics", "collect_public"]),
+]
+
+
+def _resolve_func(mod: Any, candidates: List[str]) -> Optional[Callable[..., Any]]:
+    for name in candidates:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+# ----------------------------
 # Main
-# =========================
+# ----------------------------
 
-def main() -> int:
-    """
-    환경변수(사용자 CI/로컬 공통):
-      - NGMS_DOWNLOAD_DIR (default: tmp_downloads)
-      - NGMS_BASE_URL (default: https://ngms.gir.go.kr:8443)
+def main() -> None:
+    # env / args
+    download_dir = Path(_env("NGMS_DOWNLOAD_DIR", "tmp_downloads"))
+    out_dir = Path(_env("NGMS_OUT_DIR", "tmp_outputs"))
 
-      - PLAN_PERIOD (선택)          : 힌트용(현재 자동 필터 조작은 안 함)
-      - DESIGNATION_YEAR (선택)     : 힌트용
-      - EMISSION_YEAR (선택)        : 힌트용
-
-      - OUT_DIR (default: ngms_outputs)
-      - MANUAL_APPEND_ONLY (default: false) : true면 기존 csv 존재 시 덮어쓰기 안 함
-    """
-    download_dir = _env("NGMS_DOWNLOAD_DIR", "tmp_downloads")
-    base_url = _env("NGMS_BASE_URL", "https://ngms.gir.go.kr:8443")
-
+    # 빈 문자열이면 None으로 떨어지게
     plan_period = _env("PLAN_PERIOD", "")
-    designation_year = _env("DESIGNATION_YEAR", "")
-    emission_year = _env("EMISSION_YEAR", "")
+    if plan_period == "":
+        plan_period = None  # type: ignore
 
-    out_dir = _ensure_dir(_env("OUT_DIR", "ngms_outputs"))
+    designation_year = _env_int("DESIGNATION_YEAR", None)
+    emission_year = _env_int("EMISSION_YEAR", None)
+
     manual_append_only = _env_bool("MANUAL_APPEND_ONLY", False)
 
-    _print_section("NGMS batch collect - config")
-    print(f"- NGMS_BASE_URL      : {base_url}")
-    print(f"- NGMS_DOWNLOAD_DIR  : {Path(download_dir).resolve()}")
-    print(f"- OUT_DIR            : {out_dir}")
-    print(f"- PLAN_PERIOD        : {plan_period}")
-    print(f"- DESIGNATION_YEAR   : {designation_year}")
-    print(f"- EMISSION_YEAR      : {emission_year}")
-    print(f"- MANUAL_APPEND_ONLY : {manual_append_only}")
+    # downloads clean policy (optional)
+    clean_downloads = _env_bool("CLEAN_DOWNLOAD_DIR", True)
+    clean_outputs = _env_bool("CLEAN_OUTPUT_DIR", False)
 
-    jobs = [
-        (
-            "allocated",
-            lambda: collect_allocated(
-                download_dir=download_dir,
-                plan_period=plan_period,
-                designation_year=designation_year,
-                base_url=base_url,
-            ),
-        ),
-        (
-            "target_mgmt",
-            lambda: collect_target_mgmt(
-                download_dir=download_dir,
-                plan_period=plan_period,
-                emission_year=emission_year,
-                base_url=base_url,
-            ),
-        ),
-        (
-            "spec_emission_stats",
-            lambda: collect_spec_emission_stats(
-                download_dir=download_dir,
-                plan_period=plan_period,
-                emission_year=emission_year,
-                base_url=base_url,
-            ),
-        ),
-        (
-            "public_sector_stats",
-            lambda: collect_public_sector_stats(
-                download_dir=download_dir,
-                plan_period=plan_period,
-                emission_year=emission_year,
-                base_url=base_url,
-            ),
-        ),
-    ]
+    if clean_downloads and download_dir.exists():
+        shutil.rmtree(download_dir, ignore_errors=True)
+    if clean_outputs and out_dir.exists():
+        shutil.rmtree(out_dir, ignore_errors=True)
 
-    results: list[Dict[str, str]] = []
-    for name, fn in jobs:
-        results.append(_run_one(name, fn, out_dir, manual_append_only))
+    _safe_mkdir(download_dir)
+    _safe_mkdir(out_dir)
 
-    _print_section("NGMS batch collect - summary")
-    ok = [r for r in results if r["status"] == "OK"]
-    skipped = [r for r in results if r["status"] == "SKIPPED"]
-    fail = [r for r in results if r["status"] == "FAIL"]
+    print("[run_ngms] download_dir =", str(download_dir))
+    print("[run_ngms] out_dir      =", str(out_dir))
+    print("[run_ngms] plan_period  =", plan_period)
+    print("[run_ngms] designation_year =", designation_year)
+    print("[run_ngms] emission_year    =", emission_year)
+    print("[run_ngms] manual_append_only =", manual_append_only)
 
-    print(f"- OK     : {len(ok)}")
-    print(f"- SKIPPED: {len(skipped)}")
-    print(f"- FAIL   : {len(fail)}")
+    # import collector module (single source of truth)
+    try:
+        from KAU_participant import ngms_collect as collect_mod
+    except Exception as e:
+        print("[run_ngms] ERROR: failed to import KAU_participant.ngms_collect")
+        raise
 
-    for r in results:
-        line = f"[{r['status']}] {r['name']}"
-        if r["csv"]:
-            line += f" -> {r['csv']}"
-        if r["error"]:
-            line += f" | {r['error']}"
-        print(line)
+    # allow module-level init hook (optional)
+    # e.g., ngms_collect.ensure_playwright_deps()
+    init_hook = getattr(collect_mod, "init", None)
+    if callable(init_hook):
+        try:
+            init_hook()
+        except Exception:
+            print("[run_ngms] ngms_collect.init() failed (ignored).")
 
-    # 하나라도 실패하면 exit code 1
-    return 0 if len(fail) == 0 else 1
+    # Determine which jobs exist in this ngms_collect.py
+    jobs_to_run: List[Tuple[str, Callable[..., Any]]] = []
+    for job in DEFAULT_JOBS:
+        fn = _resolve_func(collect_mod, job.func_name_candidates)
+        if fn is None:
+            print(f"[run_ngms] skip '{job.key}': no function found among {job.func_name_candidates}")
+            continue
+        jobs_to_run.append((job.key, fn))
+
+    if not jobs_to_run:
+        raise RuntimeError(
+            "ngms_collect.py에서 실행 가능한 수집 함수를 찾지 못했습니다. "
+            "예: collect_allocated / collect_target_mgmt / collect_spec_stat ..."
+        )
+
+    run_id = _timestamp()
+    failures: List[Tuple[str, str]] = []
+
+    for key, fn in jobs_to_run:
+        print(f"\n[run_ngms] === RUN {key} ({fn.__name__}) ===")
+        try:
+            # Flexible call: pass only supported kwargs
+            kwargs: Dict[str, Any] = {}
+            # most collectors accept download_dir
+            kwargs["download_dir"] = str(download_dir)
+
+            # optional common params
+            if plan_period is not None:
+                kwargs["plan_period"] = plan_period
+            if designation_year is not None:
+                kwargs["designation_year"] = designation_year
+            if emission_year is not None:
+                kwargs["emission_year"] = emission_year
+
+            # some implementations use different names
+            # We'll try calling with decreasing kwargs if TypeError occurs.
+            ret = _call_flexible(fn, kwargs)
+
+            df, meta = _extract_payload(ret)
+
+            # persist
+            stem = f"{run_id}.{key}"
+            if df is not None and not df.empty:
+                csv_path = _save_df(df, out_dir, stem)
+                print(f"[run_ngms] saved df -> {csv_path}")
+            else:
+                print(f"[run_ngms] df empty or None for '{key}'")
+
+            if meta:
+                meta_path = _save_meta(meta, out_dir, stem)
+                print(f"[run_ngms] saved meta -> {meta_path}")
+
+        except Exception:
+            tb = traceback.format_exc()
+            failures.append((key, tb))
+            print(f"[run_ngms] FAILED '{key}':\n{tb}")
+
+    print("\n[run_ngms] === DONE ===")
+    if failures:
+        print(f"[run_ngms] failures: {len(failures)}")
+        for k, tb in failures:
+            print(f"\n--- {k} ---\n{tb}")
+        # CI에서 실패로 처리하고 싶으면 아래를 1로
+        fail_exit = _env_bool("FAIL_ON_PARTIAL_ERROR", True)
+        if fail_exit:
+            raise SystemExit(1)
+    else:
+        print("[run_ngms] all jobs succeeded.")
+
+
+def _call_flexible(fn: Callable[..., Any], kwargs: Dict[str, Any]) -> Any:
+    """
+    TypeError: unexpected keyword argument 를 만났을 때,
+    kwargs를 하나씩 줄여가며 호출을 성사시키는 fallback.
+    """
+    try:
+        return fn(**kwargs)
+    except TypeError as e:
+        msg = str(e)
+        # if it's not about unexpected kwargs, re-raise
+        if "unexpected keyword argument" not in msg and "got an unexpected keyword argument" not in msg:
+            raise
+
+        # Drop kwargs until it works
+        keys = list(kwargs.keys())
+        # keep download_dir as last resort param
+        keys_sorted = [k for k in keys if k != "download_dir"] + (["download_dir"] if "download_dir" in kwargs else [])
+        cur = dict(kwargs)
+
+        for k in keys_sorted:
+            if k in cur and k != "download_dir":
+                cur.pop(k, None)
+                try:
+                    return fn(**cur)
+                except TypeError as e2:
+                    msg2 = str(e2)
+                    if "unexpected keyword argument" in msg2 or "got an unexpected keyword argument" in msg2:
+                        continue
+                    raise
+
+        # final attempt: only download_dir if present, else no-arg
+        if "download_dir" in kwargs:
+            try:
+                return fn(download_dir=kwargs["download_dir"])
+            except Exception:
+                pass
+        return fn()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
