@@ -1,7 +1,7 @@
 # .github/workflows/KAU_price_collector.yml
 # KRX ETS v3.1 - Job별 최적화 + 강화된 캐시 시스템
 
-name: KRX ETS Data Collector v3.1
+name: KRX ETS Data Collector v3.1 (Job별 최적화)
 
 on:
   schedule:
@@ -259,40 +259,42 @@ jobs:
       
     # === 🚀 Multi-level 캐시 시스템 (최대 성능) ===
     
-    - name: 🔧 데이터 수집용 통합 캐시 복원 (Multi-level)
+    - name: 🔧 데이터 수집용 통합 캐시 복원 (문제 경로 제외)
       id: heavy-cache
       uses: actions/cache@v4
       with:
         path: |
           ~/.cache/pip
           ~/.cache/ms-playwright
-          /usr/local/lib/python${{ env.PYTHON_VERSION }}/site-packages
           /var/cache/apt
-        key: krx-collector-heavy-v3.1-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+        key: krx-collector-balanced-v3.1.2-${{ runner.os }}-${{ hashFiles('requirements/collector.txt') }}
         restore-keys: |
-          krx-collector-heavy-v3.1-${{ runner.os }}-
-          krx-collector-heavy-v3.0-${{ runner.os }}-
+          krx-collector-balanced-v3.1.2-${{ runner.os }}-
+          krx-collector-balanced-v3.1-${{ runner.os }}-
+          krx-collector-balanced-
           krx-collector-heavy-
-          krx-collector-
           
-    - name: 📊 캐시 성능 분석 (Multi-level)
+    - name: 📊 캐시 성능 분석 (균형잡힌 통합 캐시)
       id: cache-analysis
       run: |
-        echo "=== 🚀 v3.1 Multi-level 캐시 분석 (성능 최적화) ==="
+        echo "=== 🚀 v3.1.2 균형잡힌 캐시 분석 (성능 최적화) ==="
         
         CACHE_HIT="${{ steps.heavy-cache.outputs.cache-hit }}"
         echo "💾 통합 캐시 적중: ${CACHE_HIT}"
+        echo "🛠️ 개선사항: 문제 경로(/usr/local/lib) 제외"
         
-        # 개별 캐시 상태 확인
+        # 개별 캐시 상태 및 크기 확인
         PIP_CACHED="false"
         PLAYWRIGHT_CACHED="false"
-        SITE_PACKAGES_CACHED="false"
         APT_CACHED="false"
         
         if [ -d ~/.cache/pip ] && [ "$(ls -A ~/.cache/pip 2>/dev/null)" ]; then
           PIP_CACHED="true"
           PIP_SIZE=$(du -sh ~/.cache/pip 2>/dev/null | cut -f1 || echo "N/A")
           echo "✅ pip 캐시: ${PIP_SIZE}"
+          
+          # 선택적 정리 (100MB 초과 파일만)
+          find ~/.cache/pip -name "*.whl" -size +100M -delete 2>/dev/null || true
         else
           echo "🔄 pip 캐시: 없음"
         fi
@@ -301,21 +303,16 @@ jobs:
           PLAYWRIGHT_CACHED="true"
           PLAYWRIGHT_SIZE=$(du -sh ~/.cache/ms-playwright 2>/dev/null | cut -f1 || echo "N/A")
           echo "✅ Playwright 캐시: ${PLAYWRIGHT_SIZE}"
-        else
-          echo "🔄 Playwright 캐시: 없음"
-        fi
-        
-        if [ -d "/usr/local/lib/python${{ env.PYTHON_VERSION }}/site-packages" ]; then
-          SITE_PACKAGES_COUNT=$(ls /usr/local/lib/python${{ env.PYTHON_VERSION }}/site-packages 2>/dev/null | wc -l)
-          if [ $SITE_PACKAGES_COUNT -gt 50 ]; then
-            SITE_PACKAGES_CACHED="true"
-            SITE_PACKAGES_SIZE=$(du -sh /usr/local/lib/python${{ env.PYTHON_VERSION }}/site-packages 2>/dev/null | cut -f1 || echo "N/A")
-            echo "✅ site-packages 캐시: ${SITE_PACKAGES_SIZE} (${SITE_PACKAGES_COUNT}개 패키지)"
-          else
-            echo "🔄 site-packages 캐시: 없음"
+          
+          # 중복 브라우저 버전 정리 (최신 1개만 유지)
+          CHROMIUM_DIRS=$(find ~/.cache/ms-playwright -name "chromium-*" -type d | sort)
+          CHROMIUM_COUNT=$(echo "$CHROMIUM_DIRS" | wc -l)
+          if [ $CHROMIUM_COUNT -gt 1 ]; then
+            echo "$CHROMIUM_DIRS" | head -n -1 | xargs rm -rf 2>/dev/null || true
+            echo "🧹 이전 브라우저 버전 정리: $((CHROMIUM_COUNT - 1))개 제거"
           fi
         else
-          echo "🔄 site-packages 캐시: 없음"
+          echo "🔄 Playwright 캐시: 없음"
         fi
         
         if [ -d /var/cache/apt ] && [ "$(ls -A /var/cache/apt 2>/dev/null)" ]; then
@@ -326,30 +323,34 @@ jobs:
           echo "🔄 apt 캐시: 없음"
         fi
         
+        # 전체 캐시 크기 확인
+        TOTAL_CACHE_SIZE=$(du -sh ~/.cache /var/cache/apt 2>/dev/null | awk '{sum+=$1} END {print sum"K"}' | numfmt --from=iec --to=iec || echo "N/A")
+        echo "📊 총 캐시 크기: ${TOTAL_CACHE_SIZE} (균형잡힌 최적화)"
+        
         # 캐시 효율성 계산
         CACHE_COUNT=0
         if [ "$PIP_CACHED" = "true" ]; then CACHE_COUNT=$((CACHE_COUNT + 1)); fi
         if [ "$PLAYWRIGHT_CACHED" = "true" ]; then CACHE_COUNT=$((CACHE_COUNT + 1)); fi
-        if [ "$SITE_PACKAGES_CACHED" = "true" ]; then CACHE_COUNT=$((CACHE_COUNT + 1)); fi
         if [ "$APT_CACHED" = "true" ]; then CACHE_COUNT=$((CACHE_COUNT + 1)); fi
         
-        CACHE_EFFICIENCY=$((CACHE_COUNT * 100 / 4))
+        CACHE_EFFICIENCY=$((CACHE_COUNT * 100 / 3))
         
         echo "pip_cached=${PIP_CACHED}" >> $GITHUB_OUTPUT
         echo "playwright_cached=${PLAYWRIGHT_CACHED}" >> $GITHUB_OUTPUT
-        echo "site_packages_cached=${SITE_PACKAGES_CACHED}" >> $GITHUB_OUTPUT
         echo "apt_cached=${APT_CACHED}" >> $GITHUB_OUTPUT
         echo "cache_efficiency=${CACHE_EFFICIENCY}" >> $GITHUB_OUTPUT
         
         echo ""
-        echo "📊 캐시 효율성: ${CACHE_EFFICIENCY}% (${CACHE_COUNT}/4)"
+        echo "📊 캐시 효율성: ${CACHE_EFFICIENCY}% (${CACHE_COUNT}/3)"
+        echo "🛡️ 예상 크기: 2.5-3.5GB (안전 범위)"
+        echo "🚨 제외된 문제 경로: /usr/local/lib/python3.9/site-packages"
         
-        if [ $CACHE_EFFICIENCY -ge 75 ]; then
+        if [ $CACHE_EFFICIENCY -ge 67 ]; then
           echo "🚀 높은 캐시 효율성 - 대폭 빠른 실행 예상"
-          echo "⚡ 예상 시간 절약: 90-95%"
-        elif [ $CACHE_EFFICIENCY -ge 50 ]; then
+          echo "⚡ 예상 시간 절약: 80-90%"
+        elif [ $CACHE_EFFICIENCY -ge 34 ]; then
           echo "⚡ 좋은 캐시 효율성 - 빠른 실행 예상"  
-          echo "⚡ 예상 시간 절약: 70-90%"
+          echo "⚡ 예상 시간 절약: 60-80%"
         else
           echo "🔄 캐시 구축 중 - 다음 실행부터 대폭 빨라짐"
           echo "⚡ 예상 시간 절약: 0-30% (첫 실행)"
@@ -389,28 +390,31 @@ jobs:
         
         echo "✅ 데이터 수집용 시스템 의존성 설치 완료"
         
-    - name: 📦 데이터 수집용 Python 패키지 설치 (캐시 최적화)
+    - name: 📦 데이터 수집용 Python 패키지 설치 (균형 최적화)
       run: |
-        echo "📦 데이터 수집용 패키지 설치 (v3.1 캐시 최적화)"
+        echo "📦 데이터 수집용 패키지 설치 (v3.1.2 균형 최적화)"
         
         PIP_CACHED="${{ steps.cache-analysis.outputs.pip_cached }}"
-        SITE_PACKAGES_CACHED="${{ steps.cache-analysis.outputs.site_packages_cached }}"
         
         START_TIME=$(date +%s)
         
-        if [ "$PIP_CACHED" = "true" ] && [ "$SITE_PACKAGES_CACHED" = "true" ]; then
-          echo "✅ pip + site-packages 캐시 모두 적중 - 설치 생략!"
-          echo "🚀 패키지 설치 시간 95% 단축"
-        elif [ "$PIP_CACHED" = "true" ]; then
+        if [ "$PIP_CACHED" = "true" ]; then
           echo "✅ pip 캐시 적중 - 설치 시간 대폭 단축"
-          echo "🚀 예상 시간 절약: 80%"
+          echo "🚀 예상 시간 절약: 80-90%"
         else
           echo "🔄 pip 패키지 신규 설치"
           echo "⏱️ 첫 실행 - 다음부터 대폭 빨라짐"
         fi
         
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -r requirements/collector.txt
+        
+        # 적당한 캐시 정리 (필요시에만)
+        CACHE_SIZE=$(du -s ~/.cache/pip 2>/dev/null | cut -f1 || echo "0")
+        if [ $CACHE_SIZE -gt 1000000 ]; then  # 1GB 초과시에만
+          echo "🧹 pip 캐시 정리 (1GB 초과 감지)"
+          find ~/.cache/pip -name "*.whl" -size +100M -delete 2>/dev/null || true
+        fi
         
         END_TIME=$(date +%s)
         INSTALL_DURATION=$((END_TIME - START_TIME))
@@ -418,15 +422,15 @@ jobs:
         echo "⏱️ 패키지 설치 시간: ${INSTALL_DURATION}초"
         echo "📦 설치된 패키지 확인:"
         echo "  • Playwright: $(python -c 'import playwright; print("✅")' 2>/dev/null || echo "❌")"
-        echo "  • OCR (easyocr): $(python -c 'import easyocr; print("✅")' 2>/dev/null || echo "❌")"
+        echo "  • OCR (easyocr): $(python -c 'import easyocr; print("✅")' 2>/dev/null || echo "❌ 제거됨 (정상)")"
         echo "  • BeautifulSoup: $(python -c 'import bs4; print("✅")' 2>/dev/null || echo "❌")"
         echo "  • Google Sheets: $(python -c 'import gspread; print("✅")' 2>/dev/null || echo "❌")"
         
         echo "PACKAGE_INSTALL_TIME=${INSTALL_DURATION}" >> $GITHUB_ENV
         
-    - name: 🌐 Playwright 브라우저 설치 (캐시 최적화)
+    - name: 🌐 Playwright 브라우저 설치 (균형 최적화)
       run: |
-        echo "🌐 Playwright 브라우저 설치 (v3.1 캐시 최적화)"
+        echo "🌐 Playwright 브라우저 설치 (v3.1.2 균형 최적화)"
         
         PLAYWRIGHT_CACHED="${{ steps.cache-analysis.outputs.playwright_cached }}"
         
@@ -445,6 +449,13 @@ jobs:
           if python -m playwright install chromium; then
             echo "✅ Chromium 브라우저 설치 성공"
             BROWSER_INSTALLED=true
+            
+            # 중복 브라우저 버전만 정리 (공간 절약)
+            CHROMIUM_DIRS=$(find ~/.cache/ms-playwright -name "chromium-*" -type d 2>/dev/null | wc -l)
+            if [ $CHROMIUM_DIRS -gt 1 ]; then
+              find ~/.cache/ms-playwright -name "chromium-*" -type d | sort | head -n -1 | xargs rm -rf 2>/dev/null || true
+              echo "🧹 이전 브라우저 버전 정리 완료"
+            fi
           else
             echo "⚠️ Chromium 브라우저 설치 실패 - 대체 방법 사용"
             BROWSER_INSTALLED=false
@@ -483,10 +494,10 @@ jobs:
         echo "PLAYWRIGHT_AVAILABLE=${BROWSER_INSTALLED}" >> $GITHUB_ENV
         echo "BROWSER_INSTALL_TIME=${BROWSER_INSTALL_TIME}" >> $GITHUB_ENV
         
-    - name: 📊 설치 성능 리포트 (캐시 최적화)
+    - name: 📊 설치 성능 리포트 (균형 최적화)
       id: cache-report
       run: |
-        echo "=== 📊 v3.1 설치 성능 리포트 (Multi-level 캐시) ==="
+        echo "=== 📊 v3.1.2 설치 성능 리포트 (균형 최적화) ==="
         
         PACKAGE_TIME=${PACKAGE_INSTALL_TIME:-0}
         BROWSER_TIME=${BROWSER_INSTALL_TIME:-0}
@@ -498,9 +509,10 @@ jobs:
         echo "⏱️ 브라우저 설치: ${BROWSER_TIME}초"
         echo "⏱️ 총 설치 시간: ${TOTAL_TIME}초"
         echo "💾 캐시 효율성: ${CACHE_EFFICIENCY}%"
+        echo "🛡️ 안정성: 균형잡힌 캐시 (3-4GB 예상)"
         
         # 성능 등급 결정
-        if [ $TOTAL_TIME -le 15 ]; then
+        if [ $TOTAL_TIME -le 20 ]; then
           PERFORMANCE_GRADE="A+ (매우 빠름 - 캐시 활용)"
         elif [ $TOTAL_TIME -le 60 ]; then
           PERFORMANCE_GRADE="A (빠름 - 부분 캐시)"
@@ -512,21 +524,37 @@ jobs:
         
         echo "🏆 성능 등급: ${PERFORMANCE_GRADE}"
         
-        # 예상 절약 효과
-        if [ $CACHE_EFFICIENCY -ge 75 ]; then
-          echo "💰 예상 시간 절약: 90-95% (첫 실행 대비)"
-          echo "⚡ 다음 실행 예상 시간: 10-20초"
+        # 캐시 크기 및 절약 효과
+        TOTAL_CACHE_SIZE=$(du -sh ~/.cache /var/cache/apt 2>/dev/null | awk '{sum+=$1} END {print sum}' || echo "N/A")
+        echo "📊 총 캐시 크기: ${TOTAL_CACHE_SIZE} (균형잡힌 최적화)"
+        
+        # 예상 절약 효과 (더 현실적)
+        if [ $CACHE_EFFICIENCY -ge 67 ]; then
+          echo "💰 예상 시간 절약: 85-95% (첫 실행 대비)"
+          echo "⚡ 다음 실행 예상 시간: 15-30초"
           echo "🚀 브라우저 다운로드 생략: 2GB 절약"
-        elif [ $CACHE_EFFICIENCY -ge 50 ]; then
-          echo "💰 예상 시간 절약: 70-90%"
+          echo "🛡️ 캐시 저장 실패 위험: 매우 낮음"
+        elif [ $CACHE_EFFICIENCY -ge 34 ]; then
+          echo "💰 예상 시간 절약: 60-85%"
           echo "⚡ 다음 실행 예상 시간: 30초-1분"
+          echo "🛡️ 캐시 저장 실패 위험: 낮음"
         else
           echo "💰 예상 시간 절약: 0-30% (첫 실행)"
           echo "⚡ 다음 실행 예상 시간: 캐시 적용으로 대폭 단축"
+          echo "🛡️ 캐시 저장 실패 위험: 매우 낮음 (문제 경로 제외)"
+        fi
+        
+        # 실제 성능 vs 예상 성능
+        if [ $TOTAL_TIME -le 30 ] && [ $CACHE_EFFICIENCY -ge 67 ]; then
+          echo "🎯 실제 성능: 예상 성능 달성!"
+          echo "📈 캐시 시스템: 정상 작동"
+        elif [ $TOTAL_TIME -gt 120 ]; then
+          echo "⚠️ 실제 성능: 예상보다 느림"
+          echo "🔍 원인: 네트워크 속도 또는 첫 설치"
         fi
         
         # GitHub Actions에 성능 정보 출력
-        PERFORMANCE_JSON="{\"total_time\":${TOTAL_TIME},\"cache_efficiency\":${CACHE_EFFICIENCY},\"grade\":\"${PERFORMANCE_GRADE}\"}"
+        PERFORMANCE_JSON="{\"total_time\":${TOTAL_TIME},\"cache_efficiency\":${CACHE_EFFICIENCY},\"grade\":\"${PERFORMANCE_GRADE}\",\"cache_size\":\"${TOTAL_CACHE_SIZE}\"}"
         echo "performance=${PERFORMANCE_JSON}" >> $GITHUB_OUTPUT
         
     - name: 환경변수 검증
