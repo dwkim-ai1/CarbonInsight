@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-최적화된 KRX ETS 데이터 수집기 v3.0 (KRX 시트 추가)
+최적화된 KRX ETS 데이터 수집기 v3.2.1 (0값 행 정리 추가)
 1. 기존 Playwright 기반 시스템 유지
 2. OptimizedSheetsManager 적용 + KRX 시트 관리
 3. 12:30 최종 세션 KRX 시트 업데이트
-4. 중복 제거 통계 GitHub Actions 전달
+4. 12:30 최종 세션 ets.KRX 시트 0값 행 정리 (신규)
+5. 중복 제거 통계 GitHub Actions 전달
+6. pytesseract 경량 OCR 백업 시스템
 """
 
 # 기존 imports 유지
@@ -19,7 +21,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
-# Playwright 및 OCR 관련 (기존과 동일)
+# Playwright 관련
 try:
     from playwright.async_api import async_playwright, Page, Browser, BrowserContext
     PLAYWRIGHT_AVAILABLE = True
@@ -27,11 +29,10 @@ except ImportError as e:
     logging.error(f"Playwright 패키지 누락: {e}")
     PLAYWRIGHT_AVAILABLE = False
 
+# pytesseract OCR 백업 (v3.2 경량화)
 try:
-    import easyocr
-    import cv2
-    import numpy as np
-    from PIL import Image, ImageEnhance
+    import pytesseract
+    from PIL import Image
     OCR_AVAILABLE = True
 except ImportError as e:
     logging.warning(f"OCR 패키지 누락 (백업 기능 비활성화): {e}")
@@ -43,19 +44,17 @@ import gspread
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# PlaywrightKRXCollector 클래스는 기존과 동일하게 유지
+
 class PlaywrightKRXCollector:
+    """Playwright 기반 KRX 데이터 수집기"""
+    
     def __init__(self):
-        """Playwright 기반 KRX 데이터 수집기"""
         self.base_url = "https://ets.krx.co.kr"
         self.main_page_url = f"{self.base_url}/contents/ETS/03/03010000/ETS03010000.jsp"
         self.trading_config = self._analyze_trading_context()
         self.browser = None
         self.context = None
         self.page = None
-        
-        # OCR 백업 시스템
-        self.ocr_reader = None
         self.screenshots_dir = Path("screenshots")
         self.screenshots_dir.mkdir(exist_ok=True)
         
@@ -79,7 +78,6 @@ class PlaywrightKRXCollector:
                 'headless': True
             }
             
-            # 최적화된 거래 단계별 설정
             if trading_phase in ['opening_price_decision', 'closing_price_decision', 'final_settlement']:
                 config.update({
                     'max_retries': 5, 
@@ -117,7 +115,7 @@ class PlaywrightKRXCollector:
             }
 
     async def initialize_browser(self):
-        """브라우저 초기화 (기존과 동일)"""
+        """브라우저 초기화"""
         try:
             self.playwright = await async_playwright().start()
             
@@ -149,7 +147,7 @@ class PlaywrightKRXCollector:
             return False
 
     async def _setup_network_monitoring(self):
-        """네트워크 요청 모니터링 설정 (기존과 동일)"""
+        """네트워크 요청 모니터링 설정"""
         self.ajax_responses = []
         
         async def handle_response(response):
@@ -175,7 +173,7 @@ class PlaywrightKRXCollector:
         self.page.on('response', handle_response)
 
     async def get_real_krx_data(self) -> List[Dict]:
-        """Playwright 기반 실제 KRX ETS 데이터 수집 (기존 로직 유지)"""
+        """Playwright 기반 실제 KRX ETS 데이터 수집"""
         try:
             config = self.trading_config
             logger.info("=== 최적화된 Playwright 기반 KRX ETS 데이터 수집 시작 ===")
@@ -248,7 +246,7 @@ class PlaywrightKRXCollector:
         return False
 
     async def _extract_from_dom(self) -> List[Dict]:
-        """DOM에서 데이터 추출 (기존 로직)"""
+        """DOM에서 데이터 추출"""
         try:
             table_selectors = ['table[summary*="배출권"] tbody tr', 'table[id*="gridtable"] tbody tr']
             rows = []
@@ -286,23 +284,70 @@ class PlaywrightKRXCollector:
             return []
 
     async def _extract_from_ajax(self) -> List[Dict]:
-        """AJAX 응답에서 데이터 추출 (기존 로직)"""
-        return []  # 기존 구현 유지
+        """AJAX 응답에서 데이터 추출"""
+        return []
 
     async def _ocr_backup_extraction(self) -> List[Dict]:
-        """OCR 백업 데이터 추출 (기존 로직)"""
-        return []  # 기존 구현 유지
+        """OCR 백업 데이터 추출 (pytesseract 경량 버전)"""
+        try:
+            if not OCR_AVAILABLE:
+                return []
+            
+            logger.info("🔍 pytesseract OCR 백업 추출 시작...")
+            screenshot_path = self.screenshots_dir / f"krx_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            await self.page.screenshot(path=str(screenshot_path), full_page=False)
+            
+            image = Image.open(screenshot_path)
+            text = pytesseract.image_to_string(image, lang='kor+eng')
+            logger.info(f"📸 OCR 텍스트 추출: {len(text)} 문자")
+            
+            return self._parse_ocr_text(text)
+            
+        except Exception as e:
+            logger.warning(f"OCR 백업 추출 실패: {e}")
+            return []
+    
+    def _parse_ocr_text(self, text: str) -> List[Dict]:
+        """OCR 추출 텍스트에서 종목 데이터 파싱"""
+        result_list = []
+        try:
+            lines = text.strip().split('\n')
+            for line in lines:
+                symbol_match = re.search(r'(KAU|KCU|KOC|i-KOC|i-KCU)\d+(-\d+)?', line)
+                if symbol_match:
+                    symbol = symbol_match.group()
+                    numbers = re.findall(r'[\d,]+', line)
+                    if len(numbers) >= 4:
+                        try:
+                            parsed_item = {
+                                'date': datetime.now().strftime('%Y-%m-%d'),
+                                'time': datetime.now().strftime('%H:%M:%S'),
+                                'symbol': symbol,
+                                'current_price': float(numbers[0].replace(',', '')),
+                                'change': float(numbers[1].replace(',', '')) if len(numbers) > 1 else 0,
+                                'change_rate': float(numbers[2].replace(',', '')) if len(numbers) > 2 else 0,
+                                'open_price': 0, 'high_price': 0, 'low_price': 0,
+                                'volume': float(numbers[3].replace(',', '')) if len(numbers) > 3 else 0,
+                                'trading_value': float(numbers[4].replace(',', '')) if len(numbers) > 4 else 0,
+                                'weighted_avg': 0,
+                                'collection_time': datetime.now().strftime('%H:%M:%S'),
+                                'data_source': 'playwright_ocr'
+                            }
+                            result_list.append(parsed_item)
+                        except (ValueError, IndexError):
+                            continue
+        except Exception as e:
+            logger.error(f"OCR 텍스트 파싱 오류: {e}")
+        return result_list
 
     def _parse_row_data(self, cell_texts: List[str], row_index: int) -> Optional[Dict]:
         """테이블 행 데이터 파싱"""
         try:
             if len(cell_texts) < 8:
                 return None
-                
             symbol = cell_texts[0]
             if not symbol or not re.match(r'^(KAU|KCU|KOC|i-)', symbol):
                 return None
-            
             current_price = self._extract_number(cell_texts[1])
             if current_price <= 0:
                 return None
@@ -369,13 +414,12 @@ class PlaywrightKRXCollector:
             logger.warning(f"리소스 정리 중 오류: {e}")
 
 
-# 최적화된 Google Sheets 관리자 (KRX 시트 추가)
 class OptimizedSheetsManager:
-    """최적화된 Google Sheets 관리자 (중복 제거 + KRX 시트)"""
+    """최적화된 Google Sheets 관리자 (중복 제거 + KRX 시트 + 0값 행 정리)"""
     
     def __init__(self, credentials_json: str, sheet_id: str):
         try:
-            logger.info("Google Sheets 연결 시작 (최적화 v3.0)...")
+            logger.info("Google Sheets 연결 시작 (최적화 v3.2.1)...")
             creds_dict = json.loads(credentials_json)
             self.gc = gspread.service_account_from_dict(creds_dict)
             self.sheet_id = sheet_id
@@ -388,7 +432,6 @@ class OptimizedSheetsManager:
     def setup_worksheets(self):
         """워크시트 설정 (ets.KRX + KRX)"""
         try:
-            # 1. 기존 ets.KRX 시트 설정
             try:
                 self.worksheet = self.spreadsheet.worksheet('ets.KRX')
                 self._verify_and_fix_headers()
@@ -396,7 +439,6 @@ class OptimizedSheetsManager:
                 self.worksheet = self.spreadsheet.add_worksheet(title='ets.KRX', rows=2000, cols=16)
                 self._setup_headers()
             
-            # 2. 새로운 KRX 시트 설정 (요약용)
             try:
                 self.krx_worksheet = self.spreadsheet.worksheet('KRX')
                 self._verify_and_fix_krx_headers()
@@ -405,7 +447,6 @@ class OptimizedSheetsManager:
                 self._setup_krx_headers()
                 
             logger.info("✅ 워크시트 설정 완료: ets.KRX (상세) + KRX (요약)")
-            
         except Exception as e:
             logger.error(f"워크시트 설정 실패: {e}")
             raise
@@ -421,7 +462,7 @@ class OptimizedSheetsManager:
             ]
             if current_headers != correct_headers:
                 self._setup_headers()
-        except Exception as e:
+        except Exception:
             self._setup_headers()
     
     def _setup_headers(self):
@@ -448,7 +489,7 @@ class OptimizedSheetsManager:
             ]
             if current_headers != correct_headers:
                 self._setup_krx_headers()
-        except Exception as e:
+        except Exception:
             self._setup_krx_headers()
     
     def _setup_krx_headers(self):
@@ -470,7 +511,6 @@ class OptimizedSheetsManager:
         try:
             all_data = self.worksheet.get_all_records()
             today_data = [row for row in all_data if row.get('날짜') == target_date]
-            
             if not today_data:
                 return {}
             
@@ -485,7 +525,6 @@ class OptimizedSheetsManager:
                         existing_time = latest_by_symbol[symbol].get('수집시간', '00:00:00')
                         if current_time > existing_time:
                             latest_by_symbol[symbol] = row
-            
             return latest_by_symbol
         except Exception as e:
             logger.warning(f"기존 데이터 조회 오류: {e}")
@@ -495,23 +534,17 @@ class OptimizedSheetsManager:
         """종목별 업데이트 필요성 판단"""
         try:
             symbol = new_data.get('symbol', '')
-            
             if is_first_collection:
-                return True, f"첫 수집"
-            
+                return True, "첫 수집"
             if symbol not in existing_data:
-                return True, f"신규 종목"
-            
-            existing = existing_data[symbol]
+                return True, "신규 종목"
             
             new_volume = float(str(new_data.get('volume', 0)).replace(',', ''))
             new_change = float(str(new_data.get('change', 0)).replace(',', ''))
             
             conditions = []
-            
             if new_volume > 0:
                 conditions.append("거래량 > 0")
-            
             if new_change != 0:
                 conditions.append("가격 변화")
             
@@ -521,10 +554,9 @@ class OptimizedSheetsManager:
             
             should_update = len(conditions) > 0
             reason = " | ".join(conditions) if conditions else "변화 없음 (생략)"
-            
             return should_update, reason
         except Exception as e:
-            logger.warning(f"업데이트 판단 오류 ({symbol}): {e}")
+            logger.warning(f"업데이트 판단 오류: {e}")
             return True, "판단 오류"
     
     def append_optimized_data(self, data: List[Dict]) -> tuple[bool, Dict]:
@@ -578,7 +610,7 @@ class OptimizedSheetsManager:
             return False, {'skipped': 0, 'added': 0, 'total': len(data) if data else 0}
     
     def update_krx_final_summary(self, data: List[Dict]) -> bool:
-        """12:30 최종 세션 KRX 시트 업데이트 (A~K열)"""
+        """12:30 최종 세션 KRX 시트 업데이트 (A~K열) - 0값도 포함 (차트용)"""
         try:
             if not data:
                 logger.warning("KRX 최종 요약: 데이터 없음")
@@ -587,66 +619,137 @@ class OptimizedSheetsManager:
             current_date = data[0]['date']
             logger.info(f"🎯 KRX 시트 최종 요약 업데이트: {current_date}")
             
-            # 모든 종목 데이터 준비 (거래 없는 종목도 포함)
             all_symbols = [
                 'KAU25', 'KCU25', 'KOC21-26', 'KOC22-27', 'KOC23-28', 'KOC24-29', 'KOC25-30',
                 'i-KCU25', 'i-KOC20-22', 'i-KOC21-26', 'i-KOC22-27', 'i-KOC23-28', 'i-KOC24-29', 'i-KOC25-30'
             ]
             
-            # 수집된 데이터를 딕셔너리로 변환
             collected_data = {item['symbol']: item for item in data}
             
-            # KRX 시트용 행 생성
+            # KRX 시트는 0값도 포함 (차트 일관성)
             krx_rows = []
             for symbol in all_symbols:
                 if symbol in collected_data:
-                    # 수집된 데이터 사용
                     item = collected_data[symbol]
                     row = [
-                        str(item['date']),                    # A: 날짜
-                        str(item['symbol']),                  # B: 종목명
-                        str(item['current_price']),           # C: 현재가
-                        str(item['change']),                  # D: 대비
-                        str(item['change_rate']),             # E: 등락률
-                        str(item['open_price']),              # F: 시가
-                        str(item['high_price']),              # G: 고가
-                        str(item['low_price']),               # H: 저가
-                        str(item['volume']),                  # I: 거래량
-                        str(item['trading_value']),           # J: 거래대금
-                        str(item['weighted_avg'])             # K: 가중평균
+                        str(item['date']), str(item['symbol']),
+                        str(item['current_price']), str(item['change']), str(item['change_rate']),
+                        str(item['open_price']), str(item['high_price']), str(item['low_price']),
+                        str(item['volume']), str(item['trading_value']), str(item['weighted_avg'])
                     ]
                 else:
-                    # 거래 없는 종목 - 기본값으로 추가
-                    row = [
-                        current_date,  # A: 날짜
-                        symbol,        # B: 종목명
-                        '0',           # C: 현재가
-                        '0',           # D: 대비
-                        '0.00',        # E: 등락률
-                        '0',           # F: 시가
-                        '0',           # G: 고가
-                        '0',           # H: 저가
-                        '0',           # I: 거래량
-                        '0',           # J: 거래대금
-                        '0'            # K: 가중평균
-                    ]
-                
+                    row = [current_date, symbol, '0', '0', '0.00', '0', '0', '0', '0', '0', '0']
                 krx_rows.append(row)
             
-            # KRX 시트에 일괄 업데이트
             if krx_rows:
                 self.krx_worksheet.append_rows(krx_rows)
-                logger.info(f"✅ KRX 시트 최종 요약 완료: {len(krx_rows)}개 종목 (A~K열)")
-                logger.info(f"📊 수집 종목: {len(collected_data)}개")
-                logger.info(f"📋 거래없음: {len(all_symbols) - len(collected_data)}개")
+                logger.info(f"✅ KRX 시트 최종 요약 완료: {len(krx_rows)}개 종목 (0값 포함 - 차트용)")
                 return True
-            else:
-                logger.warning("KRX 시트 업데이트: 생성된 행 없음")
-                return False
+            return False
                 
         except Exception as e:
             logger.error(f"KRX 시트 최종 요약 실패: {e}")
             return False
+    
+    def cleanup_zero_rows(self, target_date: str) -> Dict:
+        """
+        해당 날짜의 의미없는 0값 행 삭제 (ets.KRX 시트 전용)
+        
+        삭제 기준: 대비, 등락률, 시가, 고가, 저가, 거래량, 거래대금이 모두 0인 행
+        (현재가는 종가이므로 기준에서 제외 - 이미지 참고)
+        
+        주의: KRX 시트는 차트용이므로 0값도 유지 (이 메서드에서 처리하지 않음)
+        """
+        try:
+            logger.info(f"🧹 ets.KRX 시트 0값 행 정리 시작: {target_date}")
+            
+            # 전체 데이터 조회
+            all_data = self.worksheet.get_all_records()
+            
+            if not all_data:
+                logger.warning("0값 행 정리: 데이터 없음")
+                return {'target_date': target_date, 'deleted_count': 0, 'remaining_rows': 0}
+            
+            # 삭제할 행 인덱스 수집 (2부터 시작 - 헤더가 1행)
+            rows_to_delete = []
+            
+            for idx, row in enumerate(all_data, start=2):
+                # 해당 날짜의 데이터만 검사
+                if row.get('날짜') != target_date:
+                    continue
+                
+                try:
+                    # 0값 판단 기준 (이미지 참고):
+                    # 대비, 등락률, 시가, 고가, 저가, 거래량, 거래대금이 모두 0
+                    change = float(str(row.get('대비', 0)).replace(',', ''))
+                    change_rate = float(str(row.get('등락률', 0)).replace(',', ''))
+                    open_price = float(str(row.get('시가', 0)).replace(',', ''))
+                    high_price = float(str(row.get('고가', 0)).replace(',', ''))
+                    low_price = float(str(row.get('저가', 0)).replace(',', ''))
+                    volume = float(str(row.get('거래량', 0)).replace(',', ''))
+                    trading_value = float(str(row.get('거래대금', 0)).replace(',', ''))
+                    
+                    # 모든 값이 0인 경우에만 삭제 대상
+                    is_zero_row = (
+                        change == 0 and 
+                        change_rate == 0 and 
+                        open_price == 0 and 
+                        high_price == 0 and 
+                        low_price == 0 and 
+                        volume == 0 and 
+                        trading_value == 0
+                    )
+                    
+                    if is_zero_row:
+                        symbol = row.get('종목명', 'Unknown')
+                        collection_time = row.get('수집시간', 'Unknown')
+                        rows_to_delete.append({
+                            'index': idx,
+                            'symbol': symbol,
+                            'time': collection_time
+                        })
+                        logger.debug(f"🗑️ 삭제 대상: {symbol} ({collection_time})")
+                        
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"행 {idx} 값 파싱 오류: {e}")
+                    continue
+            
+            # 삭제 실행 (역순으로 - 인덱스 변경 방지)
+            deleted_count = 0
+            deleted_symbols = []
+            
+            for row_info in reversed(rows_to_delete):
+                try:
+                    self.worksheet.delete_rows(row_info['index'])
+                    deleted_count += 1
+                    deleted_symbols.append(f"{row_info['symbol']}({row_info['time']})")
+                    logger.info(f"🗑️ 삭제 완료: {row_info['symbol']} ({row_info['time']})")
+                except Exception as e:
+                    logger.warning(f"행 {row_info['index']} 삭제 실패: {e}")
+            
+            # 결과 통계
+            today_rows_before = len([r for r in all_data if r.get('날짜') == target_date])
+            today_rows_after = today_rows_before - deleted_count
+            
+            cleanup_stats = {
+                'target_date': target_date,
+                'deleted_count': deleted_count,
+                'remaining_rows': today_rows_after,
+                'total_rows_before': today_rows_before,
+                'deleted_symbols': deleted_symbols[:10]
+            }
+            
+            logger.info(f"🧹 0값 행 정리 완료: {target_date}")
+            logger.info(f"📊 삭제: {deleted_count}개 행")
+            logger.info(f"📊 남은 행: {today_rows_after}개 (해당 날짜)")
+            if today_rows_before > 0:
+                logger.info(f"⚡ 용량 절약: {round(deleted_count / today_rows_before * 100, 1)}%")
+            
+            return cleanup_stats
+            
+        except Exception as e:
+            logger.error(f"0값 행 정리 실패: {e}")
+            return {'target_date': target_date, 'deleted_count': 0, 'error': str(e)}
     
     def append_real_data(self, data: List[Dict]) -> bool:
         """기존 인터페이스 호환성"""
@@ -654,21 +757,20 @@ class OptimizedSheetsManager:
         return success
 
 
-# 기존 호환성을 위한 별칭
 class EnhancedSheetsManager(OptimizedSheetsManager):
+    """기존 호환성을 위한 별칭"""
     pass
 
 
 async def main():
-    """최적화된 메인 실행 함수 (v3.0)"""
+    """최적화된 메인 실행 함수 (v3.2.1)"""
     try:
-        logger.info("=== 최적화된 KRX ETS 데이터 수집 시스템 v3.0 시작 ===")
+        logger.info("=== 최적화된 KRX ETS 데이터 수집 시스템 v3.2.1 시작 ===")
         
         if not PLAYWRIGHT_AVAILABLE:
             logger.error("❌ Playwright 패키지가 없습니다")
             sys.exit(1)
         
-        # 환경변수 확인
         creds_json = os.getenv('GOOGLE_SHEETS_CREDS')
         sheet_id = os.getenv('KAU_SHEET_ID')
         test_mode = os.getenv('TEST_MODE', 'false').lower() == 'true'
@@ -676,7 +778,6 @@ async def main():
         if not creds_json or not sheet_id:
             raise ValueError("필수 환경변수가 설정되지 않았습니다")
         
-        # 거래 정보
         now = datetime.now()
         trading_phase = os.getenv('TRADING_PHASE', 'unknown')
         collection_frequency = os.getenv('COLLECTION_FREQUENCY', 'standard')
@@ -688,12 +789,9 @@ async def main():
         logger.info(f"📊 수집 주기: {collection_frequency}")
         logger.info(f"🎯 실행 우선도: {execution_priority}")
         logger.info(f"🎯 최종 세션: {is_final_session}")
-        logger.info(f"🚀 시스템: 최적화 v3.0 (KRX 시트 추가)")
+        logger.info(f"🚀 시스템: 최적화 v3.2.1 (0값 행 정리 추가)")
         
-        # Playwright 데이터 수집기 초기화
         collector = PlaywrightKRXCollector()
-        
-        # 데이터 수집 실행
         real_data = await collector.get_real_krx_data()
         
         if real_data:
@@ -702,29 +800,34 @@ async def main():
             if test_mode:
                 print(f"✅ 최적화 테스트 모드 성공!")
                 print(f"📊 총 종목: {len(real_data)}개")
-                print(f"⚡ 거래 단계: {trading_phase}")
-                print(f"📊 수집 주기: {collection_frequency}")
                 print(f"🎯 최종 세션: {is_final_session}")
-                print(f"🚀 시스템: v3.0 (KRX 시트)")
+                print(f"🚀 시스템: v3.2.1 (0값 행 정리)")
                 return
             
-            # 최적화된 Google Sheets 저장
             sheets_manager = OptimizedSheetsManager(creds_json, sheet_id)
             
             # 1. ets.KRX 시트에 최적화된 데이터 추가
             success, optimization_stats = sheets_manager.append_optimized_data(real_data)
             
-            # 2. 12:30 최종 세션인 경우 KRX 시트에 요약 추가
+            # 2. 12:30 최종 세션 처리
             krx_updated = False
+            cleanup_stats = {}
+            
             if is_final_session:
-                logger.info("🎯 12:30 최종 세션 - KRX 시트 요약 업데이트")
+                current_date = real_data[0]['date']
+                
+                # 2-1. KRX 시트에 요약 추가 (0값 포함 - 차트용)
+                logger.info("🎯 12:30 최종 세션 - KRX 시트 요약 업데이트 (0값 포함)")
                 krx_updated = sheets_manager.update_krx_final_summary(real_data)
+                
+                # 2-2. ets.KRX 시트에서 0값 행 정리 (신규 기능)
+                logger.info("🧹 12:30 최종 세션 - ets.KRX 시트 0값 행 정리")
+                cleanup_stats = sheets_manager.cleanup_zero_rows(current_date)
             
             if success:
                 total_volume = sum(item['volume'] for item in real_data)
                 active_items = len([item for item in real_data if item['volume'] > 0])
                 
-                # 최적화 통계를 환경변수로 전달 (GitHub Actions용)
                 optimization_json = json.dumps(optimization_stats)
                 print(f"::set-output name=optimization_stats::{optimization_json}")
                 
@@ -733,32 +836,33 @@ async def main():
                 print(f"🔥 활성 종목: {active_items}개")
                 print(f"📈 총 거래량: {total_volume:,} 톤")
                 print(f"💾 최적화 결과: 추가 {optimization_stats['added']}개, 생략 {optimization_stats['skipped']}개")
-                print(f"⚡ 용량 절약: {round((optimization_stats['skipped']/optimization_stats['total']*100), 1)}%")
-                print(f"📊 수집 주기: {collection_frequency}")
-                print(f"⚡ 거래 단계: {trading_phase}")
-                print(f"🕐 수집 시간: {now.strftime('%H:%M:%S')} KST")
                 
-                # 12:30 최종 세션 결과
+                if optimization_stats['total'] > 0:
+                    print(f"⚡ 중복 제거 효율: {round((optimization_stats['skipped']/optimization_stats['total']*100), 1)}%")
+                
                 if is_final_session:
-                    print(f"🎯 12:30 KST 최종 마감 세션 완료!")
+                    print(f"\n🎯 12:30 KST 최종 마감 세션 완료!")
+                    
                     if krx_updated:
-                        print(f"✅ KRX 시트 요약 업데이트 성공 (A~K열)")
+                        print(f"✅ KRX 시트 요약 업데이트 성공 (0값 포함 - 차트용)")
                     else:
                         print(f"⚠️ KRX 시트 요약 업데이트 실패")
-                    print(f"📱 텔레그램 일일 요약 발송 예정")
-                
+                    
+                    if cleanup_stats:
+                        print(f"\n🧹 ets.KRX 시트 0값 행 정리 결과:")
+                        print(f"   • 삭제된 행: {cleanup_stats.get('deleted_count', 0)}개")
+                        print(f"   • 남은 행: {cleanup_stats.get('remaining_rows', 0)}개")
+                        if cleanup_stats.get('deleted_count', 0) > 0 and cleanup_stats.get('total_rows_before', 0) > 0:
+                            efficiency = round(cleanup_stats['deleted_count'] / cleanup_stats['total_rows_before'] * 100, 1)
+                            print(f"   • 용량 절약: {efficiency}%")
+                    
+                    print(f"\n📱 텔레그램 일일 요약 발송 예정")
             else:
                 print("❌ Google Sheets 업데이트 실패")
                 sys.exit(1)
-                
         else:
             logger.error("❌ 모든 데이터 수집 방법 실패")
             print("❌ 최적화된 데이터 수집 실패!")
-            print("🔍 시도한 방법:")
-            print("   • Playwright DOM 추출")
-            print("   • AJAX 응답 분석")
-            if OCR_AVAILABLE:
-                print("   • OCR 백업 시스템")
             sys.exit(1)
             
     except Exception as e:
