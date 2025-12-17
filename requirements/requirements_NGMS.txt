@@ -1,5 +1,17 @@
-pandas
-openpyxl
-playwright
-gspread
-google-auth
+# NGMS Data Scraper Requirements
+# For scraping NGMS website and updating Google Sheets
+
+# Web scraping
+playwright==1.49.1
+
+# Excel file handling
+openpyxl==3.1.5
+pandas==2.2.3
+
+# Google Sheets integration
+gspread==6.1.4
+google-auth==2.37.0
+google-auth-oauthlib==1.2.1
+
+# Utilities
+python-dateutil==2.9.0
