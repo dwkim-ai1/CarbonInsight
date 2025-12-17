@@ -107,57 +107,68 @@ def _ensure_tab_open(page: Page, key: str):
 
 def _get_ngms_frame(page: Page, key: str) -> Frame:
     """
-    iframe 탐색은 다음 순서로 안정화:
-      1) title 기준 (HTML에 명시됨)
-      2) iframe id 패턴(mf_tac_layout_contents_..._body)
-      3) frame.url / iframe src 일부 매칭
+    iframe -> Frame 획득은 ElementHandle 기반으로만 수행(가장 안정적).
+    우선순위:
+      1) iframe[title=...]
+      2) iframe#mf_tac_layout_contents_{menuno}_body
+      3) 모든 iframe src / frame.url 매칭
     """
     title = FRAME_TITLE[key]
-
-    # 1) title 기준
-    iframe_loc = page.locator(f'iframe[title="{title}"]')
-    if iframe_loc.count() > 0:
-        el = iframe_loc.first
-        page.wait_for_timeout(500)
-        fr = el.content_frame()
-        if fr:
-            return fr
-
-    # 2) id 기준 (할당대상업체는 HTML에 mf_tac_layout_contents_50900501_body)
     menuno = {
         "allocated": "50900501",
         "target": "50900502",
         "statement": "50900503",
         "public": "50900504",
     }[key]
+
+    # 1) title 기준 (HTML에 명시됨)
+    try:
+        page.wait_for_selector(f'iframe[title="{title}"]', timeout=DEFAULT_NAV_TIMEOUT)
+        iframe_el = page.query_selector(f'iframe[title="{title}"]')
+        if iframe_el:
+            fr = iframe_el.content_frame()
+            if fr:
+                return fr
+    except Exception:
+        pass
+
+    # 2) id 기준
     id_guess = f"mf_tac_layout_contents_{menuno}_body"
-    iframe_loc = page.locator(f'iframe#{id_guess}')
-    if iframe_loc.count() > 0:
-        fr = iframe_loc.first.content_frame()
-        if fr:
-            return fr
+    try:
+        page.wait_for_selector(f'iframe#{id_guess}', timeout=DEFAULT_NAV_TIMEOUT)
+        iframe_el = page.query_selector(f'iframe#{id_guess}')
+        if iframe_el:
+            fr = iframe_el.content_frame()
+            if fr:
+                return fr
+    except Exception:
+        pass
 
-    # 3) frame.url 기준 (frame이 1개밖에 없다면 그게 main일 수 있음)
-    want = W2_IFRAME_SRC[key].split("&menuNo=")[0]  # 대충 prefix 매칭
-    last_frames: List[Frame] = page.frames
-    for fr in last_frames:
-        if fr.url and want in fr.url:
-            return fr
+    # 3) src / frame.url 매칭
+    want_prefix = W2_IFRAME_SRC[key].split("&menuNo=")[0]
 
-    # iframe src 자체를 DOM에서 읽어 추가 매칭
-    srcs = page.locator("iframe").evaluate_all("els => els.map(e => e.getAttribute('src'))")
-    # 일부 환경에서 src가 상대경로로 나옴
-    if srcs:
-        for i, src in enumerate(srcs):
-            if not src:
-                continue
-            if want in src:
-                fr = page.locator("iframe").nth(i).content_frame()
+    # 3-1) DOM의 iframe src들로 매칭
+    try:
+        iframe_els = page.query_selector_all("iframe")
+        for iframe_el in iframe_els:
+            src = iframe_el.get_attribute("src") or ""
+            if want_prefix in src:
+                fr = iframe_el.content_frame()
                 if fr:
                     return fr
+    except Exception:
+        pass
+
+    # 3-2) page.frames url로 매칭
+    last_frames: List[Frame] = page.frames
+    for fr in last_frames:
+        if fr.url and want_prefix in fr.url:
+            return fr
 
     urls = [fr.url for fr in last_frames if fr.url]
-    raise RuntimeError(f"NGMS iframe을 찾지 못했습니다. (frames={len(last_frames)}, urls_sample={urls[:5]})")
+    raise RuntimeError(
+        f"NGMS iframe을 찾지 못했습니다. (frames={len(last_frames)}, urls_sample={urls[:5]})"
+    )
 
 
 def _pick_excel_button(frame: Frame):
