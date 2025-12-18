@@ -2142,8 +2142,6 @@ class NGMSScraper:
             return None
         finally:
             await new_page.close()
-        finally:
-            await new_page.close()
     
     async def download_all(self) -> Dict[str, pd.DataFrame]:
         """
