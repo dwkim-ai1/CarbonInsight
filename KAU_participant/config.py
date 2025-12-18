@@ -7,11 +7,11 @@ NGMS Data Scraper Configuration
 NGMS_BASE_URL = "https://ngms.gir.go.kr:8443"
 NGMS_MAIN_URL = f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS021V.xml&menuNo=50900501"
 
-# iframe URLs for each tab
+# Page URLs for each data type (올바른 URL: subMain.do)
 IFRAME_URLS = {
-    "할당대상업체": f"{NGMS_BASE_URL}/websquare/ngms.do?w2xPath=/hom/bbs/OGCMBBS021V.xml&menuNo=50900501",
-    "목표관리대상업체": f"{NGMS_BASE_URL}/websquare/ngms.do?w2xPath=/hom/bbs/OGCMBBS022V.xml&menuNo=50900502",
-    "명세서배출량통계": f"{NGMS_BASE_URL}/websquare/ngms.do?w2xPath=/hom/bbs/OGCMBBS023V.xml&menuNo=50900503",
+    "할당대상업체": f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS021V.xml&menuNo=50900501",
+    "목표관리대상업체": f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS022V.xml&menuNo=50900502",
+    "명세서배출량통계": f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS023V.xml&menuNo=50900503",
 }
 
 # Google Sheets configuration
