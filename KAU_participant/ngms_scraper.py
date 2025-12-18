@@ -103,7 +103,7 @@ class NGMSScraper:
     
     async def _direct_iframe_scrape(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        subMain.do 접속 후 iframe 내에서 테이블 스크래핑
+        subMain.do 접속 후 frame_locator로 테이블 스크래핑
         
         Args:
             data_type: Type of data
@@ -146,44 +146,32 @@ class NGMSScraper:
             # 페이지 로드 후 스크린샷
             await self._save_debug(f"scrape_01_page_loaded_{data_type}", new_page)
             
-            # ★★★ iframe 내부에서 작업 ★★★
-            frame = await self._get_content_iframe(new_page, data_type)
-            if frame is None:
-                logger.error("iframe을 찾을 수 없음")
-                return None
+            # ★★★ frame_locator 사용 ★★★
+            iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
             # ★★★ 검색 버튼 클릭 ★★★
-            logger.info("검색 버튼 클릭 시도...")
-            search_clicked = await self._click_search_in_iframe(frame, data_type)
-            if search_clicked:
+            logger.info("검색 버튼 클릭 시도 (frame_locator)...")
+            try:
+                search_btn = iframe_locator.locator('input[value="검색"]')
+                await search_btn.wait_for(timeout=10000)
+                await search_btn.click()
                 logger.info("검색 버튼 클릭 성공")
                 await asyncio.sleep(5)
-            else:
-                logger.warning("검색 버튼 클릭 실패")
+            except Exception as e:
+                logger.warning(f"검색 버튼 클릭 실패: {e}")
             
             # 검색 후 스크린샷
             await self._save_debug(f"scrape_02_after_search_{data_type}", new_page)
             
-            # ★★★ iframe 내에서 데이터 추출 ★★★
-            df = None
+            # ★★★ 테이블 데이터 추출 (frame_locator 사용) ★★★
+            df = await self._extract_table_with_locator(iframe_locator, data_type)
             
-            # Method 1: WebSquare grid API
-            logger.info("Method 1: WebSquare 그리드 API 추출 시도")
-            df = await self._extract_from_iframe_websquare(frame, data_type)
             if df is not None and len(df) > 0:
-                logger.info(f"WebSquare 추출 성공: {len(df)}행")
+                logger.info(f"테이블 추출 성공: {len(df)}행")
                 return df
             
-            # Method 2: DOM table
-            logger.info("Method 2: DOM 테이블 추출 시도")
-            df = await self._extract_from_iframe_dom(frame, data_type)
-            if df is not None and len(df) > 0:
-                logger.info(f"DOM 추출 성공: {len(df)}행")
-                return df
-            
-            # 추출 실패 시 디버그 정보 수집
+            # 추출 실패 시 디버그
             await self._save_debug(f"scrape_03_extraction_failed_{data_type}", new_page)
-            await self._log_iframe_structure(frame, data_type)
             
             return None
             
@@ -194,6 +182,92 @@ class NGMSScraper:
             return None
         finally:
             await new_page.close()
+    
+    async def _extract_table_with_locator(self, iframe_locator, data_type: str) -> Optional[pd.DataFrame]:
+        """
+        frame_locator를 사용하여 테이블 데이터 추출
+        """
+        logger.info("frame_locator로 테이블 추출 시도...")
+        
+        try:
+            # 헤더 추출
+            headers = []
+            header_cells = iframe_locator.locator('.gridHeaderTable th nobr, .gridHeaderTable th')
+            header_count = await header_cells.count()
+            logger.info(f"헤더 셀 수: {header_count}")
+            
+            for i in range(header_count):
+                try:
+                    text = await header_cells.nth(i).inner_text()
+                    text = text.strip()
+                    if text and text not in headers:
+                        headers.append(text)
+                except:
+                    continue
+            
+            logger.info(f"추출된 헤더: {headers}")
+            
+            # 데이터 행 추출
+            rows_data = []
+            
+            # 여러 선택자 시도
+            row_selectors = [
+                '.gridBodyTable tbody tr',
+                'table[id*="grd"] tbody tr',
+                '.w2grid tbody tr',
+            ]
+            
+            for selector in row_selectors:
+                try:
+                    rows = iframe_locator.locator(selector)
+                    row_count = await rows.count()
+                    logger.info(f"선택자 '{selector}': {row_count}개 행")
+                    
+                    if row_count > 0:
+                        for i in range(row_count):
+                            row = rows.nth(i)
+                            cells = row.locator('td')
+                            cell_count = await cells.count()
+                            
+                            row_data = []
+                            for j in range(cell_count):
+                                try:
+                                    # nobr 태그 우선 시도
+                                    nobr = cells.nth(j).locator('nobr')
+                                    if await nobr.count() > 0:
+                                        text = await nobr.first.inner_text()
+                                    else:
+                                        text = await cells.nth(j).inner_text()
+                                    row_data.append(text.strip())
+                                except:
+                                    row_data.append('')
+                            
+                            # 빈 행 제외
+                            if any(cell for cell in row_data):
+                                rows_data.append(row_data)
+                        
+                        if rows_data:
+                            break
+                except Exception as e:
+                    logger.debug(f"선택자 '{selector}' 실패: {e}")
+                    continue
+            
+            logger.info(f"추출된 행 수: {len(rows_data)}")
+            
+            if rows_data:
+                if headers and len(headers) >= len(rows_data[0]):
+                    df = pd.DataFrame(rows_data, columns=headers[:len(rows_data[0])])
+                else:
+                    df = pd.DataFrame(rows_data)
+                return df
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"테이블 추출 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
     
     async def _extract_from_iframe_websquare(self, frame, data_type: str) -> Optional[pd.DataFrame]:
         """iframe 내에서 WebSquare API로 데이터 추출"""
@@ -1858,7 +1932,7 @@ class NGMSScraper:
     
     async def _download_excel_from_page(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Excel 파일 다운로드 시도 (subMain.do 접속 후 iframe 내에서 작업)
+        Excel 파일 다운로드 시도 (frame_locator 사용)
         """
         page_url = IFRAME_URLS.get(data_type)
         if not page_url:
@@ -1870,7 +1944,7 @@ class NGMSScraper:
         try:
             logger.info(f"Excel 다운로드 URL 접속: {page_url}")
             
-            # load 사용 (더 빠름)
+            # 페이지 로드
             try:
                 await new_page.goto(page_url, wait_until='load', timeout=90000)
             except Exception as e:
@@ -1883,40 +1957,32 @@ class NGMSScraper:
             # 스크린샷 저장
             await self._save_debug(f"excel_01_page_loaded_{data_type}", new_page)
             
-            # ★★★ iframe 내부에서 작업 ★★★
-            frame = await self._get_content_iframe(new_page, data_type)
-            if frame is None:
-                logger.error("iframe을 찾을 수 없음")
-                return None
+            # ★★★ frame_locator 사용 ★★★
+            iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
             # ★★★ 검색 버튼 클릭 ★★★
-            logger.info("검색 버튼 클릭 시도...")
-            search_clicked = await self._click_search_in_iframe(frame, data_type)
-            if search_clicked:
+            logger.info("검색 버튼 클릭 시도 (frame_locator)...")
+            try:
+                search_btn = iframe_locator.locator('input[value="검색"]')
+                await search_btn.wait_for(timeout=10000)
+                await search_btn.click()
                 logger.info("검색 버튼 클릭 성공")
                 await asyncio.sleep(5)
-            else:
-                logger.warning("검색 버튼 클릭 실패")
+            except Exception as e:
+                logger.warning(f"검색 버튼 클릭 실패: {e}")
             
             # 스크린샷 저장
             await self._save_debug(f"excel_02_after_search_{data_type}", new_page)
             
             # ★★★ Excel 다운로드 버튼 클릭 ★★★
-            logger.info("Excel 다운로드 버튼 찾기...")
-            excel_button = await frame.query_selector('input[value="Excel 다운로드"], input[value*="Excel"]')
-            
-            if not excel_button:
-                logger.warning("Excel 다운로드 버튼을 찾을 수 없음")
-                return None
-            
-            logger.info("Excel 버튼 발견, 다운로드 시도...")
-            
-            # 다운로드 시도
-            download_path = None
-            
+            logger.info("Excel 다운로드 버튼 클릭 시도...")
             try:
+                excel_btn = iframe_locator.locator('input[value="Excel 다운로드"]')
+                await excel_btn.wait_for(timeout=10000)
+                
+                # 다운로드 대기
                 async with new_page.expect_download(timeout=120000) as download_info:
-                    await excel_button.click(force=True)
+                    await excel_btn.click()
                     logger.info("Excel 버튼 클릭 완료, 다운로드 대기...")
                 
                 download = await download_info.value
@@ -1924,16 +1990,13 @@ class NGMSScraper:
                 await download.save_as(download_path)
                 logger.info(f"Excel 다운로드 완료: {download_path}")
                 
-            except Exception as e:
-                logger.warning(f"expect_download 실패: {e}")
-                return None
-            
-            if download_path and os.path.exists(download_path):
                 df = pd.read_excel(download_path)
                 logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                 return df
+                
+            except Exception as e:
+                logger.warning(f"Excel 다운로드 실패: {e}")
             
-            logger.warning("Excel 다운로드 실패: 파일을 찾을 수 없음")
             return None
             
         except Exception as e:
@@ -2047,36 +2110,28 @@ class NGMSScraper:
             # 스크린샷
             await self._save_debug("emission_stats_01_loaded", new_page)
             
-            # ★★★ iframe 내부에서 작업 ★★★
-            frame = await self._get_content_iframe(new_page, "명세서배출량통계")
-            if frame is None:
-                logger.error("iframe을 찾을 수 없음")
-                return None
+            # ★★★ frame_locator 사용 ★★★
+            iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
             # ★★★ 조회 버튼 클릭 ★★★
-            logger.info("조회 버튼 클릭 시도...")
-            search_clicked = await self._click_search_in_iframe(frame, "명세서배출량통계")
-            if search_clicked:
+            logger.info("조회 버튼 클릭 시도 (frame_locator)...")
+            try:
+                search_btn = iframe_locator.locator('input[value="조회"]')
+                await search_btn.wait_for(timeout=10000)
+                await search_btn.click()
                 logger.info("조회 버튼 클릭 성공")
                 await asyncio.sleep(5)
-            else:
-                logger.warning("조회 버튼 클릭 실패")
+            except Exception as e:
+                logger.warning(f"조회 버튼 클릭 실패: {e}")
             
             await self._save_debug("emission_stats_02_after_search", new_page)
             
-            # ★★★ iframe 내에서 데이터 추출 ★★★
-            df = await self._extract_from_iframe_websquare(frame, "명세서배출량통계")
-            if df is not None and len(df) > 0:
-                logger.info(f"WebSquare 추출 성공: {len(df)}행")
-                return df
+            # ★★★ 테이블 데이터 추출 (frame_locator 사용) ★★★
+            df = await self._extract_table_with_locator(iframe_locator, "명세서배출량통계")
             
-            df = await self._extract_from_iframe_dom(frame, "명세서배출량통계")
             if df is not None and len(df) > 0:
-                logger.info(f"DOM 추출 성공: {len(df)}행")
+                logger.info(f"테이블 추출 성공: {len(df)}행")
                 return df
-            
-            # 디버그 정보
-            await self._log_iframe_structure(frame, "명세서배출량통계")
             
             return None
             
@@ -2085,6 +2140,8 @@ class NGMSScraper:
             import traceback
             logger.error(traceback.format_exc())
             return None
+        finally:
+            await new_page.close()
         finally:
             await new_page.close()
     
