@@ -64,7 +64,8 @@ class NGMSScraper:
         )
         
         self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080}
+            viewport={'width': 1920, 'height': 1080},
+            accept_downloads=True  # Excel 다운로드를 위해 필요
         )
         
         self.page = await self.context.new_page()
@@ -141,6 +142,15 @@ class NGMSScraper:
             search_clicked = await self._click_search_button_in_frame(frame, data_type)
             logger.info(f"검색 버튼 클릭 결과: {search_clicked}")
             
+            # ★★★ 검색 후 frame 다시 가져오기 (iframe이 새로고침될 수 있음) ★★★
+            await asyncio.sleep(3)
+            frame = await self._find_content_frame(new_page, data_type)
+            if frame is None:
+                frame = new_page
+                logger.info("검색 후 메인 페이지 사용")
+            else:
+                logger.info(f"검색 후 iframe 재취득: {frame.url}")
+            
             # 검색 후 스크린샷 (메인 페이지에서)
             await self._save_debug(f"02_after_search_{data_type}", new_page)
             
@@ -195,9 +205,14 @@ class NGMSScraper:
         """
         logger.info("iframe 검색 중...")
         
+        # iframe이 로드될 때까지 대기
+        await asyncio.sleep(2)
+        
         # 모든 frame 확인
         frames = page.frames
         logger.info(f"발견된 frame 수: {len(frames)}")
+        
+        target_frame = None
         
         for i, frame in enumerate(frames):
             frame_url = frame.url
@@ -207,17 +222,43 @@ class NGMSScraper:
             # WebSquare 컨텐츠가 있는 iframe 찾기
             if 'websquare' in frame_url.lower() or 'ngms.do' in frame_url.lower():
                 logger.info(f"WebSquare iframe 발견: {frame_url[:100]}")
-                return frame
+                target_frame = frame
+                break
             
             # tac_layout_contents iframe 찾기 (탭 컨텐츠)
             if 'tac_layout_contents' in frame_name or 'body' in frame_name:
                 logger.info(f"컨텐츠 iframe 발견 (name): {frame_name}")
-                return frame
+                target_frame = frame
+                break
         
         # 첫 번째 자식 frame이 있으면 반환 (메인 페이지 제외)
-        if len(frames) > 1:
+        if target_frame is None and len(frames) > 1:
             logger.info("첫 번째 자식 frame 사용")
-            return frames[1]
+            target_frame = frames[1]
+        
+        # frame이 로드되었는지 확인
+        if target_frame:
+            try:
+                # frame 컨텍스트 준비 대기
+                await asyncio.sleep(1)
+                
+                # 간단한 테스트로 frame 접근 가능 여부 확인
+                test_result = await target_frame.evaluate('() => document.readyState')
+                logger.info(f"Frame readyState: {test_result}")
+                
+                if test_result == 'complete':
+                    return target_frame
+                else:
+                    # 추가 대기
+                    await asyncio.sleep(3)
+                    return target_frame
+                    
+            except Exception as e:
+                logger.warning(f"Frame 접근 테스트 실패: {e}")
+                # 실패해도 frame 반환 (evaluate 시 다시 시도)
+                return target_frame
+        
+        return None
         
         return None
     
@@ -378,6 +419,12 @@ class NGMSScraper:
                 result = await frame.evaluate(check_script)
                 check_count += 1
                 
+                # None 체크
+                if result is None:
+                    logger.debug(f"체크 #{check_count}: evaluate 결과 None")
+                    await asyncio.sleep(1)
+                    continue
+                
                 if check_count % 5 == 1:
                     logger.info(f"로딩 체크 #{check_count}: {result.get('debug', {})}")
                 
@@ -524,18 +571,25 @@ class NGMSScraper:
         try:
             result = await frame.evaluate(script)
             
-            logger.info(f"WebSquare 결과: success={result.get('success')}, debug={result.get('debug', {})}")
+            # None 체크 추가
+            if result is None:
+                logger.warning("WebSquare evaluate 결과가 None")
+                return None
+            
+            logger.info(f"WebSquare 결과: success={result.get('success', False)}, debug={result.get('debug', {})}")
             
             if result.get('error'):
                 logger.warning(f"WebSquare 오류: {result.get('error')}")
             
-            if result and result.get('success') and result.get('data'):
+            if result.get('success') and result.get('data'):
                 df = pd.DataFrame(result['data'])
                 logger.info(f"WebSquare 추출 성공: {len(df)}행")
                 return df
                 
         except Exception as e:
             logger.error(f"WebSquare API 실패: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
         
         return None
     
@@ -612,12 +666,18 @@ class NGMSScraper:
         try:
             result = await frame.evaluate(script)
             
-            logger.info(f"DOM 추출 결과: headers={len(result.get('headers', []))}, rows={len(result.get('rows', []))}, debug={result.get('debug', {})}")
+            # None 체크 추가
+            if result is None:
+                logger.warning("DOM evaluate 결과가 None")
+                return None
             
-            if result.get('rows') and len(result['rows']) > 0:
-                headers = result.get('headers', [])
-                rows = result['rows']
-                
+            headers = result.get('headers', [])
+            rows = result.get('rows', [])
+            debug = result.get('debug', {})
+            
+            logger.info(f"DOM 추출 결과: headers={len(headers)}, rows={len(rows)}, debug={debug}")
+            
+            if rows and len(rows) > 0:
                 if headers and len(headers) >= len(rows[0]):
                     df = pd.DataFrame(rows, columns=headers[:len(rows[0])])
                 else:
@@ -628,6 +688,8 @@ class NGMSScraper:
                 
         except Exception as e:
             logger.error(f"DOM 추출 실패: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
         
         return None
     
@@ -1423,8 +1485,16 @@ class NGMSScraper:
         if data_type == "명세서배출량통계":
             df = await self._scrape_emission_statistics()
         else:
-            # Use direct iframe access (more reliable)
-            df = await self._direct_iframe_scrape(data_type)
+            df = None
+            
+            # 방법 1: Excel 다운로드 시도
+            logger.info("방법 1: Excel 다운로드 시도")
+            df = await self._download_excel_from_page(data_type)
+            
+            # 방법 2: 테이블 스크래핑 시도
+            if df is None or len(df) == 0:
+                logger.info("방법 2: 테이블 스크래핑 시도")
+                df = await self._direct_iframe_scrape(data_type)
         
         if df is not None and len(df) > 0:
             # Clean the data
@@ -1440,6 +1510,117 @@ class NGMSScraper:
         else:
             logger.error(f"데이터 수집 실패: {data_type}")
             return None
+    
+    async def _download_excel_from_page(self, data_type: str) -> Optional[pd.DataFrame]:
+        """
+        Excel 파일 다운로드 시도
+        """
+        page_url = IFRAME_URLS.get(data_type)
+        if not page_url:
+            return None
+        
+        new_page = await self.context.new_page()
+        new_page.set_default_timeout(60000)
+        
+        try:
+            logger.info(f"URL 접속: {page_url}")
+            await new_page.goto(page_url, wait_until='networkidle')
+            await asyncio.sleep(3)
+            
+            # iframe 찾기
+            frame = await self._find_content_frame(new_page, data_type)
+            if frame is None:
+                logger.warning("iframe을 찾지 못함")
+                frame = new_page
+            else:
+                logger.info(f"iframe 발견")
+            
+            # 검색 버튼 클릭하여 데이터 로드
+            await self._click_search_button_in_frame(frame, data_type)
+            await asyncio.sleep(5)
+            
+            # 스크린샷 저장
+            await self._save_debug(f"before_excel_{data_type}", new_page)
+            
+            # Excel 다운로드 버튼 찾기
+            excel_selectors = [
+                'input[value="Excel 다운로드"]',
+                'input[value*="Excel"]',
+                'button:has-text("Excel")',
+                'a:has-text("Excel 다운로드")',
+                '#mf_trigger2',
+            ]
+            
+            download_button = None
+            for selector in excel_selectors:
+                try:
+                    btn = await frame.query_selector(selector)
+                    if btn:
+                        download_button = btn
+                        logger.info(f"Excel 버튼 발견: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not download_button:
+                logger.warning("Excel 다운로드 버튼을 찾을 수 없음")
+                return None
+            
+            # 다운로드 시도
+            download_path = None
+            
+            try:
+                # expect_download 사용
+                async with new_page.expect_download(timeout=60000) as download_info:
+                    await download_button.click(force=True)
+                    logger.info("Excel 버튼 클릭, 다운로드 대기...")
+                
+                download = await download_info.value
+                download_path = os.path.join(self.download_dir, download.suggested_filename)
+                await download.save_as(download_path)
+                logger.info(f"다운로드 완료: {download_path}")
+                
+            except Exception as e:
+                logger.warning(f"expect_download 실패: {e}")
+                
+                # JavaScript로 다운로드 함수 직접 호출
+                js_funcs = [
+                    'scwin.btn_excel_onclick()',
+                    'scwin.fn_excel()',
+                    'fn_excelDownload()',
+                ]
+                for js_func in js_funcs:
+                    try:
+                        await frame.evaluate(js_func)
+                        logger.info(f"JS 함수 호출: {js_func}")
+                        await asyncio.sleep(10)
+                        break
+                    except:
+                        continue
+                
+                # 다운로드 폴더에서 파일 찾기
+                import glob
+                await asyncio.sleep(5)
+                excel_files = glob.glob(os.path.join(self.download_dir, '*.xlsx')) + \
+                              glob.glob(os.path.join(self.download_dir, '*.xls'))
+                if excel_files:
+                    download_path = max(excel_files, key=os.path.getctime)
+                    logger.info(f"다운로드된 파일 발견: {download_path}")
+            
+            if download_path and os.path.exists(download_path):
+                df = pd.read_excel(download_path)
+                logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                return df
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Excel 다운로드 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+        finally:
+            await new_page.close()
     
     async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
         """
