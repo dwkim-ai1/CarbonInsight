@@ -185,9 +185,9 @@ class NGMSScraper:
     
     async def _extract_table_with_locator(self, iframe_locator, data_type: str) -> Optional[pd.DataFrame]:
         """
-        frame_locator를 사용하여 테이블 데이터 추출
+        frame_locator를 사용하여 테이블 데이터 추출 (스크롤하여 전체 데이터 수집)
         """
-        logger.info("frame_locator로 테이블 추출 시도...")
+        logger.info("frame_locator로 테이블 추출 시도 (스크롤 방식)...")
         
         try:
             # 헤더 추출
@@ -205,60 +205,110 @@ class NGMSScraper:
                 except:
                     continue
             
-            logger.info(f"추출된 헤더: {headers}")
+            logger.info(f"추출된 헤더: {headers[:7]}...")  # 처음 7개만 표시
             
-            # 데이터 행 추출
-            rows_data = []
+            # ★★★ 스크롤하면서 전체 데이터 수집 ★★★
+            all_rows_data = []
+            seen_first_cells = set()  # 중복 체크용 (첫 번째 셀 값)
             
-            # 여러 선택자 시도
-            row_selectors = [
-                '.gridBodyTable tbody tr',
-                'table[id*="grd"] tbody tr',
-                '.w2grid tbody tr',
-            ]
+            # 그리드 컨테이너 찾기
+            grid_container = iframe_locator.locator('.w2grid_dataLayer, .w2grid_main, [id*="grd"]').first
             
-            for selector in row_selectors:
-                try:
-                    rows = iframe_locator.locator(selector)
-                    row_count = await rows.count()
-                    logger.info(f"선택자 '{selector}': {row_count}개 행")
-                    
-                    if row_count > 0:
-                        for i in range(row_count):
-                            row = rows.nth(i)
-                            cells = row.locator('td')
-                            cell_count = await cells.count()
-                            
-                            row_data = []
-                            for j in range(cell_count):
-                                try:
-                                    # nobr 태그 우선 시도
-                                    nobr = cells.nth(j).locator('nobr')
-                                    if await nobr.count() > 0:
-                                        text = await nobr.first.inner_text()
-                                    else:
-                                        text = await cells.nth(j).inner_text()
-                                    row_data.append(text.strip())
-                                except:
-                                    row_data.append('')
-                            
-                            # 빈 행 제외
-                            if any(cell for cell in row_data):
-                                rows_data.append(row_data)
+            max_scroll_attempts = 50  # 최대 스크롤 횟수
+            scroll_count = 0
+            prev_row_count = 0
+            no_new_rows_count = 0
+            
+            while scroll_count < max_scroll_attempts:
+                # 현재 보이는 행 추출
+                rows = iframe_locator.locator('table[id*="grd"] tbody tr, .gridBodyTable tbody tr')
+                current_row_count = await rows.count()
+                
+                if current_row_count == 0:
+                    logger.warning("행을 찾을 수 없음")
+                    break
+                
+                new_rows_added = 0
+                
+                for i in range(current_row_count):
+                    try:
+                        row = rows.nth(i)
+                        cells = row.locator('td')
+                        cell_count = await cells.count()
                         
-                        if rows_data:
-                            break
-                except Exception as e:
-                    logger.debug(f"선택자 '{selector}' 실패: {e}")
-                    continue
-            
-            logger.info(f"추출된 행 수: {len(rows_data)}")
-            
-            if rows_data:
-                if headers and len(headers) >= len(rows_data[0]):
-                    df = pd.DataFrame(rows_data, columns=headers[:len(rows_data[0])])
+                        if cell_count == 0:
+                            continue
+                        
+                        row_data = []
+                        for j in range(cell_count):
+                            try:
+                                # nobr 태그 우선 시도
+                                nobr = cells.nth(j).locator('nobr')
+                                if await nobr.count() > 0:
+                                    text = await nobr.first.inner_text()
+                                else:
+                                    text = await cells.nth(j).inner_text()
+                                row_data.append(text.strip())
+                            except:
+                                row_data.append('')
+                        
+                        # 빈 행 제외
+                        if not any(cell for cell in row_data):
+                            continue
+                        
+                        # 중복 체크 (첫 번째 + 두 번째 셀 조합)
+                        row_key = f"{row_data[0]}_{row_data[1] if len(row_data) > 1 else ''}"
+                        
+                        if row_key not in seen_first_cells:
+                            seen_first_cells.add(row_key)
+                            all_rows_data.append(row_data)
+                            new_rows_added += 1
+                            
+                    except Exception as e:
+                        logger.debug(f"행 추출 실패: {e}")
+                        continue
+                
+                logger.info(f"스크롤 {scroll_count + 1}: 현재 {current_row_count}행 표시, 신규 {new_rows_added}행, 총 {len(all_rows_data)}행")
+                
+                # 새 행이 없으면 종료 체크
+                if new_rows_added == 0:
+                    no_new_rows_count += 1
+                    if no_new_rows_count >= 3:  # 연속 3번 새 행 없으면 종료
+                        logger.info("더 이상 새로운 행 없음, 스크롤 종료")
+                        break
                 else:
-                    df = pd.DataFrame(rows_data)
+                    no_new_rows_count = 0
+                
+                # 스크롤 다운
+                try:
+                    # 방법 1: 그리드 컨테이너 스크롤
+                    await grid_container.evaluate('el => el.scrollTop += 500')
+                except:
+                    try:
+                        # 방법 2: 키보드로 스크롤
+                        await rows.last.click()
+                        await iframe_locator.locator('body').press('PageDown')
+                    except:
+                        pass
+                
+                await asyncio.sleep(0.5)  # 데이터 로드 대기
+                scroll_count += 1
+                prev_row_count = current_row_count
+            
+            logger.info(f"스크롤 완료: 총 {len(all_rows_data)}행 추출")
+            
+            if all_rows_data:
+                # 컬럼 수 맞추기
+                max_cols = max(len(row) for row in all_rows_data)
+                for row in all_rows_data:
+                    while len(row) < max_cols:
+                        row.append('')
+                
+                if headers and len(headers) >= max_cols:
+                    df = pd.DataFrame(all_rows_data, columns=headers[:max_cols])
+                else:
+                    df = pd.DataFrame(all_rows_data)
+                
                 return df
             
             return None
