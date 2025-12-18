@@ -82,6 +82,10 @@ async def main() -> dict:
         
         logger.info(f"다운로드 완료: {list(downloaded_data.keys())}")
         
+        # 최소 1개 이상의 데이터가 있으면 진행
+        if len(downloaded_data) == 0:
+            raise Exception("수집된 데이터가 없습니다")
+        
         # Step 3: Update Google Sheets
         logger.info("\n[3/3] Google Sheets 업데이트 중...")
         
