@@ -155,8 +155,8 @@ class NGMSScraper:
                 search_btn = iframe_locator.locator('input[value="검색"]')
                 await search_btn.wait_for(timeout=10000)
                 await search_btn.click()
-                logger.info("검색 버튼 클릭 성공")
-                await asyncio.sleep(5)
+                logger.info("검색 버튼 클릭 성공, 데이터 로딩 대기 (10초)...")
+                await asyncio.sleep(10)  # 데이터 로딩 시간 증가
             except Exception as e:
                 logger.warning(f"검색 버튼 클릭 실패: {e}")
             
@@ -207,26 +207,89 @@ class NGMSScraper:
             
             logger.info(f"추출된 헤더: {headers[:7]}...")  # 처음 7개만 표시
             
+            # ★★★ DOM 구조 디버깅 ★★★
+            logger.info("DOM 구조 분석 중...")
+            try:
+                # 모든 테이블 확인
+                all_tables = iframe_locator.locator('table')
+                table_count = await all_tables.count()
+                logger.info(f"iframe 내 테이블 수: {table_count}")
+                
+                # 각 테이블의 ID와 행 수 확인
+                for i in range(min(table_count, 5)):  # 최대 5개
+                    try:
+                        table = all_tables.nth(i)
+                        table_id = await table.get_attribute('id') or f'table_{i}'
+                        tbody_rows = table.locator('tbody tr')
+                        row_count = await tbody_rows.count()
+                        logger.info(f"  테이블 '{table_id}': {row_count}개 행")
+                    except:
+                        pass
+            except Exception as e:
+                logger.debug(f"DOM 분석 실패: {e}")
+            
+            # ★★★ 여러 행 선택자 시도 ★★★
+            row_selectors = [
+                'table[id*="body_table"] tbody tr',
+                'table[id*="grd1"] tbody tr',
+                'table[id*="grd"] tbody tr',
+                '.gridBodyTable tbody tr',
+                '.w2grid tbody tr',
+                'table tbody tr',
+            ]
+            
+            working_selector = None
+            for selector in row_selectors:
+                try:
+                    rows = iframe_locator.locator(selector)
+                    count = await rows.count()
+                    logger.info(f"선택자 '{selector}': {count}개 행")
+                    if count > 0:
+                        working_selector = selector
+                        break
+                except Exception as e:
+                    logger.debug(f"선택자 '{selector}' 실패: {e}")
+                    continue
+            
+            if not working_selector:
+                logger.warning("작동하는 행 선택자를 찾을 수 없음")
+                return None
+            
+            logger.info(f"사용할 선택자: {working_selector}")
+            
             # ★★★ 스크롤하면서 전체 데이터 수집 ★★★
             all_rows_data = []
-            seen_first_cells = set()  # 중복 체크용 (첫 번째 셀 값)
+            seen_first_cells = set()  # 중복 체크용
             
             # 그리드 컨테이너 찾기
             grid_container = iframe_locator.locator('.w2grid_dataLayer, .w2grid_main, [id*="grd"]').first
             
+            # ★★★ 먼저 스크롤바/그리드 영역 찾기 ★★★
+            scroll_area = iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY"], .w2grid')
+            
             max_scroll_attempts = 50  # 최대 스크롤 횟수
             scroll_count = 0
-            prev_row_count = 0
             no_new_rows_count = 0
             
             while scroll_count < max_scroll_attempts:
                 # 현재 보이는 행 추출
-                rows = iframe_locator.locator('table[id*="grd"] tbody tr, .gridBodyTable tbody tr')
+                if working_selector:
+                    rows = iframe_locator.locator(working_selector)
+                else:
+                    rows = iframe_locator.locator('tbody tr')
                 current_row_count = await rows.count()
                 
+                # ★★★ 행이 없어도 스크롤 시도 (처음 몇 번) ★★★
                 if current_row_count == 0:
-                    logger.warning("행을 찾을 수 없음")
-                    break
+                    if scroll_count < 5:  # 처음 5번은 스크롤 시도
+                        logger.info(f"스크롤 {scroll_count + 1}: 행 없음, 스크롤 시도 중...")
+                        await self._scroll_grid(iframe_locator, grid_container)
+                        await asyncio.sleep(1)
+                        scroll_count += 1
+                        continue
+                    else:
+                        logger.warning(f"스크롤 {scroll_count}: 행을 찾을 수 없음, 종료")
+                        break
                 
                 new_rows_added = 0
                 
@@ -279,21 +342,11 @@ class NGMSScraper:
                 else:
                     no_new_rows_count = 0
                 
-                # 스크롤 다운
-                try:
-                    # 방법 1: 그리드 컨테이너 스크롤
-                    await grid_container.evaluate('el => el.scrollTop += 500')
-                except:
-                    try:
-                        # 방법 2: 키보드로 스크롤
-                        await rows.last.click()
-                        await iframe_locator.locator('body').press('PageDown')
-                    except:
-                        pass
+                # ★★★ 다양한 스크롤 방식 시도 ★★★
+                await self._scroll_grid(iframe_locator, grid_container)
                 
                 await asyncio.sleep(0.5)  # 데이터 로드 대기
                 scroll_count += 1
-                prev_row_count = current_row_count
             
             logger.info(f"스크롤 완료: 총 {len(all_rows_data)}행 추출")
             
@@ -318,6 +371,40 @@ class NGMSScraper:
             import traceback
             logger.error(traceback.format_exc())
             return None
+    
+    async def _scroll_grid(self, iframe_locator, grid_container) -> None:
+        """
+        다양한 방식으로 그리드 스크롤 시도
+        """
+        scroll_methods = [
+            # 방법 1: 그리드 컨테이너 scrollTop
+            ('scrollTop', lambda: grid_container.evaluate('el => { el.scrollTop += 500; return el.scrollTop; }')),
+            
+            # 방법 2: 마우스 휠 이벤트
+            ('wheel', lambda: grid_container.evaluate('''el => {
+                el.dispatchEvent(new WheelEvent('wheel', {deltaY: 300, bubbles: true}));
+            }''')),
+            
+            # 방법 3: PageDown 키
+            ('PageDown', lambda: iframe_locator.locator('body').press('PageDown')),
+            
+            # 방법 4: ArrowDown 키 (여러 번)
+            ('ArrowDown', lambda: iframe_locator.locator('body').press('ArrowDown')),
+            
+            # 방법 5: 스크롤바 클릭
+            ('scrollbar', lambda: iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY"]').first.click()),
+        ]
+        
+        for method_name, method_func in scroll_methods:
+            try:
+                await method_func()
+                logger.debug(f"스크롤 방식 '{method_name}' 성공")
+                return
+            except Exception as e:
+                logger.debug(f"스크롤 방식 '{method_name}' 실패: {e}")
+                continue
+        
+        logger.debug("모든 스크롤 방식 실패")
     
     async def _extract_from_iframe_websquare(self, frame, data_type: str) -> Optional[pd.DataFrame]:
         """iframe 내에서 WebSquare API로 데이터 추출"""
@@ -1982,7 +2069,7 @@ class NGMSScraper:
     
     async def _download_excel_from_page(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Excel 파일 다운로드 시도 (frame_locator 사용)
+        Excel 파일 다운로드 시도 (검색 버튼 없이 바로 다운로드)
         """
         page_url = IFRAME_URLS.get(data_type)
         if not page_url:
@@ -2010,22 +2097,8 @@ class NGMSScraper:
             # ★★★ frame_locator 사용 ★★★
             iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
-            # ★★★ 검색 버튼 클릭 ★★★
-            logger.info("검색 버튼 클릭 시도 (frame_locator)...")
-            try:
-                search_btn = iframe_locator.locator('input[value="검색"]')
-                await search_btn.wait_for(timeout=10000)
-                await search_btn.click()
-                logger.info("검색 버튼 클릭 성공")
-                await asyncio.sleep(5)
-            except Exception as e:
-                logger.warning(f"검색 버튼 클릭 실패: {e}")
-            
-            # 스크린샷 저장
-            await self._save_debug(f"excel_02_after_search_{data_type}", new_page)
-            
-            # ★★★ Excel 다운로드 버튼 클릭 ★★★
-            logger.info("Excel 다운로드 버튼 클릭 시도...")
+            # ★★★ 검색 버튼 없이 바로 Excel 다운로드 시도 ★★★
+            logger.info("Excel 다운로드 버튼 클릭 시도 (검색 없이)...")
             try:
                 excel_btn = iframe_locator.locator('input[value="Excel 다운로드"]')
                 await excel_btn.wait_for(timeout=10000)
@@ -2040,12 +2113,45 @@ class NGMSScraper:
                 await download.save_as(download_path)
                 logger.info(f"Excel 다운로드 완료: {download_path}")
                 
+                # 스크린샷 저장
+                await self._save_debug(f"excel_02_after_download_{data_type}", new_page)
+                
                 df = pd.read_excel(download_path)
                 logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                 return df
                 
             except Exception as e:
-                logger.warning(f"Excel 다운로드 실패: {e}")
+                logger.warning(f"Excel 다운로드 실패 (검색 없이): {e}")
+                
+                # ★★★ 검색 버튼 클릭 후 다시 시도 ★★★
+                logger.info("검색 버튼 클릭 후 Excel 다운로드 재시도...")
+                try:
+                    search_btn = iframe_locator.locator('input[value="검색"]')
+                    await search_btn.wait_for(timeout=10000)
+                    await search_btn.click()
+                    logger.info("검색 버튼 클릭 성공")
+                    await asyncio.sleep(5)
+                    
+                    # 스크린샷 저장
+                    await self._save_debug(f"excel_03_after_search_{data_type}", new_page)
+                    
+                    # Excel 다운로드 재시도
+                    excel_btn = iframe_locator.locator('input[value="Excel 다운로드"]')
+                    async with new_page.expect_download(timeout=120000) as download_info:
+                        await excel_btn.click()
+                        logger.info("Excel 버튼 클릭 완료 (검색 후), 다운로드 대기...")
+                    
+                    download = await download_info.value
+                    download_path = os.path.join(self.download_dir, download.suggested_filename)
+                    await download.save_as(download_path)
+                    logger.info(f"Excel 다운로드 완료: {download_path}")
+                    
+                    df = pd.read_excel(download_path)
+                    logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                    return df
+                    
+                except Exception as e2:
+                    logger.warning(f"Excel 다운로드 실패 (검색 후): {e2}")
             
             return None
             
