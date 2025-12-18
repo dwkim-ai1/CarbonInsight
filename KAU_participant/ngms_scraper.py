@@ -1,17 +1,15 @@
 """
 NGMS Web Scraper
 국가온실가스종합관리시스템 웹 스크래퍼
-Uses Playwright to download Excel files from NGMS website
 
-Note: NGMS uses WebSquare framework which requires JavaScript function calls
-for downloads instead of simple button clicks.
+테이블 데이터를 직접 스크래핑하는 방식 사용
+(Excel 다운로드 방식은 WebSquare 이벤트 핸들러 문제로 작동하지 않음)
 """
 
 import os
 import asyncio
 import tempfile
-import glob
-from pathlib import Path
+import json
 from typing import Dict, Optional, List, Any
 import pandas as pd
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext, Frame
@@ -20,27 +18,23 @@ from config import (
     NGMS_BASE_URL,
     NGMS_MAIN_URL,
     IFRAME_URLS,
-    TAB_SELECTORS,
-    DOWNLOAD_SELECTORS,
     BROWSER_SETTINGS,
-    RETRY_SETTINGS,
     DEBUG,
-    COLUMNS
 )
-from utils import setup_logging, clean_excel_data, save_debug_info, ensure_directory
+from utils import setup_logging, clean_excel_data, ensure_directory
 
 logger = setup_logging()
 
 
 class NGMSScraper:
-    """NGMS 웹사이트 스크래퍼 클래스"""
+    """NGMS 웹사이트 스크래퍼 클래스 - 테이블 스크래핑 방식"""
     
     def __init__(self, download_dir: Optional[str] = None, debug_mode: bool = False):
         """
         Initialize scraper
         
         Args:
-            download_dir: Directory for downloaded files (temp if None)
+            download_dir: Directory for debug files
             debug_mode: Enable debug mode for screenshots and HTML dumps
         """
         self.download_dir = download_dir or tempfile.mkdtemp()
@@ -56,29 +50,7 @@ class NGMSScraper:
         self.page: Optional[Page] = None
         self.playwright = None
         
-        logger.info(f"Scraper 초기화 - 다운로드 경로: {self.download_dir}")
-    
-    async def _save_debug_screenshot(self, name: str) -> None:
-        """Save debug screenshot if debug mode is enabled"""
-        if self.debug_mode and self.page:
-            try:
-                path = os.path.join(self.debug_dir, f"{name}.png")
-                await self.page.screenshot(path=path, full_page=True)
-                logger.debug(f"스크린샷 저장: {path}")
-            except Exception as e:
-                logger.warning(f"스크린샷 저장 실패: {e}")
-    
-    async def _save_debug_html(self, name: str, page: Optional[Page] = None) -> None:
-        """Save debug HTML if debug mode is enabled"""
-        if self.debug_mode:
-            target_page = page or self.page
-            if target_page:
-                try:
-                    html = await target_page.content()
-                    path = save_debug_info(html, f"{name}.html", self.debug_dir)
-                    logger.debug(f"HTML 저장: {path}")
-                except Exception as e:
-                    logger.warning(f"HTML 저장 실패: {e}")
+        logger.info(f"Scraper 초기화 - 디버그 경로: {self.debug_dir}")
     
     async def initialize(self) -> None:
         """Initialize browser and page"""
@@ -88,16 +60,12 @@ class NGMSScraper:
         
         self.browser = await self.playwright.chromium.launch(
             headless=BROWSER_SETTINGS['headless'],
-            slow_mo=BROWSER_SETTINGS['slow_mo']
+            slow_mo=BROWSER_SETTINGS.get('slow_mo', 50)
         )
         
         self.context = await self.browser.new_context(
-            accept_downloads=True,
             viewport={'width': 1920, 'height': 1080}
         )
-        
-        # Set download path
-        self.context.set_default_timeout(BROWSER_SETTINGS['timeout'])
         
         self.page = await self.context.new_page()
         self.page.set_default_timeout(BROWSER_SETTINGS['timeout'])
@@ -112,403 +80,395 @@ class NGMSScraper:
             await self.playwright.stop()
         logger.info("브라우저 종료")
     
-    async def navigate_to_main(self) -> None:
-        """Navigate to NGMS main page"""
-        logger.info(f"메인 페이지 접속: {NGMS_MAIN_URL}")
+    async def _save_debug(self, name: str, page_or_frame=None) -> None:
+        """Save debug screenshot and HTML"""
+        if not self.debug_mode:
+            return
         
-        await self.page.goto(NGMS_MAIN_URL, wait_until='networkidle')
-        await asyncio.sleep(3)  # Wait for page to fully load
-        
-        await self._save_debug_screenshot("01_main_page")
-        await self._save_debug_html("01_main_page")
-        
-        logger.info("메인 페이지 로드 완료")
-    
-    async def _find_iframe(self) -> Optional[Frame]:
-        """
-        Find and return the content iframe
-        
-        Returns:
-            Frame object or None if not found
-        """
-        # Wait for iframe to be available
-        await asyncio.sleep(2)
-        
-        # Try different iframe selectors
-        iframe_selectors = [
-            'iframe[class*="w2tabcontrol"]',
-            'iframe[class*="w2iframe"]',
-            'iframe[src*="OGCMBBS"]',
-            'iframe[src*="websquare"]',
-            'iframe#mf_tac_layout_contents_50900501_body',
-            'iframe#mf_tac_layout_contents_50900502_body',
-            'iframe#mf_tac_layout_contents_50900503_body',
-        ]
-        
-        for selector in iframe_selectors:
-            try:
-                iframe_element = await self.page.query_selector(selector)
-                if iframe_element:
-                    frame = await iframe_element.content_frame()
-                    if frame:
-                        logger.info(f"iframe 발견: {selector}")
-                        return frame
-            except Exception as e:
-                logger.debug(f"iframe 선택자 시도 실패 ({selector}): {e}")
-        
-        # Try to get frames directly
-        frames = self.page.frames
-        logger.info(f"전체 프레임 수: {len(frames)}")
-        
-        for i, frame in enumerate(frames):
-            url = frame.url
-            logger.debug(f"Frame {i}: {url}")
-            if 'OGCMBBS' in url or ('websquare' in url and 'ngms' in url):
-                logger.info(f"iframe 발견 (frame {i}): {url}")
-                return frame
-        
-        # Return the first non-main frame if available
-        if len(frames) > 1:
-            for frame in frames[1:]:
-                if frame.url and 'ngms' in frame.url:
-                    logger.info(f"iframe 발견 (fallback): {frame.url}")
-                    return frame
-        
-        logger.warning("iframe을 찾을 수 없습니다")
-        return None
-    
-    async def _click_tab(self, data_type: str) -> bool:
-        """
-        Click on a specific tab
-        
-        Args:
-            data_type: Type of data tab to click
-            
-        Returns:
-            True if successful
-        """
-        logger.info(f"탭 클릭 시도: {data_type}")
-        
-        # Tab selectors to try
-        tab_selectors = [
-            f'a[menuno*="{data_type[:4]}"]',
-            f'a:has-text("{data_type}")',
-            f'li:has-text("{data_type}") a',
-            TAB_SELECTORS.get(data_type, ''),
-        ]
-        
-        # Menu number mapping
-        menu_numbers = {
-            "할당대상업체": "50900501",
-            "목표관리대상업체": "50900502",
-            "명세서배출량통계": "50900503"
-        }
-        
-        menu_no = menu_numbers.get(data_type)
-        if menu_no:
-            tab_selectors.insert(0, f'#mf_tac_layout_tab_{menu_no} a')
-            tab_selectors.insert(1, f'a[href*="{menu_no}"]')
-        
-        for selector in tab_selectors:
-            if not selector:
-                continue
-            try:
-                element = await self.page.query_selector(selector)
-                if element:
-                    await element.click()
-                    await asyncio.sleep(3)
-                    await self._save_debug_screenshot(f"02_tab_clicked_{data_type}")
-                    logger.info(f"탭 클릭 성공: {selector}")
-                    return True
-            except Exception as e:
-                logger.debug(f"탭 클릭 실패 ({selector}): {e}")
-        
-        logger.warning(f"탭 클릭 실패: {data_type}")
-        return False
-    
-    async def _download_excel_in_frame(
-        self, 
-        frame: Frame, 
-        data_type: str
-    ) -> Optional[str]:
-        """
-        Download Excel file from within a frame using JavaScript
-        
-        Args:
-            frame: Frame containing the download button
-            data_type: Type of data
-            
-        Returns:
-            Path to downloaded file or None
-        """
-        logger.info(f"Excel 다운로드 시도 (프레임 내): {data_type}")
-        
-        # List existing files before download
-        existing_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-        
-        # Different selectors for different data types
-        if data_type == "명세서배출량통계":
-            # For 명세서배출량통계, click the first "다운" button (업체배출량)
-            button_selectors = [
-                'input[value="다운"]',
-                'a:has-text("다운")',
-                'button:has-text("다운")',
-            ]
-        else:
-            button_selectors = [
-                'input[value="Excel 다운로드"]',
-                'input[value*="Excel"]',
-                'a:has-text("Excel 다운로드")',
-                'button:has-text("Excel 다운로드")',
-            ]
-        
-        for selector in button_selectors:
-            try:
-                element = await frame.query_selector(selector)
-                if element:
-                    logger.info(f"다운로드 버튼 발견: {selector}")
-                    
-                    # Get button info for debugging
-                    tag_name = await element.evaluate('el => el.tagName')
-                    onclick = await element.get_attribute('onclick') or ''
-                    element_id = await element.get_attribute('id') or ''
-                    logger.info(f"버튼 정보: tag={tag_name}, id={element_id}, onclick={onclick[:100]}")
-                    
-                    # Method 1: Try using JavaScript click and dispatch events
-                    try:
-                        # Setup download handler with longer timeout
-                        async with self.page.expect_download(timeout=30000) as download_info:
-                            # Try JavaScript click which might trigger WebSquare handlers
-                            await element.evaluate('el => { el.click(); }')
-                            await asyncio.sleep(1)
-                            
-                            # If button has onclick, try executing it
-                            if onclick:
-                                try:
-                                    await frame.evaluate(f'() => {{ {onclick} }}')
-                                except Exception as e:
-                                    logger.debug(f"onclick 실행 실패: {e}")
-                        
-                        download = await download_info.value
-                        filename = download.suggested_filename or f"{data_type}.xlsx"
-                        save_path = os.path.join(self.download_dir, filename)
-                        await download.save_as(save_path)
-                        logger.info(f"다운로드 완료 (Method 1): {save_path}")
-                        return save_path
-                        
-                    except Exception as e:
-                        logger.debug(f"Method 1 (expect_download) 실패: {e}")
-                    
-                    # Method 2: Direct click with download monitoring
-                    try:
-                        await element.click(force=True)
-                        logger.info("버튼 직접 클릭 완료, 다운로드 대기 중...")
-                        
-                        # Wait and check for new files
-                        for _ in range(30):  # Wait up to 30 seconds
-                            await asyncio.sleep(1)
-                            current_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-                            new_files = current_files - existing_files
-                            if new_files:
-                                new_file = list(new_files)[0]
-                                logger.info(f"다운로드 완료 (Method 2): {new_file}")
-                                return new_file
-                        
-                    except Exception as e:
-                        logger.debug(f"Method 2 (direct click) 실패: {e}")
-                    
-                    # Method 3: Try to find and call WebSquare export function
-                    try:
-                        # Common WebSquare Excel export function patterns
-                        js_functions = [
-                            'scwin.btn_excel_onclick()',
-                            'scwin.btn_excelDown_onclick()',
-                            'gcm.downloadExcel()',
-                            'WebSquare.uiplugin.grid.downloadExcel()',
-                        ]
-                        
-                        for js_func in js_functions:
-                            try:
-                                await frame.evaluate(js_func)
-                                logger.info(f"JS 함수 호출: {js_func}")
-                                
-                                # Wait for download
-                                for _ in range(15):
-                                    await asyncio.sleep(1)
-                                    current_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-                                    new_files = current_files - existing_files
-                                    if new_files:
-                                        new_file = list(new_files)[0]
-                                        logger.info(f"다운로드 완료 (Method 3): {new_file}")
-                                        return new_file
-                            except:
-                                continue
-                                
-                    except Exception as e:
-                        logger.debug(f"Method 3 (WebSquare function) 실패: {e}")
-                        
-            except Exception as e:
-                logger.debug(f"다운로드 시도 실패 ({selector}): {e}")
-        
-        # Method 4: Try to intercept network request for Excel download
+        target = page_or_frame or self.page
         try:
-            logger.info("네트워크 요청 가로채기 시도...")
+            # Save screenshot (only for Page, not Frame)
+            if isinstance(target, Page):
+                await target.screenshot(path=os.path.join(self.debug_dir, f"{name}.png"))
             
-            # Find all buttons and try clicking each
-            all_buttons = await frame.query_selector_all('input[type="button"], button, a.btn')
+            # Save HTML
+            html = await target.content()
+            with open(os.path.join(self.debug_dir, f"{name}.html"), 'w', encoding='utf-8') as f:
+                f.write(html)
             
-            for btn in all_buttons:
-                try:
-                    btn_value = await btn.get_attribute('value') or ''
-                    btn_text = await btn.text_content() or ''
-                    
-                    if 'excel' in btn_value.lower() or 'excel' in btn_text.lower() or \
-                       '다운' in btn_value or '다운' in btn_text:
-                        
-                        logger.info(f"추가 버튼 시도: value='{btn_value}', text='{btn_text}'")
-                        
-                        # Try clicking with download context
-                        async with self.context.expect_event('download', timeout=20000) as download_info:
-                            await btn.dispatch_event('click')
-                        
-                        download = await download_info.value
-                        filename = download.suggested_filename or f"{data_type}.xlsx"
-                        save_path = os.path.join(self.download_dir, filename)
-                        await download.save_as(save_path)
-                        logger.info(f"다운로드 완료 (Method 4): {save_path}")
-                        return save_path
-                        
-                except Exception as e:
-                    continue
-                    
+            logger.debug(f"디버그 저장: {name}")
         except Exception as e:
-            logger.debug(f"Method 4 실패: {e}")
-        
-        return None
+            logger.debug(f"디버그 저장 실패 ({name}): {e}")
     
-    async def _download_excel_direct(self, data_type: str) -> Optional[str]:
+    async def _direct_iframe_scrape(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Try direct page navigation to download Excel
+        Directly access iframe URL and scrape data
         
         Args:
             data_type: Type of data
             
         Returns:
-            Path to downloaded file or None
+            DataFrame with scraped data
         """
-        logger.info(f"직접 페이지 방식 다운로드 시도: {data_type}")
+        logger.info(f"직접 iframe 접속 스크래핑: {data_type}")
         
         iframe_url = IFRAME_URLS.get(data_type)
         if not iframe_url:
+            logger.error(f"iframe URL 없음: {data_type}")
             return None
         
-        existing_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-        
-        # Create new page for direct access
         new_page = await self.context.new_page()
+        new_page.set_default_timeout(60000)
         
         try:
+            logger.info(f"URL 접속: {iframe_url}")
             await new_page.goto(iframe_url, wait_until='networkidle')
-            await asyncio.sleep(5)
+            await asyncio.sleep(5)  # Wait for grid to fully load
             
-            if self.debug_mode:
-                safe_name = data_type.replace(' ', '_')
-                await new_page.screenshot(path=os.path.join(self.debug_dir, f"direct_{safe_name}.png"))
-                html = await new_page.content()
-                with open(os.path.join(self.debug_dir, f"direct_{safe_name}.html"), 'w', encoding='utf-8') as f:
-                    f.write(html)
+            await self._save_debug(f"direct_{data_type}", new_page)
             
-            # Search for download button with various selectors
-            if data_type == "명세서배출량통계":
-                selectors = [
-                    'input[value="다운"]',
-                    'a:has-text("다운")',
-                    'button:has-text("다운")',
-                ]
-            else:
-                selectors = [
-                    'input[value="Excel 다운로드"]',
-                    'input[value*="Excel"]',
-                    'a:has-text("Excel 다운로드")',
-                    'button:has-text("Excel 다운로드")',
-                    'a:has-text("Excel")',
-                ]
+            # Try multiple extraction methods
+            df = None
             
-            for selector in selectors:
-                try:
-                    element = await new_page.query_selector(selector)
-                    if element:
-                        logger.info(f"직접 페이지에서 버튼 발견: {selector}")
-                        
-                        # Try with download handler
-                        try:
-                            async with new_page.expect_download(timeout=30000) as download_info:
-                                await element.click(force=True)
-                            
-                            download = await download_info.value
-                            filename = download.suggested_filename or f"{data_type}.xlsx"
-                            save_path = os.path.join(self.download_dir, filename)
-                            await download.save_as(save_path)
-                            logger.info(f"직접 다운로드 성공: {save_path}")
-                            return save_path
-                            
-                        except Exception as e:
-                            logger.debug(f"expect_download 실패: {e}")
-                        
-                        # Try click and wait for file
-                        await element.click(force=True)
-                        for _ in range(20):
-                            await asyncio.sleep(1)
-                            current_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-                            new_files = current_files - existing_files
-                            if new_files:
-                                return list(new_files)[0]
-                        
-                except Exception as e:
-                    logger.debug(f"직접 다운로드 실패 ({selector}): {e}")
+            # Method 1: WebSquare grid getAllJSON
+            df = await self._extract_websquare_grid(new_page, data_type)
+            if df is not None and len(df) > 0:
+                return df
             
-            # Try to find download URLs in page source
-            try:
-                page_content = await new_page.content()
-                
-                # Look for Excel download URLs
-                import re
-                excel_urls = re.findall(r'["\']([^"\']*\.xlsx?[^"\']*)["\']', page_content)
-                excel_urls += re.findall(r'["\']([^"\']*excel[^"\']*)["\']', page_content, re.IGNORECASE)
-                excel_urls += re.findall(r'["\']([^"\']*download[^"\']*)["\']', page_content, re.IGNORECASE)
-                
-                for url in excel_urls[:5]:
-                    if url.startswith('/'):
-                        full_url = f"{NGMS_BASE_URL}{url}"
-                    elif url.startswith('http'):
-                        full_url = url
-                    else:
-                        continue
-                    
-                    logger.info(f"다운로드 URL 시도: {full_url}")
-                    try:
-                        async with new_page.expect_download(timeout=15000) as download_info:
-                            await new_page.goto(full_url)
-                        
-                        download = await download_info.value
-                        filename = download.suggested_filename or f"{data_type}.xlsx"
-                        save_path = os.path.join(self.download_dir, filename)
-                        await download.save_as(save_path)
-                        return save_path
-                    except:
-                        continue
-                        
-            except Exception as e:
-                logger.debug(f"URL 추출 실패: {e}")
+            # Method 2: Extract from visible table DOM
+            df = await self._extract_table_dom(new_page, data_type)
+            if df is not None and len(df) > 0:
+                return df
+            
+            # Method 3: Extract with pagination
+            df = await self._extract_with_pagination(new_page, data_type)
+            if df is not None and len(df) > 0:
+                return df
             
             return None
             
+        except Exception as e:
+            logger.error(f"직접 스크래핑 실패: {e}")
+            return None
         finally:
             await new_page.close()
     
+    async def _extract_websquare_grid(self, page: Page, data_type: str) -> Optional[pd.DataFrame]:
+        """Extract data using WebSquare grid API"""
+        logger.info("WebSquare 그리드 API 추출 시도")
+        
+        # JavaScript to extract all data from WebSquare grid
+        script = """
+        async () => {
+            try {
+                // Wait a bit for WebSquare to be ready
+                await new Promise(r => setTimeout(r, 1000));
+                
+                if (typeof WebSquare === 'undefined') {
+                    return {error: 'WebSquare not found'};
+                }
+                
+                // Find grid component
+                const gridElements = document.querySelectorAll('[id*="grd"], [id*="grid"], .w2grid');
+                
+                for (const gridEl of gridElements) {
+                    const gridId = gridEl.id;
+                    if (!gridId) continue;
+                    
+                    try {
+                        const grid = WebSquare.util.getComponentById(gridId);
+                        if (!grid) continue;
+                        
+                        // Try getAllJSON first
+                        if (typeof grid.getAllJSON === 'function') {
+                            const jsonStr = grid.getAllJSON();
+                            const data = JSON.parse(jsonStr);
+                            if (data && data.length > 0) {
+                                return {success: true, data: data, method: 'getAllJSON', gridId: gridId};
+                            }
+                        }
+                        
+                        // Try getRowCount and getCellData
+                        if (typeof grid.getRowCount === 'function') {
+                            const rowCount = grid.getRowCount();
+                            if (rowCount > 0) {
+                                const data = [];
+                                const colIds = grid.getColumnIDArray ? grid.getColumnIDArray() : [];
+                                
+                                for (let r = 0; r < rowCount; r++) {
+                                    const row = {};
+                                    if (colIds.length > 0) {
+                                        for (const colId of colIds) {
+                                            row[colId] = grid.getCellData(r, colId) || '';
+                                        }
+                                    } else {
+                                        // Fallback to index-based
+                                        for (let c = 0; c < 20; c++) {
+                                            try {
+                                                const val = grid.getCellData(r, c);
+                                                if (val !== undefined) {
+                                                    row['col_' + c] = val;
+                                                }
+                                            } catch(e) { break; }
+                                        }
+                                    }
+                                    data.push(row);
+                                }
+                                
+                                if (data.length > 0) {
+                                    return {success: true, data: data, method: 'getCellData', gridId: gridId};
+                                }
+                            }
+                        }
+                    } catch(e) {
+                        continue;
+                    }
+                }
+                
+                // Try through dataList
+                const dataListIds = ['dataList1', 'dataList', 'dlt_list', 'dlt_data'];
+                for (const dlId of dataListIds) {
+                    try {
+                        const dl = WebSquare.util.getComponentById(dlId);
+                        if (dl && typeof dl.getAllJSON === 'function') {
+                            const jsonStr = dl.getAllJSON();
+                            const data = JSON.parse(jsonStr);
+                            if (data && data.length > 0) {
+                                return {success: true, data: data, method: 'dataList', dataListId: dlId};
+                            }
+                        }
+                    } catch(e) {
+                        continue;
+                    }
+                }
+                
+                return {error: 'No data found in grids'};
+                
+            } catch(e) {
+                return {error: e.message};
+            }
+        }
+        """
+        
+        try:
+            result = await page.evaluate(script)
+            
+            if result and result.get('success') and result.get('data'):
+                data = result['data']
+                df = pd.DataFrame(data)
+                logger.info(f"WebSquare 추출 성공 ({result.get('method')}): {len(df)}행")
+                return df
+            else:
+                logger.debug(f"WebSquare 추출 실패: {result.get('error', 'unknown')}")
+                
+        except Exception as e:
+            logger.debug(f"WebSquare API 실패: {e}")
+        
+        return None
+    
+    async def _extract_table_dom(self, page: Page, data_type: str) -> Optional[pd.DataFrame]:
+        """Extract data from table DOM elements"""
+        logger.info("DOM 테이블 추출 시도")
+        
+        script = """
+        () => {
+            const results = [];
+            const headers = [];
+            
+            // Get headers - try multiple selectors
+            const headerSelectors = [
+                '.gridHeaderTable thead th nobr',
+                '.gridHeaderTable th nobr', 
+                '.w2grid_header th',
+                'thead th',
+                '.gridHeaderTD nobr',
+                '.gridHeaderTD'
+            ];
+            
+            for (const selector of headerSelectors) {
+                document.querySelectorAll(selector).forEach(el => {
+                    const text = el.textContent.trim();
+                    if (text && text !== '' && !headers.includes(text)) {
+                        headers.push(text);
+                    }
+                });
+                if (headers.length > 0) break;
+            }
+            
+            // Get data rows - try multiple selectors
+            const bodySelectors = [
+                '.gridBodyTable tbody tr',
+                '.w2grid tbody tr',
+                '#mf_grd1_body_tbody tr',
+                'table[id*="grid"] tbody tr',
+                'table[id*="grd"] tbody tr'
+            ];
+            
+            let rows = [];
+            for (const selector of bodySelectors) {
+                rows = document.querySelectorAll(selector);
+                if (rows.length > 0) break;
+            }
+            
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                if (cells.length === 0) return;
+                
+                const rowData = {};
+                let hasData = false;
+                
+                cells.forEach((cell, idx) => {
+                    // Get cell content (handle nobr, div, span)
+                    let value = '';
+                    const nobr = cell.querySelector('nobr');
+                    const div = cell.querySelector('div');
+                    
+                    if (nobr) {
+                        value = nobr.textContent.trim();
+                    } else if (div) {
+                        value = div.textContent.trim();
+                    } else {
+                        value = cell.textContent.trim();
+                    }
+                    
+                    const key = headers[idx] || `col_${idx}`;
+                    rowData[key] = value;
+                    
+                    if (value && value.length > 0) {
+                        hasData = true;
+                    }
+                });
+                
+                if (hasData) {
+                    results.push(rowData);
+                }
+            });
+            
+            return {
+                headers: headers,
+                rowCount: results.length,
+                data: results,
+                debug: {
+                    headerSelector: headerSelectors.find(s => document.querySelector(s)),
+                    bodySelector: bodySelectors.find(s => document.querySelector(s))
+                }
+            };
+        }
+        """
+        
+        try:
+            result = await page.evaluate(script)
+            
+            if result and result.get('data') and len(result['data']) > 0:
+                df = pd.DataFrame(result['data'])
+                logger.info(f"DOM 추출 성공: {len(df)}행, 헤더: {result.get('headers', [])[:5]}")
+                logger.debug(f"사용된 선택자: {result.get('debug')}")
+                return df
+            else:
+                logger.debug(f"DOM 추출 실패: 데이터 없음")
+                
+        except Exception as e:
+            logger.debug(f"DOM 테이블 추출 실패: {e}")
+        
+        return None
+    
+    async def _extract_with_pagination(self, page: Page, data_type: str) -> Optional[pd.DataFrame]:
+        """Extract data by iterating through all pages"""
+        logger.info("페이지네이션 추출 시도")
+        
+        all_data = []
+        current_page = 1
+        max_pages = 50  # Safety limit
+        
+        while current_page <= max_pages:
+            # Extract current page data
+            script = """
+            () => {
+                const results = [];
+                const rows = document.querySelectorAll('.gridBodyTable tbody tr, table[id*="grid"] tbody tr');
+                
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td');
+                    const rowData = [];
+                    cells.forEach(cell => {
+                        const nobr = cell.querySelector('nobr');
+                        rowData.push(nobr ? nobr.textContent.trim() : cell.textContent.trim());
+                    });
+                    if (rowData.some(v => v && v.length > 0)) {
+                        results.push(rowData);
+                    }
+                });
+                
+                return results;
+            }
+            """
+            
+            try:
+                page_data = await page.evaluate(script)
+                
+                if page_data and len(page_data) > 0:
+                    all_data.extend(page_data)
+                    logger.debug(f"페이지 {current_page}: {len(page_data)}행")
+                
+                # Try to click next page
+                next_clicked = False
+                next_selectors = [
+                    f'a[href*="goPage({current_page + 1})"]',
+                    f'a:text("{current_page + 1}")',
+                    'a.next',
+                    'img[alt*="다음"]',
+                ]
+                
+                for selector in next_selectors:
+                    try:
+                        next_btn = await page.query_selector(selector)
+                        if next_btn:
+                            await next_btn.click()
+                            await asyncio.sleep(1)
+                            next_clicked = True
+                            break
+                    except:
+                        continue
+                
+                if not next_clicked:
+                    break
+                
+                current_page += 1
+                
+            except Exception as e:
+                logger.debug(f"페이지 {current_page} 추출 실패: {e}")
+                break
+        
+        if all_data:
+            # Get headers for column names
+            header_script = """
+            () => {
+                const headers = [];
+                document.querySelectorAll('.gridHeaderTable th nobr, thead th').forEach(el => {
+                    headers.push(el.textContent.trim());
+                });
+                return headers;
+            }
+            """
+            
+            try:
+                headers = await page.evaluate(header_script)
+                if headers:
+                    df = pd.DataFrame(all_data, columns=headers[:len(all_data[0])] if all_data else headers)
+                else:
+                    df = pd.DataFrame(all_data)
+                
+                logger.info(f"페이지네이션 추출 성공: {len(df)}행")
+                return df
+            except:
+                df = pd.DataFrame(all_data)
+                return df
+        
+        return None
+    
     async def download_data(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Download and parse Excel data for a specific data type
+        Download data for a specific data type
         
         Args:
             data_type: Type of data to download
@@ -516,134 +476,134 @@ class NGMSScraper:
         Returns:
             DataFrame with downloaded data or None
         """
-        logger.info(f"=== {data_type} 데이터 다운로드 시작 ===")
+        logger.info(f"=== {data_type} 데이터 수집 시작 ===")
         
-        downloaded_path = None
-        existing_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
+        # 명세서배출량통계는 별도 처리 (연도별 다운로드 목록 형태)
+        if data_type == "명세서배출량통계":
+            df = await self._scrape_emission_statistics()
+        else:
+            # Use direct iframe access (more reliable)
+            df = await self._direct_iframe_scrape(data_type)
         
-        # Setup network request monitoring for download URLs
-        download_urls = []
+        if df is not None and len(df) > 0:
+            # Clean the data
+            df = clean_excel_data(df)
+            
+            # Remove any completely empty columns
+            df = df.dropna(axis=1, how='all')
+            
+            logger.info(f"데이터 수집 완료: {len(df)}행, {len(df.columns)}열")
+            logger.info(f"컬럼: {list(df.columns)}")
+            
+            return df
+        else:
+            logger.error(f"데이터 수집 실패: {data_type}")
+            return None
+    
+    async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
+        """
+        명세서배출량통계 전용 스크래퍼
+        이 페이지는 연도별 다운로드 목록 형태로, 최신 연도의 업체배출량 데이터를 스크래핑
         
-        async def handle_response(response):
-            """Monitor responses for Excel files"""
-            try:
-                content_type = response.headers.get('content-type', '')
-                content_disp = response.headers.get('content-disposition', '')
-                
-                if ('excel' in content_type.lower() or 
-                    'spreadsheet' in content_type.lower() or
-                    'octet-stream' in content_type.lower() or
-                    '.xls' in content_disp.lower()):
-                    download_urls.append(response.url)
-                    logger.info(f"Excel 응답 감지: {response.url[:100]}")
-            except:
-                pass
+        Returns:
+            DataFrame with emission statistics
+        """
+        logger.info("명세서배출량통계 스크래핑 (연도별 목록에서 최신 데이터)")
         
-        self.page.on('response', handle_response)
+        iframe_url = IFRAME_URLS.get("명세서배출량통계")
+        new_page = await self.context.new_page()
+        new_page.set_default_timeout(60000)
         
         try:
-            # Strategy 1: Navigate and use iframe
-            try:
-                await self.navigate_to_main()
-                
-                # Click on the appropriate tab
-                await self._click_tab(data_type)
-                
-                # Wait for content to load
-                await asyncio.sleep(3)
-                
-                # Find iframe
-                frame = await self._find_iframe()
-                
-                if frame:
-                    # Save debug info
-                    if self.debug_mode:
-                        try:
-                            iframe_html = await frame.content()
-                            with open(os.path.join(self.debug_dir, f"iframe_{data_type}.html"), 'w', encoding='utf-8') as f:
-                                f.write(iframe_html)
-                            await self.page.screenshot(path=os.path.join(self.debug_dir, f"before_download_{data_type}.png"))
-                        except Exception as e:
-                            logger.debug(f"디버그 저장 실패: {e}")
-                    
-                    downloaded_path = await self._download_excel_in_frame(frame, data_type)
-                
-            except Exception as e:
-                logger.warning(f"iframe 방식 실패: {e}")
+            await new_page.goto(iframe_url, wait_until='networkidle')
+            await asyncio.sleep(3)
             
-            # Strategy 2: Direct page access
-            if not downloaded_path:
-                try:
-                    downloaded_path = await self._download_excel_direct(data_type)
-                except Exception as e:
-                    logger.warning(f"직접 접속 방식 실패: {e}")
+            await self._save_debug("emission_stats_page", new_page)
             
-            # Strategy 3: Check for any new downloaded files
-            if not downloaded_path:
-                current_files = set(glob.glob(os.path.join(self.download_dir, "*.xls*")))
-                new_files = current_files - existing_files
-                if new_files:
-                    downloaded_path = list(new_files)[0]
-                    logger.info(f"새 파일 발견: {downloaded_path}")
+            # 이 페이지에서 최신 연도의 "다운" 버튼을 찾아 클릭해서 데이터를 가져옴
+            # 하지만 다운로드가 작동하지 않으므로, 테이블에서 데이터 추출 시도
             
-            # Strategy 4: Try downloading from captured URLs
-            if not downloaded_path and download_urls:
-                for url in download_urls:
-                    try:
-                        logger.info(f"캡처된 URL에서 다운로드 시도: {url[:100]}")
-                        new_page = await self.context.new_page()
-                        async with new_page.expect_download(timeout=30000) as download_info:
-                            await new_page.goto(url)
-                        download = await download_info.value
-                        filename = download.suggested_filename or f"{data_type}.xlsx"
-                        downloaded_path = os.path.join(self.download_dir, filename)
-                        await download.save_as(downloaded_path)
-                        await new_page.close()
-                        logger.info(f"URL 다운로드 성공: {downloaded_path}")
-                        break
-                    except Exception as e:
-                        logger.debug(f"URL 다운로드 실패: {e}")
-                        try:
-                            await new_page.close()
-                        except:
-                            pass
-        
-        finally:
-            # Remove listener
-            try:
-                self.page.remove_listener('response', handle_response)
-            except:
-                pass
-        
-        # Parse downloaded file
-        if downloaded_path and os.path.exists(downloaded_path):
-            try:
-                # Try different Excel engines
-                try:
-                    df = pd.read_excel(downloaded_path, engine='openpyxl')
-                except:
-                    df = pd.read_excel(downloaded_path)
+            # 먼저 목록에서 연도 정보 추출
+            year_list_script = """
+            () => {
+                const rows = document.querySelectorAll('table tbody tr, .listTable tbody tr');
+                const years = [];
                 
-                df = clean_excel_data(df)
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length > 0) {
+                        const yearText = cells[0].textContent.trim();
+                        if (yearText && yearText.match(/\\d{4}/)) {
+                            years.push(yearText);
+                        }
+                    }
+                });
                 
-                logger.info(f"데이터 파싱 완료: {len(df)}행")
-                logger.info(f"컬럼: {list(df.columns)}")
+                return years;
+            }
+            """
+            
+            years = await new_page.evaluate(year_list_script)
+            logger.info(f"발견된 연도: {years[:5]}...")
+            
+            # 목록 형태의 데이터 추출 (배출년도, 제목, 다운로드 가능 여부 등)
+            list_script = """
+            () => {
+                const results = [];
+                const rows = document.querySelectorAll('table tbody tr, .w2grid tbody tr');
+                
+                rows.forEach((row, idx) => {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length >= 2) {
+                        const rowData = {
+                            '배출년도': cells[0]?.textContent?.trim() || '',
+                            '제목': cells[1]?.textContent?.trim() || '',
+                        };
+                        
+                        // 다운로드 버튼 존재 여부 확인
+                        for (let i = 2; i < cells.length; i++) {
+                            const btn = cells[i].querySelector('a, button, input');
+                            if (btn) {
+                                const colName = `다운${i-1}`;
+                                rowData[colName] = '가능';
+                            }
+                        }
+                        
+                        if (rowData['배출년도'] || rowData['제목']) {
+                            results.push(rowData);
+                        }
+                    }
+                });
+                
+                return results;
+            }
+            """
+            
+            list_data = await new_page.evaluate(list_script)
+            
+            if list_data and len(list_data) > 0:
+                # 목록 형태 데이터 반환 (다운로드 불가 시 대안)
+                df = pd.DataFrame(list_data)
+                logger.info(f"목록 형태 데이터 추출: {len(df)}행")
+                
+                # Note: 실제 상세 배출량 데이터는 Excel 다운로드가 필요하지만
+                # 다운로드가 작동하지 않아 목록만 반환
+                logger.warning("명세서배출량통계: 상세 데이터는 Excel 다운로드 필요 (현재 미지원)")
                 
                 return df
-                
-            except Exception as e:
-                logger.error(f"Excel 파싱 실패: {e}")
-                # Try to save the file content for debugging
-                if self.debug_mode:
-                    try:
-                        import shutil
-                        shutil.copy(downloaded_path, os.path.join(self.debug_dir, f"failed_{data_type}.xlsx"))
-                    except:
-                        pass
-                return None
-        else:
-            logger.error(f"다운로드된 파일 없음: {data_type}")
+            
+            # Alternative: Try WebSquare grid extraction anyway
+            df = await self._extract_websquare_grid(new_page, "명세서배출량통계")
+            if df is not None and len(df) > 0:
+                return df
+            
             return None
+            
+        except Exception as e:
+            logger.error(f"명세서배출량통계 스크래핑 실패: {e}")
+            return None
+        finally:
+            await new_page.close()
     
     async def download_all(self) -> Dict[str, pd.DataFrame]:
         """
@@ -657,12 +617,13 @@ class NGMSScraper:
         for data_type in ['할당대상업체', '목표관리대상업체', '명세서배출량통계']:
             try:
                 df = await self.download_data(data_type)
-                if df is not None:
+                if df is not None and len(df) > 0:
                     results[data_type] = df
+                    logger.info(f"✓ {data_type}: {len(df)}행 수집됨")
                 else:
-                    logger.warning(f"{data_type} 다운로드 실패")
+                    logger.warning(f"✗ {data_type}: 데이터 없음")
             except Exception as e:
-                logger.error(f"{data_type} 처리 중 오류: {e}")
+                logger.error(f"✗ {data_type} 처리 중 오류: {e}")
         
         return results
 
@@ -686,13 +647,13 @@ async def run_scraper(debug_mode: bool = False) -> Dict[str, pd.DataFrame]:
         await scraper.close()
 
 
-# For testing/debugging
 if __name__ == "__main__":
     async def main():
         results = await run_scraper(debug_mode=True)
         for data_type, df in results.items():
             print(f"\n=== {data_type} ===")
             print(f"Shape: {df.shape}")
+            print(f"Columns: {list(df.columns)}")
             print(df.head())
     
     asyncio.run(main())
