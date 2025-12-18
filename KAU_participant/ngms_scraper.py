@@ -125,39 +125,133 @@ class NGMSScraper:
             await new_page.goto(iframe_url, wait_until='networkidle')
             await asyncio.sleep(3)  # Wait for page to fully load
             
+            # 페이지 로드 후 스크린샷
+            await self._save_debug(f"01_page_loaded_{data_type}", new_page)
+            
             # ★★★ 핵심: 검색 버튼 클릭하여 데이터 로드 ★★★
-            await self._click_search_button(new_page, data_type)
+            search_clicked = await self._click_search_button(new_page, data_type)
+            logger.info(f"검색 버튼 클릭 결과: {search_clicked}")
             
-            # Wait for data to load after search
-            await asyncio.sleep(5)
-            
-            await self._save_debug(f"after_search_{data_type}", new_page)
+            # 검색 후 스크린샷
+            await self._save_debug(f"02_after_search_{data_type}", new_page)
             
             # Try multiple extraction methods
             df = None
             
             # Method 1: WebSquare grid getAllJSON
+            logger.info("Method 1: WebSquare 그리드 API 추출 시도")
             df = await self._extract_websquare_grid(new_page, data_type)
             if df is not None and len(df) > 0:
+                logger.info(f"WebSquare 추출 성공: {len(df)}행")
                 return df
             
             # Method 2: Extract from visible table DOM
+            logger.info("Method 2: DOM 테이블 추출 시도")
             df = await self._extract_table_dom(new_page, data_type)
             if df is not None and len(df) > 0:
+                logger.info(f"DOM 추출 성공: {len(df)}행")
                 return df
             
             # Method 3: Extract with pagination
+            logger.info("Method 3: 페이지네이션 추출 시도")
             df = await self._extract_with_pagination(new_page, data_type)
             if df is not None and len(df) > 0:
+                logger.info(f"페이지네이션 추출 성공: {len(df)}행")
                 return df
+            
+            # 추출 실패 시 디버그 정보 수집
+            await self._save_debug(f"03_extraction_failed_{data_type}", new_page)
+            await self._log_page_structure(new_page, data_type)
             
             return None
             
         except Exception as e:
             logger.error(f"직접 스크래핑 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
         finally:
             await new_page.close()
+    
+    async def _log_page_structure(self, page: Page, data_type: str) -> None:
+        """Log page structure for debugging"""
+        try:
+            debug_script = """
+            () => {
+                const info = {
+                    url: window.location.href,
+                    title: document.title,
+                    hasWebSquare: typeof WebSquare !== 'undefined',
+                    tables: [],
+                    grids: [],
+                    forms: [],
+                    buttons: []
+                };
+                
+                // Find tables
+                document.querySelectorAll('table').forEach((t, i) => {
+                    info.tables.push({
+                        index: i,
+                        id: t.id,
+                        className: t.className,
+                        rows: t.querySelectorAll('tr').length
+                    });
+                });
+                
+                // Find grids
+                document.querySelectorAll('[id*="grd"], [id*="grid"], .w2grid').forEach((g, i) => {
+                    info.grids.push({
+                        index: i,
+                        id: g.id,
+                        className: g.className
+                    });
+                });
+                
+                // Find buttons
+                document.querySelectorAll('input[type="button"], button').forEach((b, i) => {
+                    if (i < 10) {
+                        info.buttons.push({
+                            index: i,
+                            id: b.id,
+                            value: b.value || b.textContent?.trim(),
+                            type: b.type
+                        });
+                    }
+                });
+                
+                // Check WebSquare components
+                if (typeof WebSquare !== 'undefined') {
+                    try {
+                        const gridIds = ['grd1', 'mf_grd1', 'grid1'];
+                        for (const id of gridIds) {
+                            try {
+                                const g = WebSquare.util.getComponentById(id);
+                                if (g) {
+                                    info.grids.push({
+                                        wsId: id,
+                                        type: g.getType ? g.getType() : 'unknown',
+                                        rowCount: g.getRowCount ? g.getRowCount() : 'N/A'
+                                    });
+                                }
+                            } catch(e) {}
+                        }
+                    } catch(e) {}
+                }
+                
+                return info;
+            }
+            """
+            
+            info = await page.evaluate(debug_script)
+            logger.info(f"페이지 구조 ({data_type}):")
+            logger.info(f"  - URL: {info.get('url', 'N/A')}")
+            logger.info(f"  - WebSquare: {info.get('hasWebSquare', False)}")
+            logger.info(f"  - Tables: {len(info.get('tables', []))}")
+            logger.info(f"  - Grids: {info.get('grids', [])}")
+            logger.info(f"  - Buttons: {info.get('buttons', [])[:5]}")
+            
+        except Exception as e:
+            logger.debug(f"페이지 구조 로깅 실패: {e}")
     
     async def _click_search_button(self, page: Page, data_type: str) -> bool:
         """
@@ -180,51 +274,207 @@ class NGMSScraper:
             'button:has-text("조회")',
             'a:has-text("검색")',
             'a:has-text("조회")',
-            '#mf_trigger1',  # WebSquare 기본 버튼 ID 패턴
+            '#mf_trigger1',
             'input[type="button"][value*="검색"]',
             'input[type="button"][value*="조회"]',
         ]
         
+        clicked = False
         for selector in search_selectors:
             try:
                 button = await page.query_selector(selector)
                 if button:
                     logger.info(f"검색 버튼 발견: {selector}")
-                    await button.click()
                     
-                    # Wait for data loading
-                    await asyncio.sleep(3)
+                    # 버튼 정보 로깅
+                    btn_id = await button.get_attribute('id') or 'N/A'
+                    btn_onclick = await button.get_attribute('onclick') or 'N/A'
+                    logger.info(f"버튼 정보: id={btn_id}, onclick={btn_onclick[:50] if btn_onclick else 'N/A'}")
                     
-                    # Wait for network to be idle (data loaded)
+                    # ★ 방법 1: Playwright click (force=True로 강제 클릭)
                     try:
-                        await page.wait_for_load_state('networkidle', timeout=10000)
-                    except:
-                        pass
+                        await button.click(force=True)
+                        logger.info("Playwright force click 완료")
+                        clicked = True
+                    except Exception as e:
+                        logger.debug(f"Playwright click 실패: {e}")
                     
-                    logger.info("검색 버튼 클릭 완료, 데이터 로딩 대기...")
-                    return True
+                    # ★ 방법 2: JavaScript로 클릭 이벤트 발생
+                    if not clicked:
+                        try:
+                            await button.evaluate('el => el.click()')
+                            logger.info("JS el.click() 완료")
+                            clicked = True
+                        except Exception as e:
+                            logger.debug(f"JS click 실패: {e}")
+                    
+                    # ★ 방법 3: dispatchEvent로 클릭 이벤트 발생
+                    if not clicked:
+                        try:
+                            await button.evaluate('''el => {
+                                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                            }''')
+                            logger.info("JS dispatchEvent click 완료")
+                            clicked = True
+                        except Exception as e:
+                            logger.debug(f"dispatchEvent 실패: {e}")
+                    
+                    if clicked:
+                        break
+                        
             except Exception as e:
-                logger.debug(f"검색 버튼 클릭 실패 ({selector}): {e}")
+                logger.debug(f"검색 버튼 처리 실패 ({selector}): {e}")
                 continue
         
-        # JavaScript로 검색 함수 직접 호출 시도
-        js_search_functions = [
-            'scwin.btn_search_onclick()',
-            'scwin.fn_search()',
-            'fn_search()',
-            'doSearch()',
-        ]
+        # ★ 방법 4: JavaScript로 검색 함수 직접 호출 (WebSquare)
+        if not clicked:
+            js_search_functions = [
+                'scwin.btn_search_onclick()',
+                'scwin.fn_search()',
+                'fn_search()',
+                'doSearch()',
+                'gcm.fn_search()',
+            ]
+            
+            for js_func in js_search_functions:
+                try:
+                    await page.evaluate(js_func)
+                    logger.info(f"JS 검색 함수 호출 성공: {js_func}")
+                    clicked = True
+                    break
+                except Exception as e:
+                    logger.debug(f"JS 함수 호출 실패 ({js_func}): {e}")
         
-        for js_func in js_search_functions:
+        if not clicked:
+            logger.warning("검색 버튼을 찾거나 클릭할 수 없습니다")
+            return False
+        
+        # ★★★ 데이터 로딩 완료 대기 ★★★
+        logger.info("검색 버튼 클릭 완료, 데이터 로딩 대기...")
+        
+        # 1. 잠시 대기 (검색 요청이 서버로 전송되는 시간)
+        await asyncio.sleep(2)
+        
+        # 2. 네트워크 idle 대기
+        try:
+            await page.wait_for_load_state('networkidle', timeout=30000)
+            logger.info("네트워크 idle 상태")
+        except Exception as e:
+            logger.debug(f"networkidle 대기 실패: {e}")
+        
+        # 3. 그리드에 데이터가 나타날 때까지 대기 (최대 30초)
+        data_loaded = await self._wait_for_grid_data(page, timeout=30)
+        
+        if data_loaded:
+            logger.info("데이터 로딩 완료 확인됨")
+        else:
+            logger.warning("데이터 로딩 확인 실패 - 추가 대기 후 진행")
+            await asyncio.sleep(5)  # 추가 5초 대기
+        
+        return True
+    
+    async def _wait_for_grid_data(self, page: Page, timeout: int = 30) -> bool:
+        """
+        Wait for grid data to be loaded
+        
+        Args:
+            page: Page object
+            timeout: Maximum wait time in seconds
+            
+        Returns:
+            True if data was loaded
+        """
+        logger.info(f"그리드 데이터 로딩 대기 시작 (최대 {timeout}초)")
+        
+        check_script = """
+        () => {
+            const result = {loaded: false, debug: {}};
+            
+            // Check 1: WebSquare grid row count
+            result.debug.hasWebSquare = typeof WebSquare !== 'undefined';
+            
+            if (typeof WebSquare !== 'undefined') {
+                const gridIds = ['grd1', 'mf_grd1', 'grid1', 'grdList'];
+                for (const id of gridIds) {
+                    try {
+                        const grid = WebSquare.util.getComponentById(id);
+                        if (grid && typeof grid.getRowCount === 'function') {
+                            const count = grid.getRowCount();
+                            result.debug[`grid_${id}`] = count;
+                            if (count > 0) {
+                                result.loaded = true;
+                                result.method = 'websquare';
+                                result.gridId = id;
+                                result.count = count;
+                                return result;
+                            }
+                        }
+                    } catch(e) {
+                        result.debug[`grid_${id}_error`] = e.message;
+                    }
+                }
+            }
+            
+            // Check 2: DOM table rows
+            const rowSelectors = [
+                '.gridBodyTable tbody tr',
+                '.w2grid tbody tr',
+                'table[id*="grd"] tbody tr',
+                '#mf_grd1_body_tbody tr'
+            ];
+            
+            for (const selector of rowSelectors) {
+                const rows = document.querySelectorAll(selector);
+                result.debug[`dom_${selector.replace(/[^a-zA-Z0-9]/g, '_')}`] = rows.length;
+                
+                if (rows.length > 0) {
+                    // Check if rows have actual content
+                    for (const row of rows) {
+                        const cells = row.querySelectorAll('td');
+                        for (const cell of cells) {
+                            const text = cell.textContent.trim();
+                            if (text && text.length > 0 && text !== '-') {
+                                result.loaded = true;
+                                result.method = 'dom';
+                                result.selector = selector;
+                                result.count = rows.length;
+                                return result;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Check 3: Loading indicator
+            const loadingIndicators = document.querySelectorAll('.loading, .w2loading, [class*="loading"]');
+            result.debug.loadingIndicators = loadingIndicators.length;
+            
+            return result;
+        }
+        """
+        
+        start_time = asyncio.get_event_loop().time()
+        check_count = 0
+        
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
             try:
-                await page.evaluate(js_func)
-                logger.info(f"JS 검색 함수 호출: {js_func}")
-                await asyncio.sleep(3)
-                return True
-            except:
-                continue
+                result = await page.evaluate(check_script)
+                check_count += 1
+                
+                # 10번마다 또는 마지막에 디버그 정보 로깅
+                if check_count % 10 == 1 or result.get('loaded'):
+                    logger.info(f"데이터 로딩 체크 #{check_count}: loaded={result.get('loaded')}, debug={result.get('debug', {})}")
+                
+                if result.get('loaded'):
+                    logger.info(f"데이터 로딩 감지: method={result.get('method')}, count={result.get('count')}")
+                    return True
+                
+            except Exception as e:
+                logger.debug(f"데이터 로딩 확인 실패: {e}")
+            
+            await asyncio.sleep(1)
         
-        logger.warning("검색 버튼을 찾을 수 없습니다")
+        logger.warning(f"데이터 로딩 타임아웃 ({timeout}초)")
         return False
     
     async def _extract_websquare_grid(self, page: Page, data_type: str) -> Optional[pd.DataFrame]:
