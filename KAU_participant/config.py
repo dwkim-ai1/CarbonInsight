@@ -7,7 +7,7 @@ NGMS Data Scraper Configuration
 NGMS_BASE_URL = "https://ngms.gir.go.kr:8443"
 NGMS_MAIN_URL = f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS021V.xml&menuNo=50900501"
 
-# Page URLs for each data type (올바른 URL: subMain.do)
+# Page URLs - subMain.do로 접속 후 iframe 내에서 작업
 IFRAME_URLS = {
     "할당대상업체": f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS021V.xml&menuNo=50900501",
     "목표관리대상업체": f"{NGMS_BASE_URL}/subMain.do?link=/hom/bbs/OGCMBBS022V.xml&menuNo=50900502",
