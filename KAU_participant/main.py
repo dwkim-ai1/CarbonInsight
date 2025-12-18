@@ -6,6 +6,10 @@ This script:
 1. Downloads data from NGMS website
 2. Updates Google Sheets with latest data
 3. Stacks changes to history sheets
+
+Historical Mode:
+- When HISTORICAL_MODE=true, collects past data with specified filters
+- Only appends to stack sheets, does not update NGMS_ sheets
 """
 
 import asyncio
@@ -26,6 +30,21 @@ logger = setup_logging()
 DEBUG_DIR = os.environ.get('DEBUG_DIR', '/tmp/ngms_debug')
 
 
+def get_historical_params() -> dict:
+    """
+    Get historical data collection parameters from environment variables
+    
+    Returns:
+        Dictionary with filter parameters
+    """
+    return {
+        'historical_mode': os.environ.get('HISTORICAL_MODE', 'false').lower() == 'true',
+        'plan_period': os.environ.get('PLAN_PERIOD', ''),
+        'designation_year': os.environ.get('DESIGNATION_YEAR', ''),
+        'emission_year': os.environ.get('EMISSION_YEAR', ''),
+    }
+
+
 async def main() -> dict:
     """
     Main execution function
@@ -38,10 +57,21 @@ async def main() -> dict:
     logger.info(f"실행 시간: {get_current_timestamp()}")
     logger.info("=" * 60)
     
+    # Check historical mode
+    hist_params = get_historical_params()
+    historical_mode = hist_params['historical_mode']
+    
+    if historical_mode:
+        logger.info("★★★ 과거 데이터 수집 모드 ★★★")
+        logger.info(f"  계획기간: {hist_params['plan_period'] or '전체'}")
+        logger.info(f"  지정연도: {hist_params['designation_year'] or '전체'}")
+        logger.info(f"  배출년도: {hist_params['emission_year'] or '전체'}")
+    
     results = {
         'success': False,
         'data_types': {},
-        'errors': []
+        'errors': [],
+        'historical_mode': historical_mode
     }
     
     # Ensure debug directory exists
@@ -73,7 +103,16 @@ async def main() -> dict:
         
         try:
             await scraper.initialize()
-            downloaded_data = await scraper.download_all()
+            
+            # 과거 데이터 수집 모드면 필터 적용
+            if historical_mode:
+                downloaded_data = await scraper.download_all(
+                    plan_period=hist_params['plan_period'],
+                    designation_year=hist_params['designation_year'],
+                    emission_year=hist_params['emission_year']
+                )
+            else:
+                downloaded_data = await scraper.download_all()
         finally:
             await scraper.close()
         
@@ -94,80 +133,77 @@ async def main() -> dict:
                 logger.info(f"\n--- {data_type} 처리 중 ---")
                 logger.info(f"데이터 크기: {df.shape}")
                 
-                result = sheets_handler.process_update(data_type, df)
-                results['data_types'][data_type] = {
-                    'success': True,
-                    'rows': len(df),
-                    'has_changes': result['has_changes'],
-                    'summary': result['summary']
-                }
-                
+                # 과거 데이터 수집 모드: 스택 시트에만 추가
+                if historical_mode:
+                    result = sheets_handler.append_historical_data(data_type, df)
+                    results['data_types'][data_type] = {
+                        'success': True,
+                        'rows': len(df),
+                        'mode': 'historical',
+                        'appended': result.get('rows_added', 0)
+                    }
+                    logger.info(f"✓ {data_type}: {len(df)}행 → 스택 시트에 {result.get('rows_added', 0)}행 추가")
+                else:
+                    # 일반 모드: NGMS_ 시트 업데이트 + 변경사항 스택
+                    result = sheets_handler.process_update(data_type, df)
+                    results['data_types'][data_type] = {
+                        'success': True,
+                        'rows': len(df),
+                        'mode': 'normal',
+                        'changes': result.get('has_changes', False)
+                    }
+                    logger.info(f"✓ {data_type}: {len(df)}행 수집됨")
+                    
             except Exception as e:
-                error_msg = f"{data_type} 업데이트 실패: {str(e)}"
-                logger.error(error_msg)
+                error_msg = f"{data_type}: {str(e)}"
+                logger.error(f"✗ {error_msg}")
                 results['errors'].append(error_msg)
                 results['data_types'][data_type] = {
                     'success': False,
                     'error': str(e)
                 }
         
-        results['success'] = len(results['errors']) == 0
+        # Determine overall success
+        successful_types = [k for k, v in results['data_types'].items() if v.get('success')]
+        results['success'] = len(successful_types) > 0
         
     except Exception as e:
-        error_msg = f"전체 프로세스 실패: {str(e)}"
-        logger.error(error_msg)
-        results['errors'].append(error_msg)
-        
-        # Save error log
-        if debug_mode:
-            try:
-                with open(os.path.join(DEBUG_DIR, 'error.log'), 'w') as f:
-                    f.write(f"{get_current_timestamp()}\n{error_msg}\n")
-            except:
-                pass
+        logger.error(f"실행 중 오류 발생: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        results['errors'].append(str(e))
     
     # Print summary
     logger.info("\n" + "=" * 60)
     logger.info("실행 결과 요약")
     logger.info("=" * 60)
     
-    for data_type, result in results['data_types'].items():
-        status = "✅ 성공" if result.get('success') else "❌ 실패"
+    for data_type, info in results['data_types'].items():
+        status = "✅ 성공" if info.get('success') else "❌ 실패"
         logger.info(f"\n{data_type}: {status}")
-        if result.get('success'):
-            logger.info(f"  - 레코드 수: {result.get('rows', 0)}건")
-            logger.info(f"  - 변경 여부: {'있음' if result.get('has_changes') else '없음'}")
+        if info.get('success'):
+            if info.get('mode') == 'historical':
+                logger.info(f"  - 추가된 행 수: {info.get('appended', 0)}건")
+            else:
+                logger.info(f"  - 레코드 수: {info.get('rows', 0)}건")
+                logger.info(f"  - 변경 여부: {'있음' if info.get('changes') else '없음'}")
         else:
-            logger.info(f"  - 오류: {result.get('error', 'Unknown')}")
+            logger.info(f"  - 오류: {info.get('error', 'Unknown')}")
     
     if results['errors']:
         logger.warning(f"\n총 {len(results['errors'])}개의 오류 발생")
     
-    logger.info("\n" + "=" * 60)
+    logger.info(f"\n{'='*60}")
     logger.info(f"전체 결과: {'성공' if results['success'] else '실패'}")
     logger.info("=" * 60)
     
     return results
 
 
-def run():
-    """Entry point for script execution"""
-    try:
-        results = asyncio.run(main())
-        
-        # Exit with appropriate code
-        if results['success']:
-            sys.exit(0)
-        else:
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        logger.info("\n사용자에 의해 중단됨")
-        sys.exit(130)
-    except Exception as e:
-        logger.error(f"예상치 못한 오류: {e}")
-        sys.exit(1)
-
-
 if __name__ == "__main__":
-    run()
+    result = asyncio.run(main())
+    
+    # Exit with appropriate code
+    if not result['success']:
+        sys.exit(1)
+    sys.exit(0)
