@@ -237,6 +237,69 @@ class GoogleSheetsHandler:
             "changed_count": len(changes.get('changed', pd.DataFrame()))
         }
     
+    def append_historical_data(
+        self, 
+        data_type: str, 
+        data: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """
+        Append historical data directly to stack sheet (without updating NGMS_ sheet)
+        
+        Args:
+            data_type: Type of data
+            data: Historical data to append
+            
+        Returns:
+            Result dictionary with rows_added count
+        """
+        logger.info(f"=== {data_type} 과거 데이터 추가 ===")
+        
+        sheet_name = SHEET_NAMES[f"{data_type}_stack"]
+        columns = COLUMNS[data_type]
+        
+        # Columns for stack sheet include metadata
+        stack_columns = columns + ['_변경유형', '_변경일시']
+        
+        worksheet = self._get_or_create_worksheet(sheet_name, stack_columns)
+        
+        update_time = get_current_timestamp()
+        
+        # Prepare data
+        df_copy = data.copy()
+        df_copy['_변경유형'] = '과거'  # Mark as historical data
+        df_copy['_변경일시'] = update_time
+        
+        # Ensure columns are in correct order
+        for col in stack_columns:
+            if col not in df_copy.columns:
+                df_copy[col] = ''
+        
+        # Only keep stack columns
+        available_cols = [c for c in stack_columns if c in df_copy.columns]
+        df_copy = df_copy[available_cols]
+        
+        records_to_add = df_copy.fillna('').values.tolist()
+        
+        if records_to_add:
+            # Get current row count
+            existing_data = worksheet.get_all_values()
+            next_row = len(existing_data) + 1
+            
+            # Append new records
+            worksheet.update(f'A{next_row}', records_to_add)
+            rows_added = len(records_to_add)
+            
+            logger.info(f"과거 데이터 추가 완료: {sheet_name} (+{rows_added}행)")
+        else:
+            rows_added = 0
+            logger.info(f"추가할 데이터 없음: {sheet_name}")
+        
+        return {
+            "sheet_name": sheet_name,
+            "rows_added": rows_added,
+            "update_time": update_time
+        }
+    
     def process_update(
         self, 
         data_type: str, 
