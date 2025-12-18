@@ -343,9 +343,13 @@ class NGMSScraper:
                     no_new_rows_count = 0
                 
                 # ★★★ 다양한 스크롤 방식 시도 ★★★
-                await self._scroll_grid(iframe_locator, grid_container)
+                scroll_success = await self._scroll_grid(iframe_locator, grid_container)
                 
-                await asyncio.sleep(0.5)  # 데이터 로드 대기
+                if scroll_success:
+                    await asyncio.sleep(2)  # 데이터 로드 대기 (2초)
+                else:
+                    await asyncio.sleep(1)
+                    
                 scroll_count += 1
             
             logger.info(f"스크롤 완료: 총 {len(all_rows_data)}행 추출")
@@ -372,39 +376,73 @@ class NGMSScraper:
             logger.error(traceback.format_exc())
             return None
     
-    async def _scroll_grid(self, iframe_locator, grid_container) -> None:
+    async def _scroll_grid(self, iframe_locator, grid_container) -> bool:
         """
         다양한 방식으로 그리드 스크롤 시도
+        Returns: 스크롤 성공 여부
         """
-        scroll_methods = [
-            # 방법 1: 그리드 컨테이너 scrollTop
-            ('scrollTop', lambda: grid_container.evaluate('el => { el.scrollTop += 500; return el.scrollTop; }')),
+        # ★★★ 방법 1: 테이블 영역에 포커스 후 PageDown ★★★
+        try:
+            # 테이블 영역 클릭하여 포커스
+            table_area = iframe_locator.locator('table[id*="body_table"], .gridBodyTable, .w2grid').first
+            await table_area.click()
+            await asyncio.sleep(0.2)
             
-            # 방법 2: 마우스 휠 이벤트
-            ('wheel', lambda: grid_container.evaluate('''el => {
-                el.dispatchEvent(new WheelEvent('wheel', {deltaY: 300, bubbles: true}));
-            }''')),
+            # PageDown 여러 번
+            for _ in range(3):
+                await iframe_locator.locator('body').press('PageDown')
+                await asyncio.sleep(0.1)
             
-            # 방법 3: PageDown 키
-            ('PageDown', lambda: iframe_locator.locator('body').press('PageDown')),
-            
-            # 방법 4: ArrowDown 키 (여러 번)
-            ('ArrowDown', lambda: iframe_locator.locator('body').press('ArrowDown')),
-            
-            # 방법 5: 스크롤바 클릭
-            ('scrollbar', lambda: iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY"]').first.click()),
-        ]
+            logger.debug("스크롤 방식 'PageDown' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"PageDown 스크롤 실패: {e}")
         
-        for method_name, method_func in scroll_methods:
-            try:
-                await method_func()
-                logger.debug(f"스크롤 방식 '{method_name}' 성공")
-                return
-            except Exception as e:
-                logger.debug(f"스크롤 방식 '{method_name}' 실패: {e}")
-                continue
+        # ★★★ 방법 2: 마지막 행 클릭 후 ArrowDown ★★★
+        try:
+            last_row = iframe_locator.locator('tbody tr').last
+            await last_row.click()
+            await asyncio.sleep(0.2)
+            
+            for _ in range(10):
+                await iframe_locator.locator('body').press('ArrowDown')
+                await asyncio.sleep(0.05)
+            
+            logger.debug("스크롤 방식 'ArrowDown' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"ArrowDown 스크롤 실패: {e}")
         
-        logger.debug("모든 스크롤 방식 실패")
+        # ★★★ 방법 3: JavaScript scrollIntoView ★★★
+        try:
+            await iframe_locator.locator('tbody tr').last.evaluate('el => el.scrollIntoView({behavior: "smooth", block: "end"})')
+            logger.debug("스크롤 방식 'scrollIntoView' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"scrollIntoView 스크롤 실패: {e}")
+        
+        # ★★★ 방법 4: 스크롤바 영역 클릭 ★★★
+        try:
+            scrollbar = iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY_div"]').first
+            box = await scrollbar.bounding_box()
+            if box:
+                # 스크롤바 하단 클릭
+                await scrollbar.click(position={'x': box['width'] / 2, 'y': box['height'] * 0.8})
+                logger.debug("스크롤 방식 'scrollbar click' 성공")
+                return True
+        except Exception as e:
+            logger.debug(f"scrollbar 스크롤 실패: {e}")
+        
+        # ★★★ 방법 5: JavaScript scrollTop ★★★
+        try:
+            await grid_container.evaluate('el => { el.scrollTop += 500; }')
+            logger.debug("스크롤 방식 'scrollTop' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"scrollTop 스크롤 실패: {e}")
+        
+        logger.warning("모든 스크롤 방식 실패")
+        return False
     
     async def _extract_from_iframe_websquare(self, frame, data_type: str) -> Optional[pd.DataFrame]:
         """iframe 내에서 WebSquare API로 데이터 추출"""
@@ -2109,26 +2147,12 @@ class NGMSScraper:
                     await excel_btn.click()
                     logger.info("Excel 버튼 클릭 완료")
                     
-                    # ★★★ 확인 대화상자 처리 ★★★
+                    # ★★★ 확인 대화상자 처리 - Enter 키 사용 ★★★
                     await asyncio.sleep(1)  # 대화상자 표시 대기
                     
-                    # 확인 버튼 찾기 (iframe 내부)
-                    try:
-                        confirm_btn = iframe_locator.locator('input[value="확인"], button:has-text("확인"), a:has-text("확인")')
-                        if await confirm_btn.count() > 0:
-                            await confirm_btn.first.click()
-                            logger.info("확인 버튼 클릭 완료")
-                    except Exception as e:
-                        logger.debug(f"iframe 내 확인 버튼 실패: {e}")
-                        
-                        # 페이지 레벨에서 확인 버튼 찾기
-                        try:
-                            page_confirm = new_page.locator('input[value="확인"], button:has-text("확인")')
-                            if await page_confirm.count() > 0:
-                                await page_confirm.first.click()
-                                logger.info("확인 버튼 클릭 완료 (페이지 레벨)")
-                        except:
-                            pass
+                    # Enter 키로 확인
+                    await new_page.keyboard.press('Enter')
+                    logger.info("Enter 키 입력 (확인 대화상자)")
                     
                     logger.info("다운로드 대기 중...")
                 
@@ -2177,15 +2201,10 @@ class NGMSScraper:
                         await excel_btn.click()
                         logger.info("Excel 버튼 클릭 완료 (검색 후)")
                         
-                        # ★★★ 확인 대화상자 처리 ★★★
+                        # ★★★ Enter 키로 확인 대화상자 처리 ★★★
                         await asyncio.sleep(1)
-                        try:
-                            confirm_btn = iframe_locator.locator('input[value="확인"], button:has-text("확인")')
-                            if await confirm_btn.count() > 0:
-                                await confirm_btn.first.click()
-                                logger.info("확인 버튼 클릭 완료 (검색 후)")
-                        except:
-                            pass
+                        await new_page.keyboard.press('Enter')
+                        logger.info("Enter 키 입력 (확인 대화상자)")
                         
                         logger.info("다운로드 대기 중...")
                     
