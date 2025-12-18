@@ -103,7 +103,7 @@ class NGMSScraper:
     
     async def _direct_iframe_scrape(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Access page and scrape data from iframe
+        subMain.do 접속 후 iframe 내에서 테이블 스크래핑
         
         Args:
             data_type: Type of data
@@ -111,7 +111,7 @@ class NGMSScraper:
         Returns:
             DataFrame with scraped data
         """
-        logger.info(f"페이지 접속 스크래핑: {data_type}")
+        logger.info(f"테이블 스크래핑 시작: {data_type}")
         
         page_url = IFRAME_URLS.get(data_type)
         if not page_url:
@@ -124,7 +124,7 @@ class NGMSScraper:
         try:
             logger.info(f"URL 접속: {page_url}")
             
-            # networkidle 대신 load 사용 (더 빠름), 재시도 포함
+            # 재시도 로직
             for attempt in range(3):
                 try:
                     await new_page.goto(page_url, wait_until='load', timeout=90000)
@@ -134,71 +134,56 @@ class NGMSScraper:
                         logger.warning(f"접속 시도 {attempt+1} 실패, 재시도: {e}")
                         await asyncio.sleep(5)
                     else:
-                        # 마지막 시도: domcontentloaded로
                         try:
                             await new_page.goto(page_url, wait_until='domcontentloaded', timeout=90000)
                         except Exception as e2:
                             logger.error(f"모든 접속 시도 실패: {e2}")
                             raise
             
-            # 추가 대기 (JavaScript 로딩)
+            # 페이지 완전 로드 대기
             await asyncio.sleep(5)
             
             # 페이지 로드 후 스크린샷
-            await self._save_debug(f"01_page_loaded_{data_type}", new_page)
+            await self._save_debug(f"scrape_01_page_loaded_{data_type}", new_page)
             
-            # ★★★ iframe 찾기 ★★★
-            frame = await self._find_content_frame(new_page, data_type)
-            
+            # ★★★ iframe 내부에서 작업 ★★★
+            frame = await self._get_content_iframe(new_page, data_type)
             if frame is None:
-                logger.warning("iframe을 찾지 못함, 메인 페이지에서 시도")
-                frame = new_page  # fallback to main page
+                logger.error("iframe을 찾을 수 없음")
+                return None
+            
+            # ★★★ 검색 버튼 클릭 ★★★
+            logger.info("검색 버튼 클릭 시도...")
+            search_clicked = await self._click_search_in_iframe(frame, data_type)
+            if search_clicked:
+                logger.info("검색 버튼 클릭 성공")
+                await asyncio.sleep(5)
             else:
-                logger.info(f"iframe 발견: {frame.url}")
+                logger.warning("검색 버튼 클릭 실패")
             
-            # ★★★ 핵심: 검색 버튼 클릭하여 데이터 로드 ★★★
-            search_clicked = await self._click_search_button_in_frame(frame, data_type)
-            logger.info(f"검색 버튼 클릭 결과: {search_clicked}")
+            # 검색 후 스크린샷
+            await self._save_debug(f"scrape_02_after_search_{data_type}", new_page)
             
-            # ★★★ 검색 후 frame 다시 가져오기 (iframe이 새로고침될 수 있음) ★★★
-            await asyncio.sleep(3)
-            frame = await self._find_content_frame(new_page, data_type)
-            if frame is None:
-                frame = new_page
-                logger.info("검색 후 메인 페이지 사용")
-            else:
-                logger.info(f"검색 후 iframe 재취득: {frame.url}")
-            
-            # 검색 후 스크린샷 (메인 페이지에서)
-            await self._save_debug(f"02_after_search_{data_type}", new_page)
-            
-            # Try multiple extraction methods
+            # ★★★ iframe 내에서 데이터 추출 ★★★
             df = None
             
-            # Method 1: WebSquare grid getAllJSON
+            # Method 1: WebSquare grid API
             logger.info("Method 1: WebSquare 그리드 API 추출 시도")
-            df = await self._extract_websquare_grid_from_frame(frame, data_type)
+            df = await self._extract_from_iframe_websquare(frame, data_type)
             if df is not None and len(df) > 0:
                 logger.info(f"WebSquare 추출 성공: {len(df)}행")
                 return df
             
-            # Method 2: Extract from visible table DOM
+            # Method 2: DOM table
             logger.info("Method 2: DOM 테이블 추출 시도")
-            df = await self._extract_table_dom_from_frame(frame, data_type)
+            df = await self._extract_from_iframe_dom(frame, data_type)
             if df is not None and len(df) > 0:
                 logger.info(f"DOM 추출 성공: {len(df)}행")
                 return df
             
-            # Method 3: Extract with pagination
-            logger.info("Method 3: 페이지네이션 추출 시도")
-            df = await self._extract_with_pagination_from_frame(frame, data_type)
-            if df is not None and len(df) > 0:
-                logger.info(f"페이지네이션 추출 성공: {len(df)}행")
-                return df
-            
             # 추출 실패 시 디버그 정보 수집
-            await self._save_debug(f"03_extraction_failed_{data_type}", new_page)
-            await self._log_frame_structure(frame, data_type)
+            await self._save_debug(f"scrape_03_extraction_failed_{data_type}", new_page)
+            await self._log_iframe_structure(frame, data_type)
             
             return None
             
@@ -209,6 +194,249 @@ class NGMSScraper:
             return None
         finally:
             await new_page.close()
+    
+    async def _extract_from_iframe_websquare(self, frame, data_type: str) -> Optional[pd.DataFrame]:
+        """iframe 내에서 WebSquare API로 데이터 추출"""
+        script = """
+        async () => {
+            const result = {success: false, data: null, error: null, debug: {}};
+            
+            try {
+                // WebSquare 존재 확인
+                result.debug.hasWebSquare = typeof WebSquare !== 'undefined';
+                
+                if (typeof WebSquare === 'undefined') {
+                    result.error = 'WebSquare not found';
+                    return result;
+                }
+                
+                // 그리드 찾기
+                const gridIds = ['grd1', 'mf_grd1', 'grid1', 'mf_grid1'];
+                let grid = null;
+                
+                for (const id of gridIds) {
+                    try {
+                        const g = WebSquare.util.getComponentById(id);
+                        if (g && typeof g.getRowCount === 'function') {
+                            const count = g.getRowCount();
+                            result.debug[id] = count;
+                            if (count > 0) {
+                                grid = g;
+                                result.debug.foundGrid = id;
+                                break;
+                            }
+                        }
+                    } catch(e) {}
+                }
+                
+                if (!grid) {
+                    result.error = 'No grid with data found';
+                    return result;
+                }
+                
+                // 데이터 추출
+                const rowCount = grid.getRowCount();
+                result.debug.rowCount = rowCount;
+                
+                // getAllJSON 시도
+                if (typeof grid.getAllJSON === 'function') {
+                    try {
+                        const jsonStr = grid.getAllJSON();
+                        const data = JSON.parse(jsonStr);
+                        if (data && data.length > 0) {
+                            result.success = true;
+                            result.data = data;
+                            return result;
+                        }
+                    } catch(e) {
+                        result.debug.getAllJSONError = e.message;
+                    }
+                }
+                
+                // getCellData 시도
+                if (typeof grid.getCellData === 'function') {
+                    const data = [];
+                    let colIds = [];
+                    
+                    // 컬럼 ID 가져오기
+                    if (grid.getColumnIDArray) {
+                        colIds = grid.getColumnIDArray();
+                    }
+                    if (colIds.length === 0) {
+                        for (let c = 0; c < 20; c++) {
+                            try {
+                                const id = grid.getColumnID ? grid.getColumnID(c) : null;
+                                if (id) colIds.push(id);
+                                else break;
+                            } catch(e) { break; }
+                        }
+                    }
+                    
+                    result.debug.colCount = colIds.length;
+                    
+                    for (let r = 0; r < rowCount; r++) {
+                        const row = {};
+                        for (const colId of colIds) {
+                            try {
+                                row[colId] = grid.getCellData(r, colId) || '';
+                            } catch(e) {}
+                        }
+                        data.push(row);
+                    }
+                    
+                    if (data.length > 0) {
+                        result.success = true;
+                        result.data = data;
+                        return result;
+                    }
+                }
+                
+                result.error = 'Failed to extract data';
+                return result;
+                
+            } catch(e) {
+                result.error = e.message;
+                return result;
+            }
+        }
+        """
+        
+        try:
+            result = await frame.evaluate(script)
+            
+            if result is None:
+                logger.warning("WebSquare evaluate 결과가 None")
+                return None
+            
+            logger.info(f"WebSquare 결과: success={result.get('success')}, debug={result.get('debug', {})}")
+            
+            if result.get('error'):
+                logger.warning(f"WebSquare 오류: {result.get('error')}")
+            
+            if result.get('success') and result.get('data'):
+                df = pd.DataFrame(result['data'])
+                return df
+                
+        except Exception as e:
+            logger.error(f"WebSquare 추출 실패: {e}")
+        
+        return None
+    
+    async def _extract_from_iframe_dom(self, frame, data_type: str) -> Optional[pd.DataFrame]:
+        """iframe 내에서 DOM 테이블 추출"""
+        script = """
+        () => {
+            const result = {headers: [], rows: [], debug: {}};
+            
+            // 헤더 추출
+            const headerSelectors = [
+                '.gridHeaderTable th nobr',
+                '.gridHeaderTable th',
+                'thead th'
+            ];
+            
+            for (const sel of headerSelectors) {
+                const elements = document.querySelectorAll(sel);
+                result.debug[`header_${sel}`] = elements.length;
+                
+                elements.forEach(el => {
+                    const text = el.textContent.trim();
+                    if (text && !result.headers.includes(text)) {
+                        result.headers.push(text);
+                    }
+                });
+                
+                if (result.headers.length > 0) break;
+            }
+            
+            // 행 추출
+            const rowSelectors = [
+                '.gridBodyTable tbody tr',
+                'table[id*="grd"] tbody tr',
+                '.w2grid tbody tr',
+                'tbody tr'
+            ];
+            
+            for (const sel of rowSelectors) {
+                const rows = document.querySelectorAll(sel);
+                result.debug[`rows_${sel}`] = rows.length;
+                
+                if (rows.length > 0) {
+                    rows.forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        const rowData = [];
+                        
+                        cells.forEach(cell => {
+                            const nobr = cell.querySelector('nobr');
+                            const text = nobr ? nobr.textContent.trim() : cell.textContent.trim();
+                            rowData.push(text);
+                        });
+                        
+                        // 빈 행 제외
+                        if (rowData.some(v => v && v.length > 0)) {
+                            result.rows.push(rowData);
+                        }
+                    });
+                    
+                    if (result.rows.length > 0) break;
+                }
+            }
+            
+            result.debug.finalHeaders = result.headers.length;
+            result.debug.finalRows = result.rows.length;
+            
+            return result;
+        }
+        """
+        
+        try:
+            result = await frame.evaluate(script)
+            
+            if result is None:
+                logger.warning("DOM evaluate 결과가 None")
+                return None
+            
+            logger.info(f"DOM 결과: headers={len(result.get('headers', []))}, rows={len(result.get('rows', []))}, debug={result.get('debug', {})}")
+            
+            rows = result.get('rows', [])
+            if rows and len(rows) > 0:
+                headers = result.get('headers', [])
+                
+                if headers and len(headers) >= len(rows[0]):
+                    df = pd.DataFrame(rows, columns=headers[:len(rows[0])])
+                else:
+                    df = pd.DataFrame(rows)
+                
+                return df
+                
+        except Exception as e:
+            logger.error(f"DOM 추출 실패: {e}")
+        
+        return None
+    
+    async def _log_iframe_structure(self, frame, data_type: str) -> None:
+        """iframe 구조 로깅"""
+        try:
+            script = """
+            () => {
+                return {
+                    url: window.location.href,
+                    hasWebSquare: typeof WebSquare !== 'undefined',
+                    tables: document.querySelectorAll('table').length,
+                    grids: document.querySelectorAll('[id*="grd"]').length,
+                    tbodyRows: document.querySelectorAll('tbody tr').length,
+                    buttons: Array.from(document.querySelectorAll('input[type="button"]'))
+                        .slice(0, 5)
+                        .map(b => ({id: b.id, value: b.value}))
+                };
+            }
+            """
+            
+            info = await frame.evaluate(script)
+            logger.info(f"iframe 구조 ({data_type}): {info}")
+            
+        except Exception as e:
+            logger.debug(f"iframe 구조 로깅 실패: {e}")
     
     async def _find_content_frame(self, page: Page, data_type: str) -> Optional[Frame]:
         """
@@ -478,6 +706,91 @@ class NGMSScraper:
             
         except Exception as e:
             logger.debug(f"Frame 구조 로깅 실패: {e}")
+    
+    async def _log_page_structure(self, page: Page, data_type: str) -> None:
+        """Log page structure for debugging"""
+        try:
+            debug_script = """
+            () => {
+                const info = {
+                    url: window.location.href,
+                    title: document.title,
+                    hasWebSquare: typeof WebSquare !== 'undefined',
+                    tables: [],
+                    grids: [],
+                    buttons: []
+                };
+                
+                // Find tables
+                document.querySelectorAll('table').forEach((t, i) => {
+                    if (i < 5) {
+                        info.tables.push({
+                            index: i,
+                            id: t.id,
+                            className: t.className.substring(0, 50),
+                            rows: t.querySelectorAll('tr').length
+                        });
+                    }
+                });
+                
+                // Find grids
+                document.querySelectorAll('[id*="grd"], [id*="grid"], .w2grid').forEach((g, i) => {
+                    if (i < 5) {
+                        info.grids.push({
+                            index: i,
+                            id: g.id,
+                            className: g.className.substring(0, 50)
+                        });
+                    }
+                });
+                
+                // Find buttons
+                document.querySelectorAll('input[type="button"], button').forEach((b, i) => {
+                    if (i < 10) {
+                        info.buttons.push({
+                            index: i,
+                            id: b.id,
+                            value: b.value || b.textContent?.trim().substring(0, 20),
+                            type: b.type
+                        });
+                    }
+                });
+                
+                // Check WebSquare components
+                if (typeof WebSquare !== 'undefined') {
+                    try {
+                        const gridIds = ['grd1', 'mf_grd1', 'grid1'];
+                        info.wsGrids = [];
+                        for (const id of gridIds) {
+                            try {
+                                const g = WebSquare.util.getComponentById(id);
+                                if (g) {
+                                    info.wsGrids.push({
+                                        id: id,
+                                        type: g.getType ? g.getType() : 'unknown',
+                                        rowCount: g.getRowCount ? g.getRowCount() : 'N/A'
+                                    });
+                                }
+                            } catch(e) {}
+                        }
+                    } catch(e) {}
+                }
+                
+                return info;
+            }
+            """
+            
+            info = await page.evaluate(debug_script)
+            logger.info(f"페이지 구조 ({data_type}):")
+            logger.info(f"  - URL: {info.get('url', 'N/A')}")
+            logger.info(f"  - WebSquare: {info.get('hasWebSquare', False)}")
+            logger.info(f"  - Tables: {info.get('tables', [])}")
+            logger.info(f"  - Grids: {info.get('grids', [])}")
+            logger.info(f"  - WS Grids: {info.get('wsGrids', [])}")
+            logger.info(f"  - Buttons: {info.get('buttons', [])[:5]}")
+            
+        except Exception as e:
+            logger.debug(f"페이지 구조 로깅 실패: {e}")
     
     async def _extract_websquare_grid_from_frame(self, frame, data_type: str) -> Optional[pd.DataFrame]:
         """Extract data using WebSquare grid API from frame"""
@@ -1506,13 +1819,27 @@ class NGMSScraper:
             df = None
             
             # 방법 1: Excel 다운로드 시도
+            logger.info("=" * 40)
             logger.info("방법 1: Excel 다운로드 시도")
+            logger.info("=" * 40)
             df = await self._download_excel_from_page(data_type)
             
-            # 방법 2: 테이블 스크래핑 시도
+            if df is not None and len(df) > 0:
+                logger.info(f"Excel 다운로드 성공: {len(df)}행")
+            else:
+                logger.warning("Excel 다운로드 실패 또는 데이터 없음")
+            
+            # 방법 2: 테이블 스크래핑 시도 (Excel 실패 시)
             if df is None or len(df) == 0:
-                logger.info("방법 2: 테이블 스크래핑 시도")
+                logger.info("=" * 40)
+                logger.info("방법 2: 테이블 스크래핑으로 폴백")
+                logger.info("=" * 40)
                 df = await self._direct_iframe_scrape(data_type)
+                
+                if df is not None and len(df) > 0:
+                    logger.info(f"테이블 스크래핑 성공: {len(df)}행")
+                else:
+                    logger.warning("테이블 스크래핑도 실패")
         
         if df is not None and len(df) > 0:
             # Clean the data
@@ -1526,12 +1853,12 @@ class NGMSScraper:
             
             return df
         else:
-            logger.error(f"데이터 수집 실패: {data_type}")
+            logger.error(f"데이터 수집 실패: {data_type} (모든 방법 실패)")
             return None
     
     async def _download_excel_from_page(self, data_type: str) -> Optional[pd.DataFrame]:
         """
-        Excel 파일 다운로드 시도
+        Excel 파일 다운로드 시도 (subMain.do 접속 후 iframe 내에서 작업)
         """
         page_url = IFRAME_URLS.get(data_type)
         if not page_url:
@@ -1541,103 +1868,72 @@ class NGMSScraper:
         new_page.set_default_timeout(120000)  # 2분 타임아웃
         
         try:
-            logger.info(f"URL 접속: {page_url}")
+            logger.info(f"Excel 다운로드 URL 접속: {page_url}")
             
-            # networkidle 대신 load 사용 (더 빠름)
+            # load 사용 (더 빠름)
             try:
                 await new_page.goto(page_url, wait_until='load', timeout=90000)
             except Exception as e:
                 logger.warning(f"load 대기 실패, domcontentloaded로 재시도: {e}")
                 await new_page.goto(page_url, wait_until='domcontentloaded', timeout=90000)
             
-            # 추가 대기 (JavaScript 로딩)
-            await asyncio.sleep(5)
-            
-            # iframe 찾기
-            frame = await self._find_content_frame(new_page, data_type)
-            if frame is None:
-                logger.warning("iframe을 찾지 못함")
-                frame = new_page
-            else:
-                logger.info(f"iframe 발견")
-            
-            # 검색 버튼 클릭하여 데이터 로드
-            await self._click_search_button_in_frame(frame, data_type)
+            # 페이지 완전 로드 대기
             await asyncio.sleep(5)
             
             # 스크린샷 저장
-            await self._save_debug(f"before_excel_{data_type}", new_page)
+            await self._save_debug(f"excel_01_page_loaded_{data_type}", new_page)
             
-            # Excel 다운로드 버튼 찾기
-            excel_selectors = [
-                'input[value="Excel 다운로드"]',
-                'input[value*="Excel"]',
-                'button:has-text("Excel")',
-                'a:has-text("Excel 다운로드")',
-                '#mf_trigger2',
-            ]
+            # ★★★ iframe 내부에서 작업 ★★★
+            frame = await self._get_content_iframe(new_page, data_type)
+            if frame is None:
+                logger.error("iframe을 찾을 수 없음")
+                return None
             
-            download_button = None
-            for selector in excel_selectors:
-                try:
-                    btn = await frame.query_selector(selector)
-                    if btn:
-                        download_button = btn
-                        logger.info(f"Excel 버튼 발견: {selector}")
-                        break
-                except:
-                    continue
+            # ★★★ 검색 버튼 클릭 ★★★
+            logger.info("검색 버튼 클릭 시도...")
+            search_clicked = await self._click_search_in_iframe(frame, data_type)
+            if search_clicked:
+                logger.info("검색 버튼 클릭 성공")
+                await asyncio.sleep(5)
+            else:
+                logger.warning("검색 버튼 클릭 실패")
             
-            if not download_button:
+            # 스크린샷 저장
+            await self._save_debug(f"excel_02_after_search_{data_type}", new_page)
+            
+            # ★★★ Excel 다운로드 버튼 클릭 ★★★
+            logger.info("Excel 다운로드 버튼 찾기...")
+            excel_button = await frame.query_selector('input[value="Excel 다운로드"], input[value*="Excel"]')
+            
+            if not excel_button:
                 logger.warning("Excel 다운로드 버튼을 찾을 수 없음")
                 return None
+            
+            logger.info("Excel 버튼 발견, 다운로드 시도...")
             
             # 다운로드 시도
             download_path = None
             
             try:
-                # expect_download 사용
                 async with new_page.expect_download(timeout=120000) as download_info:
-                    await download_button.click(force=True)
-                    logger.info("Excel 버튼 클릭, 다운로드 대기...")
+                    await excel_button.click(force=True)
+                    logger.info("Excel 버튼 클릭 완료, 다운로드 대기...")
                 
                 download = await download_info.value
                 download_path = os.path.join(self.download_dir, download.suggested_filename)
                 await download.save_as(download_path)
-                logger.info(f"다운로드 완료: {download_path}")
+                logger.info(f"Excel 다운로드 완료: {download_path}")
                 
             except Exception as e:
                 logger.warning(f"expect_download 실패: {e}")
-                
-                # JavaScript로 다운로드 함수 직접 호출
-                js_funcs = [
-                    'scwin.btn_excel_onclick()',
-                    'scwin.fn_excel()',
-                    'fn_excelDownload()',
-                ]
-                for js_func in js_funcs:
-                    try:
-                        await frame.evaluate(js_func)
-                        logger.info(f"JS 함수 호출: {js_func}")
-                        await asyncio.sleep(15)
-                        break
-                    except:
-                        continue
-                
-                # 다운로드 폴더에서 파일 찾기
-                import glob
-                await asyncio.sleep(5)
-                excel_files = glob.glob(os.path.join(self.download_dir, '*.xlsx')) + \
-                              glob.glob(os.path.join(self.download_dir, '*.xls'))
-                if excel_files:
-                    download_path = max(excel_files, key=os.path.getctime)
-                    logger.info(f"다운로드된 파일 발견: {download_path}")
+                return None
             
             if download_path and os.path.exists(download_path):
                 df = pd.read_excel(download_path)
                 logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                 return df
             
+            logger.warning("Excel 다운로드 실패: 파일을 찾을 수 없음")
             return None
             
         except Exception as e:
@@ -1647,6 +1943,72 @@ class NGMSScraper:
             return None
         finally:
             await new_page.close()
+    
+    async def _get_content_iframe(self, page: Page, data_type: str):
+        """
+        iframe element를 찾아서 content_frame 반환
+        """
+        logger.info("iframe 찾기 (content_frame 방식)...")
+        
+        # iframe element 찾기
+        iframe_selectors = [
+            'iframe[src*="websquare"]',
+            'iframe[src*="ngms.do"]',
+            'iframe[id*="tac_layout"]',
+            'iframe.w2iframe',
+            'iframe',
+        ]
+        
+        for selector in iframe_selectors:
+            try:
+                iframe_element = await page.query_selector(selector)
+                if iframe_element:
+                    frame = await iframe_element.content_frame()
+                    if frame:
+                        frame_url = frame.url
+                        logger.info(f"iframe 발견: selector={selector}, url={frame_url[:80]}...")
+                        
+                        # frame이 로드될 때까지 대기
+                        await asyncio.sleep(2)
+                        
+                        # frame 내용 확인
+                        try:
+                            ready_state = await frame.evaluate('document.readyState')
+                            logger.info(f"iframe readyState: {ready_state}")
+                        except Exception as e:
+                            logger.warning(f"readyState 확인 실패: {e}")
+                        
+                        return frame
+            except Exception as e:
+                logger.debug(f"iframe 선택자 실패 ({selector}): {e}")
+                continue
+        
+        logger.error("iframe을 찾을 수 없음")
+        return None
+    
+    async def _click_search_in_iframe(self, frame, data_type: str) -> bool:
+        """
+        iframe 내에서 검색 버튼 클릭
+        """
+        search_selectors = [
+            'input[value="검색"]',
+            'input[value="조회"]', 
+            'button:has-text("검색")',
+            'button:has-text("조회")',
+        ]
+        
+        for selector in search_selectors:
+            try:
+                button = await frame.query_selector(selector)
+                if button:
+                    logger.info(f"검색 버튼 발견: {selector}")
+                    await button.click(force=True)
+                    return True
+            except Exception as e:
+                logger.debug(f"검색 버튼 클릭 실패 ({selector}): {e}")
+                continue
+        
+        return False
     
     async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
         """
@@ -1663,6 +2025,8 @@ class NGMSScraper:
         new_page.set_default_timeout(120000)  # 2분 타임아웃
         
         try:
+            logger.info(f"URL 접속: {page_url}")
+            
             # 재시도 로직
             for attempt in range(3):
                 try:
@@ -1680,71 +2044,46 @@ class NGMSScraper:
             
             await asyncio.sleep(5)
             
-            # iframe 찾기
-            frame = await self._find_content_frame(new_page, "명세서배출량통계")
+            # 스크린샷
+            await self._save_debug("emission_stats_01_loaded", new_page)
+            
+            # ★★★ iframe 내부에서 작업 ★★★
+            frame = await self._get_content_iframe(new_page, "명세서배출량통계")
             if frame is None:
-                logger.warning("iframe을 찾지 못함, 메인 페이지에서 시도")
-                frame = new_page
-            else:
-                logger.info(f"iframe 발견: {frame.url}")
+                logger.error("iframe을 찾을 수 없음")
+                return None
             
             # ★★★ 조회 버튼 클릭 ★★★
-            await self._click_search_button_in_frame(frame, "명세서배출량통계")
-            await asyncio.sleep(3)
+            logger.info("조회 버튼 클릭 시도...")
+            search_clicked = await self._click_search_in_iframe(frame, "명세서배출량통계")
+            if search_clicked:
+                logger.info("조회 버튼 클릭 성공")
+                await asyncio.sleep(5)
+            else:
+                logger.warning("조회 버튼 클릭 실패")
             
-            await self._save_debug("emission_stats_after_search", new_page)
+            await self._save_debug("emission_stats_02_after_search", new_page)
             
-            # WebSquare 그리드에서 데이터 추출 시도
-            df = await self._extract_websquare_grid_from_frame(frame, "명세서배출량통계")
+            # ★★★ iframe 내에서 데이터 추출 ★★★
+            df = await self._extract_from_iframe_websquare(frame, "명세서배출량통계")
             if df is not None and len(df) > 0:
+                logger.info(f"WebSquare 추출 성공: {len(df)}행")
                 return df
             
-            # DOM에서 테이블 추출 시도
-            df = await self._extract_table_dom_from_frame(frame, "명세서배출량통계")
+            df = await self._extract_from_iframe_dom(frame, "명세서배출량통계")
             if df is not None and len(df) > 0:
+                logger.info(f"DOM 추출 성공: {len(df)}행")
                 return df
             
-            # 목록 형태 데이터 추출 (fallback)
-            list_script = """
-            () => {
-                const results = [];
-                const rows = document.querySelectorAll('table tbody tr, .w2grid tbody tr, .gridBodyTable tbody tr');
-                
-                rows.forEach((row, idx) => {
-                    const cells = row.querySelectorAll('td');
-                    if (cells.length >= 2) {
-                        const rowData = {};
-                        cells.forEach((cell, cellIdx) => {
-                            const nobr = cell.querySelector('nobr');
-                            const value = nobr ? nobr.textContent.trim() : cell.textContent.trim();
-                            rowData[`col_${cellIdx}`] = value;
-                        });
-                        
-                        // Only add rows with actual data
-                        if (Object.values(rowData).some(v => v && v.length > 0)) {
-                            results.push(rowData);
-                        }
-                    }
-                });
-                
-                return results;
-            }
-            """
-            
-            try:
-                list_data = await frame.evaluate(list_script)
-                
-                if list_data and len(list_data) > 0:
-                    df = pd.DataFrame(list_data)
-                    logger.info(f"목록 형태 데이터 추출: {len(df)}행")
-                    return df
-            except Exception as e:
-                logger.debug(f"목록 추출 실패: {e}")
+            # 디버그 정보
+            await self._log_iframe_structure(frame, "명세서배출량통계")
             
             return None
             
         except Exception as e:
             logger.error(f"명세서배출량통계 스크래핑 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
         finally:
             await new_page.close()
