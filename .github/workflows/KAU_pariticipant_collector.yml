@@ -24,7 +24,7 @@ jobs:
   update-ngms-data:
     name: Update NGMS Data
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45  # 타임아웃 45분으로 증가
     
     steps:
       - name: Checkout repository
@@ -49,6 +49,27 @@ jobs:
       
       - name: Create debug directory
         run: mkdir -p /tmp/ngms_debug
+      
+      - name: Test network connectivity to NGMS
+        id: network_test
+        continue-on-error: true
+        run: |
+          echo "Testing connection to NGMS server..."
+          curl -sS --connect-timeout 30 --max-time 60 -I "https://ngms.gir.go.kr:8443" > /tmp/ngms_debug/curl_test.txt 2>&1 || true
+          cat /tmp/ngms_debug/curl_test.txt
+          
+          # DNS 확인
+          echo "DNS lookup:"
+          nslookup ngms.gir.go.kr >> /tmp/ngms_debug/curl_test.txt 2>&1 || true
+          
+          # 연결 테스트
+          if curl -sS --connect-timeout 30 -I "https://ngms.gir.go.kr:8443" 2>/dev/null | head -1 | grep -q "200\|301\|302"; then
+            echo "NGMS server is reachable"
+            echo "ngms_reachable=true" >> $GITHUB_OUTPUT
+          else
+            echo "Warning: NGMS server may not be reachable from GitHub Actions"
+            echo "ngms_reachable=false" >> $GITHUB_OUTPUT
+          fi
       
       - name: Run NGMS Data Update
         id: update
@@ -91,6 +112,7 @@ jobs:
           echo "- **Run Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- **Python Version**: ${{ env.PYTHON_VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Debug Mode**: ${{ github.event.inputs.debug_mode || 'true' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **NGMS Reachable**: ${{ steps.network_test.outputs.ngms_reachable || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Result**: ${{ steps.update.outcome }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Data Types" >> $GITHUB_STEP_SUMMARY
