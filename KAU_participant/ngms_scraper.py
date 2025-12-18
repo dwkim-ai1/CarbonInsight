@@ -2103,17 +2103,40 @@ class NGMSScraper:
                 excel_btn = iframe_locator.locator('input[value="Excel 다운로드"]')
                 await excel_btn.wait_for(timeout=10000)
                 
-                # 다운로드 대기
-                async with new_page.expect_download(timeout=120000) as download_info:
+                # 다운로드 대기 시작 (버튼 클릭 전에)
+                async with new_page.expect_download(timeout=60000) as download_info:
+                    # Excel 버튼 클릭
                     await excel_btn.click()
-                    logger.info("Excel 버튼 클릭 완료, 다운로드 대기...")
+                    logger.info("Excel 버튼 클릭 완료")
+                    
+                    # ★★★ 확인 대화상자 처리 ★★★
+                    await asyncio.sleep(1)  # 대화상자 표시 대기
+                    
+                    # 확인 버튼 찾기 (iframe 내부)
+                    try:
+                        confirm_btn = iframe_locator.locator('input[value="확인"], button:has-text("확인"), a:has-text("확인")')
+                        if await confirm_btn.count() > 0:
+                            await confirm_btn.first.click()
+                            logger.info("확인 버튼 클릭 완료")
+                    except Exception as e:
+                        logger.debug(f"iframe 내 확인 버튼 실패: {e}")
+                        
+                        # 페이지 레벨에서 확인 버튼 찾기
+                        try:
+                            page_confirm = new_page.locator('input[value="확인"], button:has-text("확인")')
+                            if await page_confirm.count() > 0:
+                                await page_confirm.first.click()
+                                logger.info("확인 버튼 클릭 완료 (페이지 레벨)")
+                        except:
+                            pass
+                    
+                    logger.info("다운로드 대기 중...")
                 
                 download = await download_info.value
                 download_path = os.path.join(self.download_dir, download.suggested_filename)
                 await download.save_as(download_path)
                 logger.info(f"Excel 다운로드 완료: {download_path}")
                 
-                # 스크린샷 저장
                 await self._save_debug(f"excel_02_after_download_{data_type}", new_page)
                 
                 df = pd.read_excel(download_path)
@@ -2122,6 +2145,18 @@ class NGMSScraper:
                 
             except Exception as e:
                 logger.warning(f"Excel 다운로드 실패 (검색 없이): {e}")
+                
+                # 다운로드 폴더에서 파일 찾기 (이미 다운로드되었을 수 있음)
+                import glob
+                await asyncio.sleep(3)
+                excel_files = glob.glob(os.path.join(self.download_dir, '*.xlsx')) + \
+                              glob.glob(os.path.join(self.download_dir, '*.xls'))
+                if excel_files:
+                    download_path = max(excel_files, key=os.path.getctime)
+                    logger.info(f"다운로드 폴더에서 파일 발견: {download_path}")
+                    df = pd.read_excel(download_path)
+                    logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                    return df
                 
                 # ★★★ 검색 버튼 클릭 후 다시 시도 ★★★
                 logger.info("검색 버튼 클릭 후 Excel 다운로드 재시도...")
@@ -2135,11 +2170,24 @@ class NGMSScraper:
                     # 스크린샷 저장
                     await self._save_debug(f"excel_03_after_search_{data_type}", new_page)
                     
-                    # Excel 다운로드 재시도
+                    # Excel 다운로드 재시도 (expect_download 먼저)
                     excel_btn = iframe_locator.locator('input[value="Excel 다운로드"]')
-                    async with new_page.expect_download(timeout=120000) as download_info:
+                    
+                    async with new_page.expect_download(timeout=60000) as download_info:
                         await excel_btn.click()
-                        logger.info("Excel 버튼 클릭 완료 (검색 후), 다운로드 대기...")
+                        logger.info("Excel 버튼 클릭 완료 (검색 후)")
+                        
+                        # ★★★ 확인 대화상자 처리 ★★★
+                        await asyncio.sleep(1)
+                        try:
+                            confirm_btn = iframe_locator.locator('input[value="확인"], button:has-text("확인")')
+                            if await confirm_btn.count() > 0:
+                                await confirm_btn.first.click()
+                                logger.info("확인 버튼 클릭 완료 (검색 후)")
+                        except:
+                            pass
+                        
+                        logger.info("다운로드 대기 중...")
                     
                     download = await download_info.value
                     download_path = os.path.join(self.download_dir, download.suggested_filename)
@@ -2152,6 +2200,18 @@ class NGMSScraper:
                     
                 except Exception as e2:
                     logger.warning(f"Excel 다운로드 실패 (검색 후): {e2}")
+                    
+                    # 다운로드 폴더에서 파일 찾기
+                    import glob
+                    await asyncio.sleep(3)
+                    excel_files = glob.glob(os.path.join(self.download_dir, '*.xlsx')) + \
+                                  glob.glob(os.path.join(self.download_dir, '*.xls'))
+                    if excel_files:
+                        download_path = max(excel_files, key=os.path.getctime)
+                        logger.info(f"다운로드 폴더에서 파일 발견: {download_path}")
+                        df = pd.read_excel(download_path)
+                        logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                        return df
             
             return None
             
