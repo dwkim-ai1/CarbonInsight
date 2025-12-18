@@ -119,12 +119,30 @@ class NGMSScraper:
             return None
         
         new_page = await self.context.new_page()
-        new_page.set_default_timeout(60000)
+        new_page.set_default_timeout(120000)  # 2분 타임아웃
         
         try:
             logger.info(f"URL 접속: {page_url}")
-            await new_page.goto(page_url, wait_until='networkidle')
-            await asyncio.sleep(3)  # Wait for page to fully load
+            
+            # networkidle 대신 load 사용 (더 빠름), 재시도 포함
+            for attempt in range(3):
+                try:
+                    await new_page.goto(page_url, wait_until='load', timeout=90000)
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(f"접속 시도 {attempt+1} 실패, 재시도: {e}")
+                        await asyncio.sleep(5)
+                    else:
+                        # 마지막 시도: domcontentloaded로
+                        try:
+                            await new_page.goto(page_url, wait_until='domcontentloaded', timeout=90000)
+                        except Exception as e2:
+                            logger.error(f"모든 접속 시도 실패: {e2}")
+                            raise
+            
+            # 추가 대기 (JavaScript 로딩)
+            await asyncio.sleep(5)
             
             # 페이지 로드 후 스크린샷
             await self._save_debug(f"01_page_loaded_{data_type}", new_page)
@@ -1520,12 +1538,20 @@ class NGMSScraper:
             return None
         
         new_page = await self.context.new_page()
-        new_page.set_default_timeout(60000)
+        new_page.set_default_timeout(120000)  # 2분 타임아웃
         
         try:
             logger.info(f"URL 접속: {page_url}")
-            await new_page.goto(page_url, wait_until='networkidle')
-            await asyncio.sleep(3)
+            
+            # networkidle 대신 load 사용 (더 빠름)
+            try:
+                await new_page.goto(page_url, wait_until='load', timeout=90000)
+            except Exception as e:
+                logger.warning(f"load 대기 실패, domcontentloaded로 재시도: {e}")
+                await new_page.goto(page_url, wait_until='domcontentloaded', timeout=90000)
+            
+            # 추가 대기 (JavaScript 로딩)
+            await asyncio.sleep(5)
             
             # iframe 찾기
             frame = await self._find_content_frame(new_page, data_type)
@@ -1571,7 +1597,7 @@ class NGMSScraper:
             
             try:
                 # expect_download 사용
-                async with new_page.expect_download(timeout=60000) as download_info:
+                async with new_page.expect_download(timeout=120000) as download_info:
                     await download_button.click(force=True)
                     logger.info("Excel 버튼 클릭, 다운로드 대기...")
                 
@@ -1593,7 +1619,7 @@ class NGMSScraper:
                     try:
                         await frame.evaluate(js_func)
                         logger.info(f"JS 함수 호출: {js_func}")
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(15)
                         break
                     except:
                         continue
@@ -1634,11 +1660,25 @@ class NGMSScraper:
         
         page_url = IFRAME_URLS.get("명세서배출량통계")
         new_page = await self.context.new_page()
-        new_page.set_default_timeout(60000)
+        new_page.set_default_timeout(120000)  # 2분 타임아웃
         
         try:
-            await new_page.goto(page_url, wait_until='networkidle')
-            await asyncio.sleep(3)
+            # 재시도 로직
+            for attempt in range(3):
+                try:
+                    await new_page.goto(page_url, wait_until='load', timeout=90000)
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(f"접속 시도 {attempt+1} 실패, 재시도: {e}")
+                        await asyncio.sleep(5)
+                    else:
+                        try:
+                            await new_page.goto(page_url, wait_until='domcontentloaded', timeout=90000)
+                        except:
+                            raise
+            
+            await asyncio.sleep(5)
             
             # iframe 찾기
             frame = await self._find_content_frame(new_page, "명세서배출량통계")
