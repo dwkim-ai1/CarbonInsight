@@ -123,9 +123,15 @@ class NGMSScraper:
         try:
             logger.info(f"URL 접속: {iframe_url}")
             await new_page.goto(iframe_url, wait_until='networkidle')
-            await asyncio.sleep(5)  # Wait for grid to fully load
+            await asyncio.sleep(3)  # Wait for page to fully load
             
-            await self._save_debug(f"direct_{data_type}", new_page)
+            # ★★★ 핵심: 검색 버튼 클릭하여 데이터 로드 ★★★
+            await self._click_search_button(new_page, data_type)
+            
+            # Wait for data to load after search
+            await asyncio.sleep(5)
+            
+            await self._save_debug(f"after_search_{data_type}", new_page)
             
             # Try multiple extraction methods
             df = None
@@ -153,6 +159,74 @@ class NGMSScraper:
         finally:
             await new_page.close()
     
+    async def _click_search_button(self, page: Page, data_type: str) -> bool:
+        """
+        Click search/query button to load data
+        
+        Args:
+            page: Page object
+            data_type: Type of data
+            
+        Returns:
+            True if clicked successfully
+        """
+        logger.info(f"검색 버튼 클릭 시도: {data_type}")
+        
+        # 검색/조회 버튼 선택자들
+        search_selectors = [
+            'input[value="검색"]',
+            'input[value="조회"]',
+            'button:has-text("검색")',
+            'button:has-text("조회")',
+            'a:has-text("검색")',
+            'a:has-text("조회")',
+            '#mf_trigger1',  # WebSquare 기본 버튼 ID 패턴
+            'input[type="button"][value*="검색"]',
+            'input[type="button"][value*="조회"]',
+        ]
+        
+        for selector in search_selectors:
+            try:
+                button = await page.query_selector(selector)
+                if button:
+                    logger.info(f"검색 버튼 발견: {selector}")
+                    await button.click()
+                    
+                    # Wait for data loading
+                    await asyncio.sleep(3)
+                    
+                    # Wait for network to be idle (data loaded)
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    except:
+                        pass
+                    
+                    logger.info("검색 버튼 클릭 완료, 데이터 로딩 대기...")
+                    return True
+            except Exception as e:
+                logger.debug(f"검색 버튼 클릭 실패 ({selector}): {e}")
+                continue
+        
+        # JavaScript로 검색 함수 직접 호출 시도
+        js_search_functions = [
+            'scwin.btn_search_onclick()',
+            'scwin.fn_search()',
+            'fn_search()',
+            'doSearch()',
+        ]
+        
+        for js_func in js_search_functions:
+            try:
+                await page.evaluate(js_func)
+                logger.info(f"JS 검색 함수 호출: {js_func}")
+                await asyncio.sleep(3)
+                return True
+            except:
+                continue
+        
+        logger.warning("검색 버튼을 찾을 수 없습니다")
+        return False
+    
     async def _extract_websquare_grid(self, page: Page, data_type: str) -> Optional[pd.DataFrame]:
         """Extract data using WebSquare grid API"""
         logger.info("WebSquare 그리드 API 추출 시도")
@@ -168,84 +242,152 @@ class NGMSScraper:
                     return {error: 'WebSquare not found'};
                 }
                 
-                // Find grid component
-                const gridElements = document.querySelectorAll('[id*="grd"], [id*="grid"], .w2grid');
+                // Find grid component - try multiple ID patterns
+                const gridIdPatterns = ['grd1', 'grd', 'grid1', 'grid', 'mf_grd1', 'mf_grid1'];
+                let grid = null;
+                let gridId = null;
                 
-                for (const gridEl of gridElements) {
-                    const gridId = gridEl.id;
-                    if (!gridId) continue;
-                    
+                for (const pattern of gridIdPatterns) {
                     try {
-                        const grid = WebSquare.util.getComponentById(gridId);
-                        if (!grid) continue;
-                        
-                        // Try getAllJSON first
-                        if (typeof grid.getAllJSON === 'function') {
-                            const jsonStr = grid.getAllJSON();
-                            const data = JSON.parse(jsonStr);
-                            if (data && data.length > 0) {
-                                return {success: true, data: data, method: 'getAllJSON', gridId: gridId};
+                        const g = WebSquare.util.getComponentById(pattern);
+                        if (g && typeof g.getRowCount === 'function') {
+                            const count = g.getRowCount();
+                            if (count > 0) {
+                                grid = g;
+                                gridId = pattern;
+                                break;
                             }
                         }
+                    } catch(e) {}
+                }
+                
+                // Also search by element
+                if (!grid) {
+                    const gridElements = document.querySelectorAll('[id*="grd"], [id*="grid"], .w2grid');
+                    for (const gridEl of gridElements) {
+                        const id = gridEl.id;
+                        if (!id) continue;
                         
-                        // Try getRowCount and getCellData
-                        if (typeof grid.getRowCount === 'function') {
-                            const rowCount = grid.getRowCount();
-                            if (rowCount > 0) {
-                                const data = [];
-                                const colIds = grid.getColumnIDArray ? grid.getColumnIDArray() : [];
-                                
-                                for (let r = 0; r < rowCount; r++) {
-                                    const row = {};
-                                    if (colIds.length > 0) {
-                                        for (const colId of colIds) {
-                                            row[colId] = grid.getCellData(r, colId) || '';
-                                        }
-                                    } else {
-                                        // Fallback to index-based
-                                        for (let c = 0; c < 20; c++) {
-                                            try {
-                                                const val = grid.getCellData(r, c);
-                                                if (val !== undefined) {
-                                                    row['col_' + c] = val;
-                                                }
-                                            } catch(e) { break; }
-                                        }
-                                    }
-                                    data.push(row);
-                                }
-                                
-                                if (data.length > 0) {
-                                    return {success: true, data: data, method: 'getCellData', gridId: gridId};
+                        try {
+                            const g = WebSquare.util.getComponentById(id);
+                            if (g && typeof g.getRowCount === 'function') {
+                                const count = g.getRowCount();
+                                if (count > 0) {
+                                    grid = g;
+                                    gridId = id;
+                                    break;
                                 }
                             }
-                        }
-                    } catch(e) {
-                        continue;
+                        } catch(e) {}
                     }
                 }
                 
-                // Try through dataList
-                const dataListIds = ['dataList1', 'dataList', 'dlt_list', 'dlt_data'];
+                if (!grid) {
+                    return {error: 'Grid not found or empty', debug: 'No grid with data found'};
+                }
+                
+                const rowCount = grid.getRowCount();
+                
+                // Try getAllJSON first (가장 확실한 방법)
+                if (typeof grid.getAllJSON === 'function') {
+                    try {
+                        const jsonStr = grid.getAllJSON();
+                        const data = JSON.parse(jsonStr);
+                        if (data && data.length > 0) {
+                            return {success: true, data: data, method: 'getAllJSON', gridId: gridId, rowCount: rowCount};
+                        }
+                    } catch(e) {}
+                }
+                
+                // Try getRowJSON for each row
+                if (typeof grid.getRowJSON === 'function') {
+                    try {
+                        const data = [];
+                        for (let r = 0; r < rowCount; r++) {
+                            const rowJson = grid.getRowJSON(r);
+                            if (rowJson) {
+                                data.push(JSON.parse(rowJson));
+                            }
+                        }
+                        if (data.length > 0) {
+                            return {success: true, data: data, method: 'getRowJSON', gridId: gridId, rowCount: rowCount};
+                        }
+                    } catch(e) {}
+                }
+                
+                // Try getCellData with column IDs
+                if (typeof grid.getCellData === 'function') {
+                    const data = [];
+                    let colIds = [];
+                    
+                    // Get column IDs
+                    if (typeof grid.getColumnIDArray === 'function') {
+                        colIds = grid.getColumnIDArray() || [];
+                    }
+                    
+                    // Fallback: get from header
+                    if (colIds.length === 0) {
+                        const colCount = grid.getColumnCount ? grid.getColumnCount() : 20;
+                        for (let c = 0; c < colCount; c++) {
+                            try {
+                                const id = grid.getColumnID ? grid.getColumnID(c) : `col_${c}`;
+                                colIds.push(id || `col_${c}`);
+                            } catch(e) { break; }
+                        }
+                    }
+                    
+                    for (let r = 0; r < rowCount; r++) {
+                        const row = {};
+                        for (let c = 0; c < colIds.length; c++) {
+                            try {
+                                const val = grid.getCellData(r, colIds[c]) || grid.getCellData(r, c);
+                                row[colIds[c]] = val !== undefined ? String(val) : '';
+                            } catch(e) {
+                                row[colIds[c]] = '';
+                            }
+                        }
+                        data.push(row);
+                    }
+                    
+                    if (data.length > 0) {
+                        return {success: true, data: data, method: 'getCellData', gridId: gridId, rowCount: rowCount};
+                    }
+                }
+                
+                // Try through DataList (WebSquare data binding)
+                const dataListIds = ['dataList1', 'dataList', 'dlt_list', 'dlt_data', 'dlt1'];
                 for (const dlId of dataListIds) {
                     try {
                         const dl = WebSquare.util.getComponentById(dlId);
-                        if (dl && typeof dl.getAllJSON === 'function') {
-                            const jsonStr = dl.getAllJSON();
-                            const data = JSON.parse(jsonStr);
-                            if (data && data.length > 0) {
-                                return {success: true, data: data, method: 'dataList', dataListId: dlId};
+                        if (dl) {
+                            if (typeof dl.getAllJSON === 'function') {
+                                const jsonStr = dl.getAllJSON();
+                                const data = JSON.parse(jsonStr);
+                                if (data && data.length > 0) {
+                                    return {success: true, data: data, method: 'dataList', dataListId: dlId, rowCount: data.length};
+                                }
+                            }
+                            if (typeof dl.getRowCount === 'function') {
+                                const count = dl.getRowCount();
+                                if (count > 0) {
+                                    const data = [];
+                                    for (let r = 0; r < count; r++) {
+                                        const rowData = dl.getRowJSON ? JSON.parse(dl.getRowJSON(r)) : {};
+                                        data.push(rowData);
+                                    }
+                                    if (data.length > 0) {
+                                        return {success: true, data: data, method: 'dataList-row', dataListId: dlId, rowCount: data.length};
+                                    }
+                                }
                             }
                         }
-                    } catch(e) {
-                        continue;
-                    }
+                    } catch(e) {}
                 }
                 
-                return {error: 'No data found in grids'};
+                return {error: 'Failed to extract data', gridId: gridId, rowCount: rowCount};
                 
             } catch(e) {
-                return {error: e.message};
+                return {error: e.message, stack: e.stack};
             }
         }
         """
@@ -253,13 +395,15 @@ class NGMSScraper:
         try:
             result = await page.evaluate(script)
             
+            logger.info(f"WebSquare 결과: {result.get('method', result.get('error', 'unknown'))}, rows={result.get('rowCount', 0)}")
+            
             if result and result.get('success') and result.get('data'):
                 data = result['data']
                 df = pd.DataFrame(data)
                 logger.info(f"WebSquare 추출 성공 ({result.get('method')}): {len(df)}행")
                 return df
             else:
-                logger.debug(f"WebSquare 추출 실패: {result.get('error', 'unknown')}")
+                logger.debug(f"WebSquare 추출 실패: {result}")
                 
         except Exception as e:
             logger.debug(f"WebSquare API 실패: {e}")
@@ -377,23 +521,82 @@ class NGMSScraper:
         logger.info("페이지네이션 추출 시도")
         
         all_data = []
+        headers = []
         current_page = 1
-        max_pages = 50  # Safety limit
+        max_pages = 200  # Safety limit (예: 774건 / 20건 per page = ~39 pages)
+        seen_first_rows = set()  # 중복 페이지 감지용
+        
+        # 먼저 헤더 추출
+        header_script = """
+        () => {
+            const headers = [];
+            const selectors = [
+                '.gridHeaderTable th nobr',
+                '.gridHeaderTable th',
+                '.gridHeaderTD nobr',
+                'thead th nobr',
+                'thead th'
+            ];
+            
+            for (const selector of selectors) {
+                document.querySelectorAll(selector).forEach(el => {
+                    const text = el.textContent.trim();
+                    if (text && !headers.includes(text)) {
+                        headers.push(text);
+                    }
+                });
+                if (headers.length > 0) break;
+            }
+            
+            return headers;
+        }
+        """
+        
+        try:
+            headers = await page.evaluate(header_script)
+            logger.info(f"헤더 추출: {headers}")
+        except Exception as e:
+            logger.debug(f"헤더 추출 실패: {e}")
         
         while current_page <= max_pages:
             # Extract current page data
-            script = """
+            extract_script = """
             () => {
                 const results = [];
-                const rows = document.querySelectorAll('.gridBodyTable tbody tr, table[id*="grid"] tbody tr');
+                const selectors = [
+                    '.gridBodyTable tbody tr',
+                    '.w2grid tbody tr',
+                    'table[id*="grid"] tbody tr',
+                    'table[id*="grd"] tbody tr',
+                    '#mf_grd1_body_tbody tr'
+                ];
+                
+                let rows = [];
+                for (const selector of selectors) {
+                    rows = document.querySelectorAll(selector);
+                    if (rows.length > 0) break;
+                }
                 
                 rows.forEach(row => {
                     const cells = row.querySelectorAll('td');
                     const rowData = [];
+                    
                     cells.forEach(cell => {
                         const nobr = cell.querySelector('nobr');
-                        rowData.push(nobr ? nobr.textContent.trim() : cell.textContent.trim());
+                        const div = cell.querySelector('div');
+                        let value = '';
+                        
+                        if (nobr) {
+                            value = nobr.textContent.trim();
+                        } else if (div) {
+                            value = div.textContent.trim();
+                        } else {
+                            value = cell.textContent.trim();
+                        }
+                        
+                        rowData.push(value);
                     });
+                    
                     if (rowData.some(v => v && v.length > 0)) {
                         results.push(rowData);
                     }
@@ -404,67 +607,114 @@ class NGMSScraper:
             """
             
             try:
-                page_data = await page.evaluate(script)
+                page_data = await page.evaluate(extract_script)
                 
                 if page_data and len(page_data) > 0:
+                    # 중복 페이지 감지 (첫 행의 데이터로 확인)
+                    first_row_key = '|'.join(str(v) for v in page_data[0][:3])
+                    
+                    if first_row_key in seen_first_rows:
+                        logger.info(f"페이지 {current_page}: 중복 데이터 감지, 종료")
+                        break
+                    
+                    seen_first_rows.add(first_row_key)
                     all_data.extend(page_data)
-                    logger.debug(f"페이지 {current_page}: {len(page_data)}행")
+                    logger.info(f"페이지 {current_page}: {len(page_data)}행 추출 (누적: {len(all_data)}행)")
+                else:
+                    logger.info(f"페이지 {current_page}: 데이터 없음")
+                    break
                 
                 # Try to click next page
-                next_clicked = False
-                next_selectors = [
-                    f'a[href*="goPage({current_page + 1})"]',
-                    f'a:text("{current_page + 1}")',
-                    'a.next',
-                    'img[alt*="다음"]',
-                ]
-                
-                for selector in next_selectors:
-                    try:
-                        next_btn = await page.query_selector(selector)
-                        if next_btn:
-                            await next_btn.click()
-                            await asyncio.sleep(1)
-                            next_clicked = True
-                            break
-                    except:
-                        continue
+                next_clicked = await self._click_next_page_button(page, current_page)
                 
                 if not next_clicked:
+                    logger.info("다음 페이지 없음, 종료")
                     break
                 
                 current_page += 1
+                await asyncio.sleep(1)  # Wait for page to load
                 
             except Exception as e:
                 logger.debug(f"페이지 {current_page} 추출 실패: {e}")
                 break
         
         if all_data:
-            # Get headers for column names
-            header_script = """
-            () => {
-                const headers = [];
-                document.querySelectorAll('.gridHeaderTable th nobr, thead th').forEach(el => {
-                    headers.push(el.textContent.trim());
-                });
-                return headers;
-            }
-            """
-            
-            try:
-                headers = await page.evaluate(header_script)
-                if headers:
-                    df = pd.DataFrame(all_data, columns=headers[:len(all_data[0])] if all_data else headers)
-                else:
-                    df = pd.DataFrame(all_data)
-                
-                logger.info(f"페이지네이션 추출 성공: {len(df)}행")
-                return df
-            except:
+            # Create DataFrame with headers
+            if headers and len(headers) >= len(all_data[0]):
+                df = pd.DataFrame(all_data, columns=headers[:len(all_data[0])])
+            else:
                 df = pd.DataFrame(all_data)
-                return df
+            
+            logger.info(f"페이지네이션 추출 완료: {len(df)}행, {current_page-1}페이지")
+            return df
         
         return None
+    
+    async def _click_next_page_button(self, page: Page, current_page: int) -> bool:
+        """Click next page button"""
+        
+        # 다음 페이지 버튼 선택자들
+        next_page_num = current_page + 1
+        
+        selectors = [
+            # 페이지 번호 직접 클릭
+            f'a:has-text("{next_page_num}")',
+            f'span:has-text("{next_page_num}")',
+            # 다음 버튼
+            'a[title="다음"]',
+            'a[title="Next"]',
+            'img[alt*="다음"]',
+            'a.next',
+            'button.next',
+            # WebSquare 페이징 버튼
+            'a[onclick*="goPage"]',
+            '.w2pageList a',
+            '.pagination a',
+        ]
+        
+        for selector in selectors:
+            try:
+                # 페이지 번호의 경우 정확한 숫자 매칭
+                if f'"{next_page_num}"' in selector:
+                    elements = await page.query_selector_all(selector)
+                    for el in elements:
+                        text = await el.text_content()
+                        if text and text.strip() == str(next_page_num):
+                            await el.click()
+                            await asyncio.sleep(0.5)
+                            return True
+                else:
+                    element = await page.query_selector(selector)
+                    if element:
+                        # 비활성화 상태 확인
+                        is_disabled = await element.get_attribute('disabled')
+                        class_attr = await element.get_attribute('class') or ''
+                        
+                        if is_disabled or 'disabled' in class_attr:
+                            continue
+                        
+                        await element.click()
+                        await asyncio.sleep(0.5)
+                        return True
+            except:
+                continue
+        
+        # JavaScript로 페이지 이동 시도
+        js_page_functions = [
+            f'goPage({next_page_num})',
+            f'fn_goPage({next_page_num})',
+            f'scwin.fn_goPage({next_page_num})',
+        ]
+        
+        for js_func in js_page_functions:
+            try:
+                await page.evaluate(js_func)
+                await asyncio.sleep(0.5)
+                return True
+            except:
+                continue
+        
+        return False
     
     async def download_data(self, data_type: str) -> Optional[pd.DataFrame]:
         """
@@ -503,12 +753,12 @@ class NGMSScraper:
     async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
         """
         명세서배출량통계 전용 스크래퍼
-        이 페이지는 연도별 다운로드 목록 형태로, 최신 연도의 업체배출량 데이터를 스크래핑
+        이 페이지는 연도별 다운로드 목록 형태로, 조회 버튼 클릭 후 목록 데이터를 스크래핑
         
         Returns:
             DataFrame with emission statistics
         """
-        logger.info("명세서배출량통계 스크래핑 (연도별 목록에서 최신 데이터)")
+        logger.info("명세서배출량통계 스크래핑 (조회 버튼 클릭 후 데이터 로드)")
         
         iframe_url = IFRAME_URLS.get("명세서배출량통계")
         new_page = await self.context.new_page()
@@ -518,58 +768,40 @@ class NGMSScraper:
             await new_page.goto(iframe_url, wait_until='networkidle')
             await asyncio.sleep(3)
             
-            await self._save_debug("emission_stats_page", new_page)
+            # ★★★ 조회 버튼 클릭 ★★★
+            await self._click_search_button(new_page, "명세서배출량통계")
+            await asyncio.sleep(5)
             
-            # 이 페이지에서 최신 연도의 "다운" 버튼을 찾아 클릭해서 데이터를 가져옴
-            # 하지만 다운로드가 작동하지 않으므로, 테이블에서 데이터 추출 시도
+            await self._save_debug("emission_stats_after_search", new_page)
             
-            # 먼저 목록에서 연도 정보 추출
-            year_list_script = """
-            () => {
-                const rows = document.querySelectorAll('table tbody tr, .listTable tbody tr');
-                const years = [];
-                
-                rows.forEach(row => {
-                    const cells = row.querySelectorAll('td');
-                    if (cells.length > 0) {
-                        const yearText = cells[0].textContent.trim();
-                        if (yearText && yearText.match(/\\d{4}/)) {
-                            years.push(yearText);
-                        }
-                    }
-                });
-                
-                return years;
-            }
-            """
+            # WebSquare 그리드에서 데이터 추출 시도
+            df = await self._extract_websquare_grid(new_page, "명세서배출량통계")
+            if df is not None and len(df) > 0:
+                return df
             
-            years = await new_page.evaluate(year_list_script)
-            logger.info(f"발견된 연도: {years[:5]}...")
+            # DOM에서 테이블 추출 시도
+            df = await self._extract_table_dom(new_page, "명세서배출량통계")
+            if df is not None and len(df) > 0:
+                return df
             
-            # 목록 형태의 데이터 추출 (배출년도, 제목, 다운로드 가능 여부 등)
+            # 목록 형태 데이터 추출 (fallback)
             list_script = """
             () => {
                 const results = [];
-                const rows = document.querySelectorAll('table tbody tr, .w2grid tbody tr');
+                const rows = document.querySelectorAll('table tbody tr, .w2grid tbody tr, .gridBodyTable tbody tr');
                 
                 rows.forEach((row, idx) => {
                     const cells = row.querySelectorAll('td');
                     if (cells.length >= 2) {
-                        const rowData = {
-                            '배출년도': cells[0]?.textContent?.trim() || '',
-                            '제목': cells[1]?.textContent?.trim() || '',
-                        };
+                        const rowData = {};
+                        cells.forEach((cell, cellIdx) => {
+                            const nobr = cell.querySelector('nobr');
+                            const value = nobr ? nobr.textContent.trim() : cell.textContent.trim();
+                            rowData[`col_${cellIdx}`] = value;
+                        });
                         
-                        // 다운로드 버튼 존재 여부 확인
-                        for (let i = 2; i < cells.length; i++) {
-                            const btn = cells[i].querySelector('a, button, input');
-                            if (btn) {
-                                const colName = `다운${i-1}`;
-                                rowData[colName] = '가능';
-                            }
-                        }
-                        
-                        if (rowData['배출년도'] || rowData['제목']) {
+                        // Only add rows with actual data
+                        if (Object.values(rowData).some(v => v && v.length > 0)) {
                             results.push(rowData);
                         }
                     }
@@ -579,23 +811,15 @@ class NGMSScraper:
             }
             """
             
-            list_data = await new_page.evaluate(list_script)
-            
-            if list_data and len(list_data) > 0:
-                # 목록 형태 데이터 반환 (다운로드 불가 시 대안)
-                df = pd.DataFrame(list_data)
-                logger.info(f"목록 형태 데이터 추출: {len(df)}행")
+            try:
+                list_data = await new_page.evaluate(list_script)
                 
-                # Note: 실제 상세 배출량 데이터는 Excel 다운로드가 필요하지만
-                # 다운로드가 작동하지 않아 목록만 반환
-                logger.warning("명세서배출량통계: 상세 데이터는 Excel 다운로드 필요 (현재 미지원)")
-                
-                return df
-            
-            # Alternative: Try WebSquare grid extraction anyway
-            df = await self._extract_websquare_grid(new_page, "명세서배출량통계")
-            if df is not None and len(df) > 0:
-                return df
+                if list_data and len(list_data) > 0:
+                    df = pd.DataFrame(list_data)
+                    logger.info(f"목록 형태 데이터 추출: {len(df)}행")
+                    return df
+            except Exception as e:
+                logger.debug(f"목록 추출 실패: {e}")
             
             return None
             
