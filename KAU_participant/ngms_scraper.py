@@ -157,9 +157,8 @@ class NGMSScraper:
             # ★★★ frame_locator 사용 ★★★
             iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
-            # ★★★ 계획기간을 "전체"로 선택 ★★★
-            if data_type in ["할당대상업체", "목표관리대상업체"]:
-                await self._select_all_periods(iframe_locator, data_type)
+            # ★★★ 검색 필터 적용 (과거 데이터 수집 모드) ★★★
+            await self._apply_search_filters(iframe_locator, data_type)
             
             # ★★★ 검색 버튼 클릭 ★★★
             logger.info("검색 버튼 클릭 시도 (frame_locator)...")
@@ -279,7 +278,7 @@ class NGMSScraper:
             # ★★★ 먼저 스크롤바/그리드 영역 찾기 ★★★
             scroll_area = iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY"], .w2grid')
             
-            max_scroll_attempts = 50  # 최대 스크롤 횟수
+            max_scroll_attempts = 100  # 최대 스크롤 횟수 (774행 / 20행 = 39번 필요)
             scroll_count = 0
             no_new_rows_count = 0
             
@@ -348,19 +347,23 @@ class NGMSScraper:
                 # 새 행이 없으면 종료 체크
                 if new_rows_added == 0:
                     no_new_rows_count += 1
-                    if no_new_rows_count >= 3:  # 연속 3번 새 행 없으면 종료
+                    
+                    # ★★★ 연속 5번 새 행 없으면 다른 스크롤 방식 강제 시도 ★★★
+                    if no_new_rows_count >= 5:
                         logger.info("더 이상 새로운 행 없음, 스크롤 종료")
                         break
+                    elif no_new_rows_count >= 2:
+                        # 다른 스크롤 방식 강제 시도
+                        logger.info(f"새 행 없음 ({no_new_rows_count}회), 다른 스크롤 방식 시도...")
+                        await asyncio.sleep(1)
                 else:
                     no_new_rows_count = 0
                 
                 # ★★★ 다양한 스크롤 방식 시도 ★★★
                 scroll_success = await self._scroll_grid(iframe_locator, grid_container)
                 
-                if scroll_success:
-                    await asyncio.sleep(2)  # 데이터 로드 대기 (2초)
-                else:
-                    await asyncio.sleep(1)
+                # ★★★ 스크롤 후 충분한 대기 시간 ★★★
+                await asyncio.sleep(3)  # 데이터 로드 대기 (3초로 증가)
                     
                 scroll_count += 1
             
@@ -388,132 +391,178 @@ class NGMSScraper:
             logger.error(traceback.format_exc())
             return None
     
-    async def _select_all_periods(self, iframe_locator, data_type: str) -> None:
+    async def _apply_search_filters(self, iframe_locator, data_type: str) -> None:
         """
-        계획기간을 "전체"로 선택하여 모든 데이터 표시
+        검색 필터 적용 (계획기간, 지정연도, 배출년도)
         """
-        logger.info(f"검색 조건 설정: 계획기간 전체 선택 ({data_type})")
+        filter_params = getattr(self, 'filter_params', {})
+        plan_period = filter_params.get('plan_period', '')
+        designation_year = filter_params.get('designation_year', '')
+        emission_year = filter_params.get('emission_year', '')
+        
+        logger.info(f"검색 필터 적용: {data_type}")
         
         try:
-            # 할당대상업체: "계획기간" 드롭다운
-            # 목표관리대상업체: "지정년도" 드롭다운
-            
-            # 방법 1: select 요소 직접 선택
-            select_locators = [
-                'select[id*="planPeriod"], select[id*="period"]',  # 계획기간
-                'select[id*="year"], select[id*="Year"]',  # 연도
-            ]
-            
-            for selector in select_locators:
+            # ★★★ 할당대상업체: 계획기간 필터 ★★★
+            if data_type == '할당대상업체' and plan_period:
                 try:
-                    select_elem = iframe_locator.locator(selector).first
-                    if await select_elem.count() > 0:
-                        # 전체 옵션 선택 (보통 첫 번째 또는 빈 값)
-                        await select_elem.select_option(index=0)
-                        logger.info(f"드롭다운 '{selector}' 전체 선택 완료")
+                    # 계획기간 select 찾기
+                    period_select = iframe_locator.locator('select[id*="planPrd"], select[id*="period"]').first
+                    if await period_select.count() > 0:
+                        await period_select.select_option(value=plan_period)
+                        logger.info(f"계획기간 '{plan_period}' 선택 완료")
                         await asyncio.sleep(0.5)
                 except Exception as e:
-                    logger.debug(f"드롭다운 '{selector}' 선택 실패: {e}")
+                    logger.debug(f"계획기간 선택 실패: {e}")
             
-            # 방법 2: WebSquare selectbox 처리
-            try:
-                # 계획기간 selectbox 찾기
-                period_select = iframe_locator.locator('[id*="sbx_planPeriod"], [id*="sbx_period"], [id*="planPrd"]').first
-                if await period_select.count() > 0:
-                    await period_select.click()
-                    await asyncio.sleep(0.3)
-                    
-                    # 전체 옵션 클릭
-                    all_option = iframe_locator.locator('li:has-text("전체"), li:has-text("-전체-"), option:has-text("전체")').first
-                    if await all_option.count() > 0:
-                        await all_option.click()
-                        logger.info("계획기간 '전체' 선택 완료")
+            # ★★★ 할당대상업체/목표관리대상업체: 지정연도 필터 ★★★
+            if data_type in ['할당대상업체', '목표관리대상업체'] and designation_year:
+                try:
+                    year_select = iframe_locator.locator('select[id*="year"], select[id*="Year"]').first
+                    if await year_select.count() > 0:
+                        await year_select.select_option(value=designation_year)
+                        logger.info(f"지정연도 '{designation_year}' 선택 완료")
                         await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.debug(f"WebSquare selectbox 처리 실패: {e}")
+                except Exception as e:
+                    logger.debug(f"지정연도 선택 실패: {e}")
             
-            # 방법 3: 첫 번째 드롭다운을 전체로 변경 (JavaScript)
-            try:
-                # iframe 내 첫 번째 select 요소의 첫 번째 옵션 선택
-                await iframe_locator.locator('select').first.evaluate('''
-                    el => {
-                        if (el.options && el.options.length > 0) {
-                            el.selectedIndex = 0;
-                            el.dispatchEvent(new Event('change', {bubbles: true}));
-                        }
-                    }
-                ''')
-                logger.info("JavaScript로 첫 번째 드롭다운 전체 선택")
-            except Exception as e:
-                logger.debug(f"JavaScript 드롭다운 선택 실패: {e}")
+            # ★★★ 명세서배출량통계: 배출년도 필터 ★★★
+            if data_type == '명세서배출량통계' and emission_year:
+                try:
+                    year_select = iframe_locator.locator('select[id*="year"], select[id*="Year"]').first
+                    if await year_select.count() > 0:
+                        await year_select.select_option(value=emission_year)
+                        logger.info(f"배출년도 '{emission_year}' 선택 완료")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.debug(f"배출년도 선택 실패: {e}")
             
+            # JavaScript로 select 값 변경 시도 (폴백)
+            if plan_period or designation_year or emission_year:
+                try:
+                    value_to_set = plan_period or designation_year or emission_year
+                    await iframe_locator.locator('body').evaluate(f'''() => {{
+                        const selects = document.querySelectorAll('select');
+                        selects.forEach(sel => {{
+                            for (let i = 0; i < sel.options.length; i++) {{
+                                if (sel.options[i].value === '{value_to_set}' || 
+                                    sel.options[i].text.includes('{value_to_set}')) {{
+                                    sel.selectedIndex = i;
+                                    sel.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                    break;
+                                }}
+                            }}
+                        }});
+                    }}''')
+                    logger.info(f"JavaScript로 필터 '{value_to_set}' 적용 시도")
+                except Exception as e:
+                    logger.debug(f"JavaScript 필터 적용 실패: {e}")
+                    
         except Exception as e:
-            logger.warning(f"검색 조건 설정 실패: {e}")
+            logger.warning(f"검색 필터 적용 실패: {e}")
     
     async def _scroll_grid(self, iframe_locator, grid_container) -> bool:
         """
         다양한 방식으로 그리드 스크롤 시도
         Returns: 스크롤 성공 여부
         """
-        # ★★★ 방법 1: 테이블 영역에 포커스 후 PageDown ★★★
+        # ★★★ 방법 1: WebSquare 스크롤 영역 직접 조작 (mf_grid1_scrollY_div) ★★★
         try:
-            # 테이블 영역 클릭하여 포커스
-            table_area = iframe_locator.locator('table[id*="body_table"], .gridBodyTable, .w2grid').first
-            await table_area.click()
-            await asyncio.sleep(0.2)
-            
-            # PageDown 여러 번
-            for _ in range(3):
-                await iframe_locator.locator('body').press('PageDown')
-                await asyncio.sleep(0.1)
-            
-            logger.debug("스크롤 방식 'PageDown' 성공")
-            return True
+            scroll_div = iframe_locator.locator('#mf_grid1_scrollY_div, [id$="_scrollY_div"]').first
+            if await scroll_div.count() > 0:
+                # 스크롤 위치 증가
+                result = await scroll_div.evaluate('''el => {
+                    const inner = el.querySelector('div');
+                    if (inner) {
+                        const before = inner.scrollTop;
+                        inner.scrollTop += 500;
+                        return {before: before, after: inner.scrollTop};
+                    }
+                    return null;
+                }''')
+                if result:
+                    logger.info(f"스크롤 방식 'mf_grid1_scrollY': {result}")
+                    return True
         except Exception as e:
-            logger.debug(f"PageDown 스크롤 실패: {e}")
+            logger.debug(f"mf_grid1_scrollY 실패: {e}")
         
-        # ★★★ 방법 2: 마지막 행 클릭 후 ArrowDown ★★★
+        # ★★★ 방법 2: 스크롤바 내 size div 높이로 스크롤 ★★★
         try:
-            last_row = iframe_locator.locator('tbody tr').last
-            await last_row.click()
-            await asyncio.sleep(0.2)
-            
-            for _ in range(10):
-                await iframe_locator.locator('body').press('ArrowDown')
-                await asyncio.sleep(0.05)
-            
-            logger.debug("스크롤 방식 'ArrowDown' 성공")
-            return True
-        except Exception as e:
-            logger.debug(f"ArrowDown 스크롤 실패: {e}")
-        
-        # ★★★ 방법 3: JavaScript scrollIntoView ★★★
-        try:
-            await iframe_locator.locator('tbody tr').last.evaluate('el => el.scrollIntoView({behavior: "smooth", block: "end"})')
-            logger.debug("스크롤 방식 'scrollIntoView' 성공")
-            return True
-        except Exception as e:
-            logger.debug(f"scrollIntoView 스크롤 실패: {e}")
-        
-        # ★★★ 방법 4: 스크롤바 영역 클릭 ★★★
-        try:
-            scrollbar = iframe_locator.locator('.w2grid_scrollY_div, [id*="scrollY_div"]').first
-            box = await scrollbar.bounding_box()
-            if box:
-                # 스크롤바 하단 클릭
-                await scrollbar.click(position={'x': box['width'] / 2, 'y': box['height'] * 0.8})
-                logger.debug("스크롤 방식 'scrollbar click' 성공")
+            size_div = iframe_locator.locator('#mf_grid1_size_y, [id$="_size_y"]').first
+            scroll_div = iframe_locator.locator('#mf_grid1_scrollY_div, [id$="_scrollY_div"]').first
+            if await size_div.count() > 0 and await scroll_div.count() > 0:
+                await scroll_div.evaluate('''el => {
+                    el.scrollTop += 500;
+                }''')
+                logger.info("스크롤 방식 'size_y based' 성공")
                 return True
         except Exception as e:
-            logger.debug(f"scrollbar 스크롤 실패: {e}")
+            logger.debug(f"size_y based 실패: {e}")
         
-        # ★★★ 방법 5: JavaScript scrollTop ★★★
+        # ★★★ 방법 3: dataLayer 스크롤 ★★★
         try:
-            await grid_container.evaluate('el => { el.scrollTop += 500; }')
-            logger.debug("스크롤 방식 'scrollTop' 성공")
+            data_layer = iframe_locator.locator('#mf_grid1_dataLayer, [id$="_dataLayer"]').first
+            if await data_layer.count() > 0:
+                result = await data_layer.evaluate('''el => {
+                    const before = el.scrollTop;
+                    el.scrollTop += 500;
+                    return {before: before, after: el.scrollTop};
+                }''')
+                logger.info(f"스크롤 방식 'dataLayer': {result}")
+                return True
+        except Exception as e:
+            logger.debug(f"dataLayer 실패: {e}")
+        
+        # ★★★ 방법 4: 마지막 행 클릭 후 ArrowDown 키 ★★★
+        try:
+            last_row = iframe_locator.locator('table[id*="body_table"] tbody tr').last
+            await last_row.click()
+            await asyncio.sleep(0.2)
+            for _ in range(20):  # 20번 ArrowDown
+                await iframe_locator.locator('body').press('ArrowDown')
+                await asyncio.sleep(0.02)
+            logger.info("스크롤 방식 'ArrowDown x20' 성공")
             return True
         except Exception as e:
-            logger.debug(f"scrollTop 스크롤 실패: {e}")
+            logger.debug(f"ArrowDown 실패: {e}")
+        
+        # ★★★ 방법 5: 그리드 영역 클릭 후 PageDown ★★★
+        try:
+            grid_main = iframe_locator.locator('#mf_grid1_main_div, [id$="_main_div"]').first
+            if await grid_main.count() > 0:
+                await grid_main.click()
+                await asyncio.sleep(0.1)
+                for _ in range(3):
+                    await iframe_locator.locator('body').press('PageDown')
+                    await asyncio.sleep(0.1)
+                logger.info("스크롤 방식 'PageDown on main_div' 성공")
+                return True
+        except Exception as e:
+            logger.debug(f"PageDown on main_div 실패: {e}")
+        
+        # ★★★ 방법 6: scrollIntoView 마지막 행 ★★★
+        try:
+            await iframe_locator.locator('table[id*="body_table"] tbody tr').last.evaluate(
+                'el => el.scrollIntoView({behavior: "instant", block: "end"})'
+            )
+            logger.info("스크롤 방식 'scrollIntoView' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"scrollIntoView 실패: {e}")
+        
+        # ★★★ 방법 7: 마우스 휠 이벤트 ★★★
+        try:
+            grid_area = iframe_locator.locator('#mf_grid1, [id*="grid1"]').first
+            await grid_area.hover()
+            await grid_area.evaluate('''el => {
+                for (let i = 0; i < 5; i++) {
+                    el.dispatchEvent(new WheelEvent('wheel', {deltaY: 200, bubbles: true}));
+                }
+            }''')
+            logger.info("스크롤 방식 'wheel event' 성공")
+            return True
+        except Exception as e:
+            logger.debug(f"wheel event 실패: {e}")
         
         logger.warning("모든 스크롤 방식 실패")
         return False
@@ -2217,10 +2266,6 @@ class NGMSScraper:
             # ★★★ frame_locator 사용 ★★★
             iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
-            # ★★★ 계획기간을 "전체"로 선택 (할당대상업체, 목표관리대상업체) ★★★
-            if data_type in ["할당대상업체", "목표관리대상업체"]:
-                await self._select_all_periods(iframe_locator, data_type)
-            
             # ★★★ 검색 버튼 없이 바로 Excel 다운로드 시도 ★★★
             logger.info("Excel 다운로드 버튼 클릭 시도 (검색 없이)...")
             try:
@@ -2458,14 +2503,40 @@ class NGMSScraper:
         finally:
             await new_page.close()
     
-    async def download_all(self) -> Dict[str, pd.DataFrame]:
+    async def download_all(
+        self,
+        plan_period: str = '',
+        designation_year: str = '',
+        emission_year: str = ''
+    ) -> Dict[str, pd.DataFrame]:
         """
-        Download all data types
+        Download all data types with optional filters
         
+        Args:
+            plan_period: Filter by plan period (계획기간)
+            designation_year: Filter by designation year (지정연도)
+            emission_year: Filter by emission year (배출년도)
+            
         Returns:
             Dictionary mapping data type to DataFrame
         """
         results = {}
+        
+        # Store filter params for use in scraping
+        self.filter_params = {
+            'plan_period': plan_period,
+            'designation_year': designation_year,
+            'emission_year': emission_year
+        }
+        
+        if any([plan_period, designation_year, emission_year]):
+            logger.info("필터 적용:")
+            if plan_period:
+                logger.info(f"  - 계획기간: {plan_period}")
+            if designation_year:
+                logger.info(f"  - 지정연도: {designation_year}")
+            if emission_year:
+                logger.info(f"  - 배출년도: {emission_year}")
         
         for data_type in ['할당대상업체', '목표관리대상업체', '명세서배출량통계']:
             try:
