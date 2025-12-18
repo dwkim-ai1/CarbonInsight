@@ -121,6 +121,14 @@ class NGMSScraper:
         new_page = await self.context.new_page()
         new_page.set_default_timeout(120000)  # 2분 타임아웃
         
+        # ★★★ JavaScript dialog (confirm/alert) 자동 처리 ★★★
+        async def handle_dialog(dialog):
+            logger.info(f"Dialog 감지: {dialog.type} - {dialog.message}")
+            await dialog.accept()
+            logger.info("Dialog 승인 완료")
+        
+        new_page.on('dialog', handle_dialog)
+        
         try:
             logger.info(f"URL 접속: {page_url}")
             
@@ -148,6 +156,10 @@ class NGMSScraper:
             
             # ★★★ frame_locator 사용 ★★★
             iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
+            
+            # ★★★ 계획기간을 "전체"로 선택 ★★★
+            if data_type in ["할당대상업체", "목표관리대상업체"]:
+                await self._select_all_periods(iframe_locator, data_type)
             
             # ★★★ 검색 버튼 클릭 ★★★
             logger.info("검색 버튼 클릭 시도 (frame_locator)...")
@@ -375,6 +387,68 @@ class NGMSScraper:
             import traceback
             logger.error(traceback.format_exc())
             return None
+    
+    async def _select_all_periods(self, iframe_locator, data_type: str) -> None:
+        """
+        계획기간을 "전체"로 선택하여 모든 데이터 표시
+        """
+        logger.info(f"검색 조건 설정: 계획기간 전체 선택 ({data_type})")
+        
+        try:
+            # 할당대상업체: "계획기간" 드롭다운
+            # 목표관리대상업체: "지정년도" 드롭다운
+            
+            # 방법 1: select 요소 직접 선택
+            select_locators = [
+                'select[id*="planPeriod"], select[id*="period"]',  # 계획기간
+                'select[id*="year"], select[id*="Year"]',  # 연도
+            ]
+            
+            for selector in select_locators:
+                try:
+                    select_elem = iframe_locator.locator(selector).first
+                    if await select_elem.count() > 0:
+                        # 전체 옵션 선택 (보통 첫 번째 또는 빈 값)
+                        await select_elem.select_option(index=0)
+                        logger.info(f"드롭다운 '{selector}' 전체 선택 완료")
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.debug(f"드롭다운 '{selector}' 선택 실패: {e}")
+            
+            # 방법 2: WebSquare selectbox 처리
+            try:
+                # 계획기간 selectbox 찾기
+                period_select = iframe_locator.locator('[id*="sbx_planPeriod"], [id*="sbx_period"], [id*="planPrd"]').first
+                if await period_select.count() > 0:
+                    await period_select.click()
+                    await asyncio.sleep(0.3)
+                    
+                    # 전체 옵션 클릭
+                    all_option = iframe_locator.locator('li:has-text("전체"), li:has-text("-전체-"), option:has-text("전체")').first
+                    if await all_option.count() > 0:
+                        await all_option.click()
+                        logger.info("계획기간 '전체' 선택 완료")
+                        await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug(f"WebSquare selectbox 처리 실패: {e}")
+            
+            # 방법 3: 첫 번째 드롭다운을 전체로 변경 (JavaScript)
+            try:
+                # iframe 내 첫 번째 select 요소의 첫 번째 옵션 선택
+                await iframe_locator.locator('select').first.evaluate('''
+                    el => {
+                        if (el.options && el.options.length > 0) {
+                            el.selectedIndex = 0;
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                        }
+                    }
+                ''')
+                logger.info("JavaScript로 첫 번째 드롭다운 전체 선택")
+            except Exception as e:
+                logger.debug(f"JavaScript 드롭다운 선택 실패: {e}")
+            
+        except Exception as e:
+            logger.warning(f"검색 조건 설정 실패: {e}")
     
     async def _scroll_grid(self, iframe_locator, grid_container) -> bool:
         """
@@ -2116,6 +2190,14 @@ class NGMSScraper:
         new_page = await self.context.new_page()
         new_page.set_default_timeout(120000)  # 2분 타임아웃
         
+        # ★★★ JavaScript dialog (confirm/alert) 자동 처리 ★★★
+        async def handle_dialog(dialog):
+            logger.info(f"Dialog 감지: {dialog.type} - {dialog.message}")
+            await dialog.accept()
+            logger.info("Dialog 승인 완료")
+        
+        new_page.on('dialog', handle_dialog)
+        
         try:
             logger.info(f"Excel 다운로드 URL 접속: {page_url}")
             
@@ -2135,6 +2217,10 @@ class NGMSScraper:
             # ★★★ frame_locator 사용 ★★★
             iframe_locator = new_page.frame_locator('iframe[src*="websquare"]')
             
+            # ★★★ 계획기간을 "전체"로 선택 (할당대상업체, 목표관리대상업체) ★★★
+            if data_type in ["할당대상업체", "목표관리대상업체"]:
+                await self._select_all_periods(iframe_locator, data_type)
+            
             # ★★★ 검색 버튼 없이 바로 Excel 다운로드 시도 ★★★
             logger.info("Excel 다운로드 버튼 클릭 시도 (검색 없이)...")
             try:
@@ -2147,12 +2233,8 @@ class NGMSScraper:
                     await excel_btn.click()
                     logger.info("Excel 버튼 클릭 완료")
                     
-                    # ★★★ 확인 대화상자 처리 - Enter 키 사용 ★★★
-                    await asyncio.sleep(1)  # 대화상자 표시 대기
-                    
-                    # Enter 키로 확인
-                    await new_page.keyboard.press('Enter')
-                    logger.info("Enter 키 입력 (확인 대화상자)")
+                    # ★★★ dialog 핸들러가 자동으로 확인 대화상자 처리 ★★★
+                    await asyncio.sleep(2)  # 대화상자 처리 대기
                     
                     logger.info("다운로드 대기 중...")
                 
@@ -2201,10 +2283,8 @@ class NGMSScraper:
                         await excel_btn.click()
                         logger.info("Excel 버튼 클릭 완료 (검색 후)")
                         
-                        # ★★★ Enter 키로 확인 대화상자 처리 ★★★
-                        await asyncio.sleep(1)
-                        await new_page.keyboard.press('Enter')
-                        logger.info("Enter 키 입력 (확인 대화상자)")
+                        # ★★★ dialog 핸들러가 자동으로 확인 대화상자 처리 ★★★
+                        await asyncio.sleep(2)  # 대화상자 처리 대기
                         
                         logger.info("다운로드 대기 중...")
                     
