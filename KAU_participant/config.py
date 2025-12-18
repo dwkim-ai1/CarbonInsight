@@ -68,7 +68,7 @@ BROWSER_SETTINGS = {
     "headless": True,
     "slow_mo": 100,  # milliseconds between actions
     "timeout": 60000,  # 60 seconds timeout
-    "download_timeout": 120000,  # 120 seconds for download
+    "download_timeout": 60000,  # 60 seconds for download (reduced from 120)
 }
 
 # Retry settings
@@ -82,4 +82,12 @@ DEBUG = {
     "save_screenshots": True,
     "save_html": True,
     "verbose_logging": True,
+}
+
+# API endpoints (for direct data access if available)
+API_ENDPOINTS = {
+    # These may need to be discovered through network monitoring
+    "할당대상업체": "/websquare/ngms.do",
+    "목표관리대상업체": "/websquare/ngms.do", 
+    "명세서배출량통계": "/websquare/ngms.do",
 }
