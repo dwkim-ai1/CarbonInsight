@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pandas as pd
 
+from config import COLUMN_MAPPING
+
 # Configure logging
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
     """Setup logging configuration"""
@@ -21,6 +23,52 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
         ]
     )
     return logging.getLogger("NGMS_Scraper")
+
+
+def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    컬럼명을 표준화된 이름으로 변환
+    
+    Args:
+        df: DataFrame with original column names
+        
+    Returns:
+        DataFrame with standardized column names
+    """
+    logger = logging.getLogger(__name__)
+    
+    if df.empty:
+        return df
+    
+    # 원본 컬럼명 저장
+    original_columns = list(df.columns)
+    
+    # 새로운 컬럼명 생성
+    new_columns = []
+    renamed_count = 0
+    
+    for col in df.columns:
+        col_str = str(col).strip()
+        
+        # 매핑 테이블에서 찾기
+        if col_str in COLUMN_MAPPING:
+            new_col = COLUMN_MAPPING[col_str]
+            new_columns.append(new_col)
+            if col_str != new_col:
+                renamed_count += 1
+                logger.debug(f"컬럼명 변환: '{col_str}' → '{new_col}'")
+        else:
+            new_columns.append(col_str)
+    
+    # 컬럼명 적용
+    df.columns = new_columns
+    
+    if renamed_count > 0:
+        logger.info(f"컬럼명 표준화: {renamed_count}개 변환됨")
+        logger.info(f"  변환 전: {original_columns[:5]}...")
+        logger.info(f"  변환 후: {new_columns[:5]}...")
+    
+    return df
 
 
 def get_current_timestamp() -> str:
@@ -215,6 +263,9 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             logger.debug(f"컬럼 '{col}' 처리 중 오류: {e}")
             continue
+    
+    # ★★★ 컬럼명 표준화 ★★★
+    df = standardize_column_names(df)
     
     # Reset index
     df = df.reset_index(drop=True)
