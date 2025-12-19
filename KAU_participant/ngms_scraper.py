@@ -2528,13 +2528,23 @@ class NGMSScraper:
             
             # ★★★ 연도가 지정된 경우: 해당 연도 행 찾기 ★★★
             if emission_year:
-                logger.info(f"연도 {emission_year}의 행 찾는 중...")
+                logger.info(f"★★★ 연도 {emission_year}의 행 찾기 시작 ★★★")
                 
                 try:
                     # 모든 행 순회하며 해당 연도 찾기
                     rows = iframe_locator.locator('tbody tr')
                     row_count = await rows.count()
                     logger.info(f"테이블 행 수: {row_count}")
+                    
+                    # 처음 몇 개 행의 첫 번째 셀 값 출력 (디버그)
+                    for i in range(min(5, row_count)):
+                        try:
+                            row = rows.nth(i)
+                            first_cell = row.locator('td:first-child')
+                            cell_text = await first_cell.inner_text(timeout=2000)
+                            logger.info(f"  행 {i}: 첫 번째 셀 = '{cell_text.strip()}'")
+                        except:
+                            pass
                     
                     for i in range(row_count):
                         row = rows.nth(i)
@@ -2546,7 +2556,7 @@ class NGMSScraper:
                             
                             # 연도 매칭 (2024, "2024", "2024년" 등)
                             if str(emission_year) in cell_text:
-                                logger.info(f"연도 {emission_year} 발견: {i}번째 행 (셀 값: '{cell_text}')")
+                                logger.info(f"★ 연도 {emission_year} 발견: {i}번째 행 (셀 값: '{cell_text}')")
                                 
                                 # 해당 행의 업체배출량 버튼 찾기 (3번째 또는 4번째 열)
                                 # 열 구조: 배출년도 | 제목 | 업체배출량 | 지역별배출량 | ...
@@ -2565,7 +2575,7 @@ class NGMSScraper:
                                     btn_count = await btn.count()
                                     if btn_count > 0:
                                         download_btn = btn
-                                        logger.info(f"연도 {emission_year} 행에서 버튼 발견: {btn_sel}")
+                                        logger.info(f"★ 연도 {emission_year} 행에서 버튼 발견: {btn_sel}")
                                         break
                                 
                                 if download_btn:
@@ -2575,7 +2585,7 @@ class NGMSScraper:
                             continue
                     
                     if not download_btn:
-                        logger.warning(f"연도 {emission_year}의 행을 찾지 못함, 첫 번째 행으로 폴백")
+                        logger.warning(f"⚠️ 연도 {emission_year}의 행을 찾지 못함, 첫 번째 행으로 폴백")
                 
                 except Exception as e:
                     logger.warning(f"연도별 행 찾기 실패: {e}")
@@ -2704,6 +2714,7 @@ class NGMSScraper:
             try:
                 # 명세서배출량통계는 emission_year 전달
                 if data_type == '명세서배출량통계' and emission_year:
+                    logger.info(f"★ {data_type}: emission_year={emission_year} 전달")
                     df = await self.download_data(data_type, emission_year=int(emission_year))
                 else:
                     df = await self.download_data(data_type)
