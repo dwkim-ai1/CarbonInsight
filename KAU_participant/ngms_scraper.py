@@ -2182,12 +2182,13 @@ class NGMSScraper:
         
         return False
     
-    async def download_data(self, data_type: str) -> Optional[pd.DataFrame]:
+    async def download_data(self, data_type: str, emission_year: int = None) -> Optional[pd.DataFrame]:
         """
         Download data for a specific data type
         
         Args:
             data_type: Type of data to download
+            emission_year: (명세서배출량통계 전용) 다운로드할 연도
             
         Returns:
             DataFrame with downloaded data or None
@@ -2196,7 +2197,7 @@ class NGMSScraper:
         
         # 명세서배출량통계는 별도 처리 (연도별 다운로드 목록 형태)
         if data_type == "명세서배출량통계":
-            df = await self._scrape_emission_statistics()
+            df = await self._scrape_emission_statistics(emission_year=emission_year)
         else:
             df = None
             
@@ -2443,15 +2444,19 @@ class NGMSScraper:
         
         return False
     
-    async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
+    async def _scrape_emission_statistics(self, emission_year: int = None) -> Optional[pd.DataFrame]:
         """
         명세서배출량통계 전용 스크래퍼
-        최신 연도의 "업체배출량 다운" 버튼을 클릭하여 Excel 다운로드
+        지정된 연도의 "업체배출량 다운" 버튼을 클릭하여 Excel 다운로드
+        
+        Args:
+            emission_year: 다운로드할 연도 (None이면 최신 연도)
         
         Returns:
             DataFrame with emission statistics (업체별 배출량 데이터)
         """
-        logger.info("명세서배출량통계 스크래핑 (업체배출량 Excel 다운로드)")
+        year_str = f"{emission_year}년" if emission_year else "최신"
+        logger.info(f"명세서배출량통계 스크래핑 ({year_str} 업체배출량 Excel 다운로드)")
         
         page_url = IFRAME_URLS.get("명세서배출량통계")
         new_page = await self.context.new_page()
@@ -2504,8 +2509,8 @@ class NGMSScraper:
             
             await self._save_debug("emission_stats_02_after_search", new_page)
             
-            # ★★★ 첫 번째 행의 "업체배출량" 다운로드 버튼 클릭 ★★★
-            logger.info("업체배출량 다운로드 버튼 찾기...")
+            # ★★★ 지정 연도 또는 최신 연도의 "업체배출량" 다운로드 버튼 클릭 ★★★
+            logger.info(f"업체배출량 다운로드 버튼 찾기... (목표 연도: {emission_year or '최신'})")
             
             # 디버그: 테이블 구조 확인
             try:
@@ -2516,50 +2521,100 @@ class NGMSScraper:
                 all_btns = iframe_locator.locator('button:has-text("다운"), a:has-text("다운")')
                 btn_count = await all_btns.count()
                 logger.info(f"'다운' 버튼 (button/a) 개수: {btn_count}")
-                
-                # 첫 번째 행의 모든 버튼 확인
-                first_row_btns = iframe_locator.locator('tbody tr:first-child input, tbody tr:first-child button, tbody tr:first-child a')
-                fr_count = await first_row_btns.count()
-                logger.info(f"첫 번째 행 버튼 개수: {fr_count}")
             except Exception as e:
                 logger.debug(f"디버그 정보 수집 실패: {e}")
             
-            # 다운로드 버튼 선택자들 (업체배출량 = 4번째 컬럼)
-            download_btn_selectors = [
-                # WebSquare 그리드 - 첫 번째 데이터 행의 input 버튼
-                'table[id*="grdList_body"] tbody tr:first-child td:nth-child(4) input',
-                'table[id*="body_table"] tbody tr:first-child td:nth-child(4) input',
-                # 일반 테이블 - 첫 번째 행
-                'tbody tr:first-child td:nth-child(4) input[value*="다"]',
-                'tbody tr:first-child td:nth-child(4) input',
-                'tbody tr:first-child td:nth-child(4) button',
-                'tbody tr:first-child td:nth-child(4) a',
-                # 더 일반적인 선택자
-                'tbody tr:first-child input[value*="다"]',
-                'tbody tr td input[value*="다"]',  # 아무 행의 다운 버튼
-                # value에 공백이 있을 수 있음
-                'input[value="다운"]',
-                'input[value="다 운"]',
-                'input[value*="다운"]',
-                # 버튼/링크
-                'button:has-text("다운")',
-                'a:has-text("다운")',
-            ]
-            
             download_btn = None
-            for selector in download_btn_selectors:
+            
+            # ★★★ 연도가 지정된 경우: 해당 연도 행 찾기 ★★★
+            if emission_year:
+                logger.info(f"연도 {emission_year}의 행 찾는 중...")
+                
                 try:
-                    btn = iframe_locator.locator(selector).first
-                    count = await btn.count()
-                    if count > 0:
-                        download_btn = btn
-                        logger.info(f"다운로드 버튼 발견: {selector}")
-                        break
-                    else:
-                        logger.debug(f"선택자 '{selector}': 0개")
+                    # 모든 행 순회하며 해당 연도 찾기
+                    rows = iframe_locator.locator('tbody tr')
+                    row_count = await rows.count()
+                    logger.info(f"테이블 행 수: {row_count}")
+                    
+                    for i in range(row_count):
+                        row = rows.nth(i)
+                        # 첫 번째 셀 (배출년도 컬럼) 확인
+                        first_cell = row.locator('td:first-child')
+                        try:
+                            cell_text = await first_cell.inner_text(timeout=2000)
+                            cell_text = cell_text.strip()
+                            
+                            # 연도 매칭 (2024, "2024", "2024년" 등)
+                            if str(emission_year) in cell_text:
+                                logger.info(f"연도 {emission_year} 발견: {i}번째 행 (셀 값: '{cell_text}')")
+                                
+                                # 해당 행의 업체배출량 버튼 찾기 (3번째 또는 4번째 열)
+                                # 열 구조: 배출년도 | 제목 | 업체배출량 | 지역별배출량 | ...
+                                btn_selectors = [
+                                    'td:nth-child(3) input',
+                                    'td:nth-child(3) button',
+                                    'td:nth-child(3) a',
+                                    'td:nth-child(4) input',
+                                    'td:nth-child(4) button',
+                                    'input[value*="다"]',
+                                    'button:has-text("다")',
+                                ]
+                                
+                                for btn_sel in btn_selectors:
+                                    btn = row.locator(btn_sel).first
+                                    btn_count = await btn.count()
+                                    if btn_count > 0:
+                                        download_btn = btn
+                                        logger.info(f"연도 {emission_year} 행에서 버튼 발견: {btn_sel}")
+                                        break
+                                
+                                if download_btn:
+                                    break
+                        except Exception as e:
+                            logger.debug(f"행 {i} 처리 실패: {e}")
+                            continue
+                    
+                    if not download_btn:
+                        logger.warning(f"연도 {emission_year}의 행을 찾지 못함, 첫 번째 행으로 폴백")
+                
                 except Exception as e:
-                    logger.debug(f"선택자 '{selector}' 실패: {e}")
-                    continue
+                    logger.warning(f"연도별 행 찾기 실패: {e}")
+            
+            # ★★★ 연도 미지정 또는 연도 찾기 실패 시: 첫 번째 행 사용 ★★★
+            if not download_btn:
+                logger.info("첫 번째 행(최신 연도)의 버튼 찾는 중...")
+                
+                # 다운로드 버튼 선택자들 (업체배출량 = 3번째 또는 4번째 컬럼)
+                download_btn_selectors = [
+                    # 업체배출량 컬럼 (3번째 열)
+                    'tbody tr:first-child td:nth-child(3) input',
+                    'tbody tr:first-child td:nth-child(3) button',
+                    'tbody tr:first-child td:nth-child(3) a',
+                    # 업체배출량 컬럼 (4번째 열 - 구조에 따라)
+                    'tbody tr:first-child td:nth-child(4) input',
+                    'tbody tr:first-child td:nth-child(4) button',
+                    'tbody tr:first-child td:nth-child(4) a',
+                    # WebSquare 그리드
+                    'table[id*="grdList_body"] tbody tr:first-child td:nth-child(3) input',
+                    'table[id*="body_table"] tbody tr:first-child td:nth-child(3) input',
+                    # 더 일반적인 선택자
+                    'tbody tr:first-child input[value*="다"]',
+                    'input[value="다운"]',
+                    'input[value="다 운"]',
+                    'button:has-text("다운")',
+                ]
+                
+                for selector in download_btn_selectors:
+                    try:
+                        btn = iframe_locator.locator(selector).first
+                        count = await btn.count()
+                        if count > 0:
+                            download_btn = btn
+                            logger.info(f"다운로드 버튼 발견: {selector}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"선택자 '{selector}' 실패: {e}")
+                        continue
             
             if not download_btn:
                 logger.error("업체배출량 다운로드 버튼을 찾을 수 없음")
@@ -2647,7 +2702,12 @@ class NGMSScraper:
         
         for data_type in ['할당대상업체', '목표관리대상업체', '명세서배출량통계']:
             try:
-                df = await self.download_data(data_type)
+                # 명세서배출량통계는 emission_year 전달
+                if data_type == '명세서배출량통계' and emission_year:
+                    df = await self.download_data(data_type, emission_year=int(emission_year))
+                else:
+                    df = await self.download_data(data_type)
+                    
                 if df is not None and len(df) > 0:
                     results[data_type] = df
                     logger.info(f"✓ {data_type}: {len(df)}행 수집됨")
