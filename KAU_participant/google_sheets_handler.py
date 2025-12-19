@@ -329,6 +329,15 @@ class GoogleSheetsHandler:
         available_key_cols = [c for c in key_cols if c in new_data.columns]
         available_value_cols = [c for c in value_cols if c in new_data.columns]
         
+        # ★★★ 디버그 로그 ★★★
+        logger.info(f"키 컬럼 (설정): {key_cols}")
+        logger.info(f"키 컬럼 (실제 존재): {available_key_cols}")
+        logger.info(f"새 데이터 컬럼: {list(new_data.columns)[:8]}...")
+        
+        # 키 컬럼이 없으면 경고
+        if not available_key_cols:
+            logger.warning(f"⚠️ 키 컬럼을 찾을 수 없음! 전체 데이터가 '신규'로 처리됩니다.")
+        
         if old_data.empty:
             # First time - all data is new
             changes = {
