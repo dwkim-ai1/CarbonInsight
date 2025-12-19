@@ -208,45 +208,95 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     
-    # ★★★ 헤더 자동 수정: "Unnamed" 또는 숫자 컬럼명이 많으면 첫 번째 행을 헤더로 사용 ★★★
+    # ★★★ 헤더 키워드 목록 (이 키워드가 있으면 헤더 행으로 판단) ★★★
+    HEADER_KEYWORDS = ['순번', 'NO', '번호', '업체명', '법인명', '관리업체명', '지정연도', '대상년도', '대상연도']
+    
+    def is_valid_header_row(row):
+        """행이 유효한 헤더인지 확인"""
+        row_values = [str(v).strip().upper() for v in row if pd.notna(v) and str(v).strip()]
+        for keyword in HEADER_KEYWORDS:
+            if keyword.upper() in row_values or any(keyword.upper() in v for v in row_values):
+                return True
+        return False
+    
+    def count_valid_cells(row):
+        """유효한 셀 개수"""
+        return sum(1 for v in row if pd.notna(v) and str(v).strip() and str(v).lower() not in ['nan', 'none', 'nat', ''])
+    
+    # ★★★ 컬럼명이 문제인지 확인 ★★★
     unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
     numeric_col_count = sum(1 for col in df.columns if isinstance(col, (int, float)) or str(col).isdigit())
+    nan_col_count = sum(1 for col in df.columns if str(col).lower() == 'nan')
     
-    if unnamed_count > len(df.columns) // 2 or numeric_col_count > len(df.columns) // 2:
-        logger.info(f"헤더 자동 수정: Unnamed={unnamed_count}, 숫자컬럼={numeric_col_count}")
+    needs_header_fix = (unnamed_count > len(df.columns) // 2 or 
+                        numeric_col_count > len(df.columns) // 2 or 
+                        nan_col_count > len(df.columns) // 2)
+    
+    if needs_header_fix:
+        logger.info(f"헤더 자동 수정 필요: Unnamed={unnamed_count}, 숫자컬럼={numeric_col_count}, nan컬럼={nan_col_count}")
         
-        # 첫 번째 행이 타이틀 행인지 확인 (대부분 nan이면 타이틀)
-        if len(df) > 1:
-            first_row = df.iloc[0]
-            nan_count = first_row.isna().sum() + (first_row.astype(str).str.strip() == '').sum()
+        # ★★★ 키워드 기반으로 유효한 헤더 행 찾기 ★★★
+        header_row_idx = None
+        max_search = min(15, len(df))  # 최대 15행까지 검색
+        
+        for i in range(max_search):
+            row = df.iloc[i]
             
-            if nan_count > len(first_row) // 2:
-                # 첫 행이 대부분 비어있으면 두 번째 행을 헤더로
-                logger.info(f"첫 행 대부분 비어있음 ({nan_count}/{len(first_row)}), 두 번째 행을 헤더로 사용")
-                if len(df) > 1:
-                    new_header = df.iloc[1].astype(str).tolist()
-                    df = df.iloc[2:].reset_index(drop=True)
-                    df.columns = new_header
-                    logger.info(f"새 헤더: {new_header[:5]}...")
-            else:
-                # 첫 행을 헤더로 사용
-                new_header = df.iloc[0].astype(str).tolist()
-                df = df.iloc[1:].reset_index(drop=True)
-                df.columns = new_header
-                logger.info(f"새 헤더: {new_header[:5]}...")
+            # 키워드가 포함된 행 찾기
+            if is_valid_header_row(row):
+                header_row_idx = i
+                logger.info(f"키워드 기반 헤더 발견: {i}행")
+                break
+        
+        # 키워드로 못 찾으면 유효 셀 개수 기반
+        if header_row_idx is None:
+            for i in range(max_search):
+                row = df.iloc[i]
+                valid_count = count_valid_cells(row)
+                
+                # 절반 이상이 유효한 값이면 헤더로 사용
+                if valid_count > len(row) // 2:
+                    header_row_idx = i
+                    logger.info(f"유효 셀 기반 헤더 발견: {i}행 (유효 셀: {valid_count}/{len(row)})")
+                    break
+        
+        # 헤더 행 적용
+        if header_row_idx is not None and header_row_idx < len(df):
+            new_header = df.iloc[header_row_idx].astype(str).tolist()
+            df = df.iloc[header_row_idx + 1:].reset_index(drop=True)
+            df.columns = new_header
+            logger.info(f"새 헤더 적용: {new_header[:5]}...")
+        else:
+            logger.warning("유효한 헤더를 찾지 못함")
     
-    # ★★★ 타이틀 행 제거: 첫 번째 컬럼에 "현황" 또는 "건)" 포함 시 ★★★
+    # ★★★ 컬럼명이 여전히 nan이면 한 번 더 시도 ★★★
+    nan_col_count = sum(1 for col in df.columns if str(col).lower() == 'nan')
+    if nan_col_count > len(df.columns) // 2 and len(df) > 0:
+        logger.warning(f"여전히 nan 컬럼 많음 ({nan_col_count}개), 키워드 기반 재시도")
+        
+        for i in range(min(10, len(df))):
+            row = df.iloc[i]
+            if is_valid_header_row(row):
+                new_header = row.astype(str).tolist()
+                df = df.iloc[i + 1:].reset_index(drop=True)
+                df.columns = new_header
+                logger.info(f"재시도 성공, 새 헤더: {new_header[:5]}...")
+                break
+    
+    # ★★★ 타이틀 행 제거 ★★★
     if len(df.columns) > 0:
         first_col = str(df.columns[0])
-        if '현황' in first_col or '건)' in first_col or '통계' in first_col:
+        if '현황' in first_col or '건)' in first_col or '통계' in first_col or '기준' in first_col:
             logger.info(f"타이틀 행 감지: '{first_col}'")
             
-            # 다음 행을 헤더로 사용
-            if len(df) > 0:
-                new_header = df.iloc[0].astype(str).tolist()
-                df = df.iloc[1:].reset_index(drop=True)
-                df.columns = new_header
-                logger.info(f"새 헤더: {new_header[:5]}...")
+            for i in range(min(5, len(df))):
+                row = df.iloc[i]
+                if is_valid_header_row(row):
+                    new_header = row.astype(str).tolist()
+                    df = df.iloc[i + 1:].reset_index(drop=True)
+                    df.columns = new_header
+                    logger.info(f"새 헤더: {new_header[:5]}...")
+                    break
     
     # Remove completely empty rows
     df = df.dropna(how='all')
@@ -254,7 +304,7 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     # Remove rows where all values are whitespace
     df = df[~df.apply(lambda x: x.astype(str).str.strip().eq('').all(), axis=1)]
     
-    # ★★★ Strip whitespace from string columns (버그 수정) ★★★
+    # ★★★ Strip whitespace from string columns ★★★
     for col in df.columns:
         try:
             if df[col].dtype == object or str(df[col].dtype) == 'object':
