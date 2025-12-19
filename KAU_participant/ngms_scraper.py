@@ -2558,16 +2558,17 @@ class NGMSScraper:
                             if str(emission_year) in cell_text:
                                 logger.info(f"★ 연도 {emission_year} 발견: {i}번째 행 (셀 값: '{cell_text}')")
                                 
-                                # 해당 행의 업체배출량 버튼 찾기 (3번째 또는 4번째 열)
-                                # 열 구조: 배출년도 | 제목 | 업체배출량 | 지역별배출량 | ...
+                                # ★★★ 해당 행의 "업체배출량" 버튼 찾기 ★★★
+                                # 열 구조: 배출년도(1) | 제목(2) | 업체배출량(3) | 지역별배출량(4) | 업종별배출량(5) | 목표달성여부(6)
+                                # 반드시 3번째 열(업체배출량)을 먼저 시도!
                                 btn_selectors = [
+                                    # ★★★ 3번째 열(업체배출량) 우선 ★★★
                                     'td:nth-child(3) input',
                                     'td:nth-child(3) button',
                                     'td:nth-child(3) a',
-                                    'td:nth-child(4) input',
-                                    'td:nth-child(4) button',
-                                    'input[value*="다"]',
-                                    'button:has-text("다")',
+                                    # 4번째 열은 지역별배출량이므로 사용하지 않음
+                                    # 'td:nth-child(4) input',  # 제거!
+                                    # 'td:nth-child(4) button',  # 제거!
                                 ]
                                 
                                 for btn_sel in btn_selectors:
@@ -2594,24 +2595,16 @@ class NGMSScraper:
             if not download_btn:
                 logger.info("첫 번째 행(최신 연도)의 버튼 찾는 중...")
                 
-                # 다운로드 버튼 선택자들 (업체배출량 = 3번째 또는 4번째 컬럼)
+                # ★★★ 업체배출량 = 3번째 컬럼 (4번째는 지역별배출량이므로 제외) ★★★
                 download_btn_selectors = [
-                    # 업체배출량 컬럼 (3번째 열)
+                    # 업체배출량 컬럼 (3번째 열만!)
                     'tbody tr:first-child td:nth-child(3) input',
                     'tbody tr:first-child td:nth-child(3) button',
                     'tbody tr:first-child td:nth-child(3) a',
-                    # 업체배출량 컬럼 (4번째 열 - 구조에 따라)
-                    'tbody tr:first-child td:nth-child(4) input',
-                    'tbody tr:first-child td:nth-child(4) button',
-                    'tbody tr:first-child td:nth-child(4) a',
-                    # WebSquare 그리드
+                    # WebSquare 그리드 (3번째 열만!)
                     'table[id*="grdList_body"] tbody tr:first-child td:nth-child(3) input',
                     'table[id*="body_table"] tbody tr:first-child td:nth-child(3) input',
-                    # 더 일반적인 선택자
-                    'tbody tr:first-child input[value*="다"]',
-                    'input[value="다운"]',
-                    'input[value="다 운"]',
-                    'button:has-text("다운")',
+                    # 4번째 열은 지역별배출량이므로 사용하지 않음!
                 ]
                 
                 for selector in download_btn_selectors:
@@ -2650,6 +2643,30 @@ class NGMSScraper:
                 try:
                     df = pd.read_excel(download_path, header=None)
                     logger.info(f"Excel 파일 읽기 성공: {len(df)}행 (헤더 자동 감지 예정)")
+                    
+                    # ★★★ 헤더 검증: 필수 키워드가 있는지 확인 ★★★
+                    REQUIRED_KEYWORDS = ['업체', '법인', '배출량', '에너지']
+                    
+                    # 처음 10행에서 필수 키워드 포함 여부 확인
+                    found_keywords = set()
+                    for i in range(min(10, len(df))):
+                        row_text = ' '.join(df.iloc[i].astype(str).tolist()).lower()
+                        for keyword in REQUIRED_KEYWORDS:
+                            if keyword in row_text:
+                                found_keywords.add(keyword)
+                    
+                    if len(found_keywords) < 2:  # 최소 2개 키워드 필요
+                        logger.error(f"⚠️ Excel 파일 형식이 예상과 다름!")
+                        logger.error(f"  발견된 키워드: {found_keywords}")
+                        logger.error(f"  필요한 키워드: {REQUIRED_KEYWORDS}")
+                        logger.error(f"  파일명: {download.suggested_filename}")
+                        
+                        # 파일 헤더 출력 (디버그용)
+                        for i in range(min(5, len(df))):
+                            logger.error(f"  행 {i}: {df.iloc[i].tolist()[:5]}...")
+                        
+                        return None
+                    
                     return df
                 except Exception as e:
                     logger.error(f"Excel 파일 읽기 실패: {e}")
