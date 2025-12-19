@@ -376,10 +376,20 @@ class NGMSScraper:
                     while len(row) < max_cols:
                         row.append('')
                 
-                if headers and len(headers) >= max_cols:
+                # ★★★ 헤더 적용 개선 ★★★
+                logger.info(f"헤더 수: {len(headers)}, 데이터 컬럼 수: {max_cols}")
+                
+                if headers and len(headers) > 0:
+                    # 헤더가 부족하면 추가
+                    while len(headers) < max_cols:
+                        headers.append(f'컬럼_{len(headers)+1}')
+                    
+                    # 헤더가 많으면 자르기
                     df = pd.DataFrame(all_rows_data, columns=headers[:max_cols])
+                    logger.info(f"헤더 적용됨: {list(df.columns[:5])}...")
                 else:
                     df = pd.DataFrame(all_rows_data)
+                    logger.warning("헤더 없이 DataFrame 생성")
                 
                 return df
             
