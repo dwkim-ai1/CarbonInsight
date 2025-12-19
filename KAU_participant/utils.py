@@ -157,6 +157,9 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     logger = logging.getLogger(__name__)
     
+    if df.empty:
+        return df
+    
     # ★★★ 헤더 자동 수정: "Unnamed" 또는 숫자 컬럼명이 많으면 첫 번째 행을 헤더로 사용 ★★★
     unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
     numeric_col_count = sum(1 for col in df.columns if isinstance(col, (int, float)) or str(col).isdigit())
@@ -164,24 +167,38 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     if unnamed_count > len(df.columns) // 2 or numeric_col_count > len(df.columns) // 2:
         logger.info(f"헤더 자동 수정: Unnamed={unnamed_count}, 숫자컬럼={numeric_col_count}")
         
-        # 첫 번째 행을 헤더로 사용
-        if len(df) > 0:
-            new_header = df.iloc[0].astype(str).tolist()
-            df = df.iloc[1:].reset_index(drop=True)
-            df.columns = new_header
-            logger.info(f"새 헤더: {new_header[:5]}...")
+        # 첫 번째 행이 타이틀 행인지 확인 (대부분 nan이면 타이틀)
+        if len(df) > 1:
+            first_row = df.iloc[0]
+            nan_count = first_row.isna().sum() + (first_row.astype(str).str.strip() == '').sum()
+            
+            if nan_count > len(first_row) // 2:
+                # 첫 행이 대부분 비어있으면 두 번째 행을 헤더로
+                logger.info(f"첫 행 대부분 비어있음 ({nan_count}/{len(first_row)}), 두 번째 행을 헤더로 사용")
+                if len(df) > 1:
+                    new_header = df.iloc[1].astype(str).tolist()
+                    df = df.iloc[2:].reset_index(drop=True)
+                    df.columns = new_header
+                    logger.info(f"새 헤더: {new_header[:5]}...")
+            else:
+                # 첫 행을 헤더로 사용
+                new_header = df.iloc[0].astype(str).tolist()
+                df = df.iloc[1:].reset_index(drop=True)
+                df.columns = new_header
+                logger.info(f"새 헤더: {new_header[:5]}...")
     
     # ★★★ 타이틀 행 제거: 첫 번째 컬럼에 "현황" 또는 "건)" 포함 시 ★★★
-    first_col = str(df.columns[0]) if len(df.columns) > 0 else ''
-    if '현황' in first_col or '건)' in first_col or '통계' in first_col:
-        logger.info(f"타이틀 행 감지: '{first_col}'")
-        
-        # 다음 행을 헤더로 사용
-        if len(df) > 0:
-            new_header = df.iloc[0].astype(str).tolist()
-            df = df.iloc[1:].reset_index(drop=True)
-            df.columns = new_header
-            logger.info(f"새 헤더: {new_header[:5]}...")
+    if len(df.columns) > 0:
+        first_col = str(df.columns[0])
+        if '현황' in first_col or '건)' in first_col or '통계' in first_col:
+            logger.info(f"타이틀 행 감지: '{first_col}'")
+            
+            # 다음 행을 헤더로 사용
+            if len(df) > 0:
+                new_header = df.iloc[0].astype(str).tolist()
+                df = df.iloc[1:].reset_index(drop=True)
+                df.columns = new_header
+                logger.info(f"새 헤더: {new_header[:5]}...")
     
     # Remove completely empty rows
     df = df.dropna(how='all')
@@ -189,11 +206,15 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     # Remove rows where all values are whitespace
     df = df[~df.apply(lambda x: x.astype(str).str.strip().eq('').all(), axis=1)]
     
-    # Strip whitespace from string columns
+    # ★★★ Strip whitespace from string columns (버그 수정) ★★★
     for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].replace(['nan', 'None', ''], pd.NA)
+        try:
+            if df[col].dtype == object or str(df[col].dtype) == 'object':
+                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].replace(['nan', 'None', '', 'NaN', 'NaT'], pd.NA)
+        except Exception as e:
+            logger.debug(f"컬럼 '{col}' 처리 중 오류: {e}")
+            continue
     
     # Reset index
     df = df.reset_index(drop=True)
