@@ -49,16 +49,38 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     
     for col in df.columns:
         col_str = str(col).strip()
+        new_col = col_str  # 기본값
         
-        # 매핑 테이블에서 찾기
+        # 1. 정확한 매핑 먼저 시도
         if col_str in COLUMN_MAPPING:
             new_col = COLUMN_MAPPING[col_str]
-            new_columns.append(new_col)
             if col_str != new_col:
                 renamed_count += 1
-                logger.debug(f"컬럼명 변환: '{col_str}' → '{new_col}'")
+                logger.debug(f"컬럼명 변환(정확): '{col_str}' → '{new_col}'")
         else:
-            new_columns.append(col_str)
+            # 2. 부분 매칭 시도 (키워드 기반)
+            # ★★★ 온실가스배출량 관련 ★★★
+            if '온실가스배출량' in col_str or '가스배출량' in col_str or '배출량(tCO' in col_str:
+                new_col = '온실가스배출량(tCO2)'
+                renamed_count += 1
+                logger.debug(f"컬럼명 변환(부분): '{col_str}' → '{new_col}'")
+            # ★★★ 에너지사용량 관련 ★★★
+            elif '에너지' in col_str and '사용량' in col_str:
+                new_col = '에너지사용량(TJ)'
+                renamed_count += 1
+                logger.debug(f"컬럼명 변환(부분): '{col_str}' → '{new_col}'")
+            # ★★★ 검증수행기관 관련 ★★★
+            elif '검증' in col_str and ('기관' in col_str or '수행' in col_str):
+                new_col = '검증수행기관'
+                renamed_count += 1
+                logger.debug(f"컬럼명 변환(부분): '{col_str}' → '{new_col}'")
+            # ★★★ 중소기업 관련 ★★★
+            elif '중소기업' in col_str:
+                new_col = '중소기업여부'
+                renamed_count += 1
+                logger.debug(f"컬럼명 변환(부분): '{col_str}' → '{new_col}'")
+        
+        new_columns.append(new_col)
     
     # 컬럼명 적용
     df.columns = new_columns
