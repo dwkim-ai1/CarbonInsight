@@ -2507,17 +2507,42 @@ class NGMSScraper:
             # ★★★ 첫 번째 행의 "업체배출량" 다운로드 버튼 클릭 ★★★
             logger.info("업체배출량 다운로드 버튼 찾기...")
             
-            # 다운로드 버튼 선택자들 (첫 번째 행의 업체배출량 컬럼)
+            # 디버그: 테이블 구조 확인
+            try:
+                all_inputs = iframe_locator.locator('input[value*="다운"], input[value*="다 운"]')
+                input_count = await all_inputs.count()
+                logger.info(f"'다운' 버튼 (input) 개수: {input_count}")
+                
+                all_btns = iframe_locator.locator('button:has-text("다운"), a:has-text("다운")')
+                btn_count = await all_btns.count()
+                logger.info(f"'다운' 버튼 (button/a) 개수: {btn_count}")
+                
+                # 첫 번째 행의 모든 버튼 확인
+                first_row_btns = iframe_locator.locator('tbody tr:first-child input, tbody tr:first-child button, tbody tr:first-child a')
+                fr_count = await first_row_btns.count()
+                logger.info(f"첫 번째 행 버튼 개수: {fr_count}")
+            except Exception as e:
+                logger.debug(f"디버그 정보 수집 실패: {e}")
+            
+            # 다운로드 버튼 선택자들 (업체배출량 = 4번째 컬럼)
             download_btn_selectors = [
-                # 첫 번째 행의 다운 버튼 (업체배출량 컬럼)
-                'tbody tr:first-child td:nth-child(4) input[value="다운"]',
-                'tbody tr:first-child td:nth-child(4) a:has-text("다운")',
-                'tbody tr:first-child input[value="다운"]',
-                # WebSquare 그리드 버튼
-                'table[id*="body_table"] tbody tr:first-child input[value="다운"]',
-                'table[id*="grdList"] tbody tr:first-child input[value="다운"]',
-                # 일반적인 다운 버튼 (첫 번째)
+                # WebSquare 그리드 - 첫 번째 데이터 행의 input 버튼
+                'table[id*="grdList_body"] tbody tr:first-child td:nth-child(4) input',
+                'table[id*="body_table"] tbody tr:first-child td:nth-child(4) input',
+                # 일반 테이블 - 첫 번째 행
+                'tbody tr:first-child td:nth-child(4) input[value*="다"]',
+                'tbody tr:first-child td:nth-child(4) input',
+                'tbody tr:first-child td:nth-child(4) button',
+                'tbody tr:first-child td:nth-child(4) a',
+                # 더 일반적인 선택자
+                'tbody tr:first-child input[value*="다"]',
+                'tbody tr td input[value*="다"]',  # 아무 행의 다운 버튼
+                # value에 공백이 있을 수 있음
                 'input[value="다운"]',
+                'input[value="다 운"]',
+                'input[value*="다운"]',
+                # 버튼/링크
+                'button:has-text("다운")',
                 'a:has-text("다운")',
             ]
             
@@ -2525,11 +2550,15 @@ class NGMSScraper:
             for selector in download_btn_selectors:
                 try:
                     btn = iframe_locator.locator(selector).first
-                    if await btn.count() > 0:
+                    count = await btn.count()
+                    if count > 0:
                         download_btn = btn
                         logger.info(f"다운로드 버튼 발견: {selector}")
                         break
-                except:
+                    else:
+                        logger.debug(f"선택자 '{selector}': 0개")
+                except Exception as e:
+                    logger.debug(f"선택자 '{selector}' 실패: {e}")
                     continue
             
             if not download_btn:
