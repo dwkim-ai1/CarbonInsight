@@ -180,20 +180,26 @@ class GoogleSheetsHandler:
     def update_stack_sheet(
         self, 
         data_type: str, 
-        changes: Dict[str, pd.DataFrame]
+        changes: Dict[str, pd.DataFrame],
+        new_data: pd.DataFrame = None
     ) -> Dict[str, Any]:
         """
-        Update the 'stack' sheet with changed records
+        Update the 'stack' sheet with upsert logic
+        - 신규: 새 행 추가
+        - 변경: 기존 행 업데이트 (덮어쓰기)
+        - 삭제: 무시 (데이터는 유지, 로그만 남김)
         
         Args:
             data_type: Type of data
             changes: Dictionary with 'added', 'removed', 'changed' DataFrames
+            new_data: Full new data for upsert (optional)
             
         Returns:
             Update result dictionary
         """
         sheet_name = SHEET_NAMES[f"{data_type}_stack"]
         columns = COLUMNS[data_type]
+        key_columns = KEY_COLUMNS.get(data_type, [])
         
         # Columns for stack sheet include metadata
         stack_columns = columns + ['_변경유형', '_변경일시']
@@ -202,57 +208,109 @@ class GoogleSheetsHandler:
         
         update_time = get_current_timestamp()
         rows_added = 0
+        rows_updated = 0
         
-        # Prepare records to add
-        records_to_add = []
+        # ★★★ 기존 데이터 읽기 ★★★
+        try:
+            all_values = worksheet.get_all_values()
+            if all_values and len(all_values) > 1:
+                headers = all_values[0]
+                data = all_values[1:]
+                existing_df = pd.DataFrame(data, columns=headers)
+            else:
+                existing_df = pd.DataFrame(columns=stack_columns)
+        except Exception as e:
+            logger.warning(f"기존 데이터 읽기 실패: {e}")
+            existing_df = pd.DataFrame(columns=stack_columns)
         
-        for change_type, df in changes.items():
-            if not df.empty:
-                df_copy = df.copy()
-                
-                # Map change type to Korean
-                type_map = {
-                    'added': '신규',
-                    'removed': '삭제',
-                    'changed': '변경'
-                }
-                
-                df_copy['_변경유형'] = type_map.get(change_type, change_type)
-                df_copy['_변경일시'] = update_time
-                
-                # Ensure columns are in correct order
-                for col in stack_columns:
-                    if col not in df_copy.columns:
-                        df_copy[col] = ''
-                
-                df_copy = df_copy[stack_columns]
-                records_to_add.extend(df_copy.fillna('').values.tolist())
+        # ★★★ 신규 데이터만 추가 ★★★
+        added_df = changes.get('added', pd.DataFrame())
+        if not added_df.empty:
+            added_copy = added_df.copy()
+            added_copy['_변경유형'] = '신규'
+            added_copy['_변경일시'] = update_time
+            
+            # 필요한 컬럼만 유지
+            for col in stack_columns:
+                if col not in added_copy.columns:
+                    added_copy[col] = ''
+            added_copy = added_copy[[c for c in stack_columns if c in added_copy.columns]]
+            
+            rows_added = len(added_copy)
+            logger.info(f"신규 데이터 {rows_added}건 추가")
+        else:
+            added_copy = pd.DataFrame()
         
-        if records_to_add:
-            # Get current row count
-            existing_data = worksheet.get_all_values()
-            next_row = len(existing_data) + 1
-            required_rows = next_row + len(records_to_add)
+        # ★★★ 변경된 데이터: 기존 행 업데이트 ★★★
+        changed_df = changes.get('changed', pd.DataFrame())
+        if not changed_df.empty and not existing_df.empty and key_columns:
+            # 키 컬럼이 모두 존재하는지 확인
+            key_cols_exist = all(col in existing_df.columns and col in changed_df.columns for col in key_columns)
             
-            # ★★★ 행 수가 부족하면 자동 확장 ★★★
-            current_row_count = worksheet.row_count
-            if required_rows > current_row_count:
-                # 여유있게 1.5배 또는 최소 1000행 추가
-                new_row_count = max(required_rows + 1000, int(current_row_count * 1.5))
-                worksheet.add_rows(new_row_count - current_row_count)
-                logger.info(f"시트 행 확장: {current_row_count} → {new_row_count}")
+            if key_cols_exist:
+                for _, new_row in changed_df.iterrows():
+                    # 키 값으로 기존 행 찾기
+                    mask = pd.Series([True] * len(existing_df))
+                    for key_col in key_columns:
+                        mask = mask & (existing_df[key_col].astype(str) == str(new_row.get(key_col, '')))
+                    
+                    matching_indices = existing_df[mask].index.tolist()
+                    
+                    if matching_indices:
+                        # 기존 행 업데이트
+                        idx = matching_indices[0]
+                        for col in columns:
+                            if col in new_row.index and col in existing_df.columns:
+                                existing_df.at[idx, col] = new_row[col]
+                        existing_df.at[idx, '_변경유형'] = '변경'
+                        existing_df.at[idx, '_변경일시'] = update_time
+                        rows_updated += 1
+                
+                logger.info(f"기존 데이터 {rows_updated}건 업데이트")
+            else:
+                logger.warning(f"키 컬럼 불일치로 업데이트 불가: {key_columns}")
+        
+        # ★★★ 삭제는 로그만 남기고 데이터는 유지 ★★★
+        removed_df = changes.get('removed', pd.DataFrame())
+        if not removed_df.empty:
+            logger.info(f"삭제 감지: {len(removed_df)}건 (데이터 유지, 로그만 기록)")
+        
+        # ★★★ 최종 데이터 병합 및 저장 ★★★
+        if rows_added > 0 or rows_updated > 0:
+            # 신규 데이터 추가
+            if not added_copy.empty:
+                # 기존 데이터의 컬럼에 맞춤
+                for col in existing_df.columns:
+                    if col not in added_copy.columns:
+                        added_copy[col] = ''
+                added_copy = added_copy[existing_df.columns]
+                
+                final_df = pd.concat([existing_df, added_copy], ignore_index=True)
+            else:
+                final_df = existing_df
             
-            # Append new records
-            worksheet.update(f'A{next_row}', records_to_add)
-            rows_added = len(records_to_add)
+            # 전체 데이터 쓰기 (헤더 포함)
+            final_df = final_df.fillna('')
+            all_data = [final_df.columns.tolist()] + final_df.values.tolist()
             
-            logger.info(f"누적 시트 업데이트 완료: {sheet_name} (+{rows_added}행)")
+            # 행 수 확장 필요 시
+            required_rows = len(all_data) + 100
+            if required_rows > worksheet.row_count:
+                worksheet.add_rows(required_rows - worksheet.row_count)
+                logger.info(f"시트 행 확장: {worksheet.row_count} → {required_rows}")
+            
+            # 기존 데이터 클리어 후 새로 쓰기
+            worksheet.clear()
+            worksheet.update('A1', all_data)
+            
+            logger.info(f"누적 시트 업데이트 완료: {sheet_name} (신규 +{rows_added}, 변경 {rows_updated})")
         else:
             logger.info(f"누적 시트 변경 없음: {sheet_name}")
         
         return {
             "sheet_name": sheet_name,
             "rows_added": rows_added,
+            "rows_updated": rows_updated,
             "update_time": update_time,
             "added_count": len(changes.get('added', pd.DataFrame())),
             "removed_count": len(changes.get('removed', pd.DataFrame())),
