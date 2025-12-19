@@ -112,7 +112,13 @@ async def main() -> dict:
                     emission_year=hist_params['emission_year']
                 )
             else:
-                downloaded_data = await scraper.download_all()
+                # ★★★ 일반 모드에서도 emission_year가 있으면 전달 ★★★
+                emission_year = hist_params.get('emission_year', '')
+                if emission_year:
+                    logger.info(f"명세서배출량통계 연도 지정: {emission_year}")
+                    downloaded_data = await scraper.download_all(emission_year=emission_year)
+                else:
+                    downloaded_data = await scraper.download_all()
         finally:
             await scraper.close()
         
