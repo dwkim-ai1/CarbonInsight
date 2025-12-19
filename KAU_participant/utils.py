@@ -157,19 +157,22 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     logger = logging.getLogger(__name__)
     
-    # ★★★ 헤더 자동 수정: "Unnamed" 컬럼이 많으면 첫 번째 행을 헤더로 사용 ★★★
+    # ★★★ 헤더 자동 수정: "Unnamed" 또는 숫자 컬럼명이 많으면 첫 번째 행을 헤더로 사용 ★★★
     unnamed_count = sum(1 for col in df.columns if 'Unnamed' in str(col))
-    if unnamed_count > len(df.columns) // 2:  # 절반 이상이 Unnamed면
-        logger.info(f"헤더 자동 수정: {unnamed_count}개 Unnamed 컬럼 감지")
+    numeric_col_count = sum(1 for col in df.columns if isinstance(col, (int, float)) or str(col).isdigit())
+    
+    if unnamed_count > len(df.columns) // 2 or numeric_col_count > len(df.columns) // 2:
+        logger.info(f"헤더 자동 수정: Unnamed={unnamed_count}, 숫자컬럼={numeric_col_count}")
         
         # 첫 번째 행을 헤더로 사용
-        new_header = df.iloc[0].astype(str).tolist()
-        df = df.iloc[1:].reset_index(drop=True)
-        df.columns = new_header
-        logger.info(f"새 헤더: {new_header[:5]}...")
+        if len(df) > 0:
+            new_header = df.iloc[0].astype(str).tolist()
+            df = df.iloc[1:].reset_index(drop=True)
+            df.columns = new_header
+            logger.info(f"새 헤더: {new_header[:5]}...")
     
     # ★★★ 타이틀 행 제거: 첫 번째 컬럼에 "현황" 또는 "건)" 포함 시 ★★★
-    first_col = str(df.columns[0])
+    first_col = str(df.columns[0]) if len(df.columns) > 0 else ''
     if '현황' in first_col or '건)' in first_col or '통계' in first_col:
         logger.info(f"타이틀 행 감지: '{first_col}'")
         
