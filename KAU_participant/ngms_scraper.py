@@ -2446,16 +2446,24 @@ class NGMSScraper:
     async def _scrape_emission_statistics(self) -> Optional[pd.DataFrame]:
         """
         명세서배출량통계 전용 스크래퍼
-        이 페이지는 연도별 다운로드 목록 형태로, 조회 버튼 클릭 후 목록 데이터를 스크래핑
+        최신 연도의 "업체배출량 다운" 버튼을 클릭하여 Excel 다운로드
         
         Returns:
-            DataFrame with emission statistics
+            DataFrame with emission statistics (업체별 배출량 데이터)
         """
-        logger.info("명세서배출량통계 스크래핑 (조회 버튼 클릭 후 데이터 로드)")
+        logger.info("명세서배출량통계 스크래핑 (업체배출량 Excel 다운로드)")
         
         page_url = IFRAME_URLS.get("명세서배출량통계")
         new_page = await self.context.new_page()
         new_page.set_default_timeout(120000)  # 2분 타임아웃
+        
+        # ★★★ JavaScript dialog (confirm/alert) 자동 처리 ★★★
+        async def handle_dialog(dialog):
+            logger.info(f"Dialog 감지: {dialog.type} - {dialog.message}")
+            await dialog.accept()
+            logger.info("Dialog 승인 완료")
+        
+        new_page.on('dialog', handle_dialog)
         
         try:
             logger.info(f"URL 접속: {page_url}")
@@ -2496,14 +2504,74 @@ class NGMSScraper:
             
             await self._save_debug("emission_stats_02_after_search", new_page)
             
-            # ★★★ 테이블 데이터 추출 (frame_locator 사용) ★★★
-            df = await self._extract_table_with_locator(iframe_locator, "명세서배출량통계")
+            # ★★★ 첫 번째 행의 "업체배출량" 다운로드 버튼 클릭 ★★★
+            logger.info("업체배출량 다운로드 버튼 찾기...")
             
-            if df is not None and len(df) > 0:
-                logger.info(f"테이블 추출 성공: {len(df)}행")
-                return df
+            # 다운로드 버튼 선택자들 (첫 번째 행의 업체배출량 컬럼)
+            download_btn_selectors = [
+                # 첫 번째 행의 다운 버튼 (업체배출량 컬럼)
+                'tbody tr:first-child td:nth-child(4) input[value="다운"]',
+                'tbody tr:first-child td:nth-child(4) a:has-text("다운")',
+                'tbody tr:first-child input[value="다운"]',
+                # WebSquare 그리드 버튼
+                'table[id*="body_table"] tbody tr:first-child input[value="다운"]',
+                'table[id*="grdList"] tbody tr:first-child input[value="다운"]',
+                # 일반적인 다운 버튼 (첫 번째)
+                'input[value="다운"]',
+                'a:has-text("다운")',
+            ]
             
-            return None
+            download_btn = None
+            for selector in download_btn_selectors:
+                try:
+                    btn = iframe_locator.locator(selector).first
+                    if await btn.count() > 0:
+                        download_btn = btn
+                        logger.info(f"다운로드 버튼 발견: {selector}")
+                        break
+                except:
+                    continue
+            
+            if not download_btn:
+                logger.error("업체배출량 다운로드 버튼을 찾을 수 없음")
+                await self._save_debug("emission_stats_03_no_download_btn", new_page)
+                return None
+            
+            # ★★★ Excel 다운로드 ★★★
+            logger.info("업체배출량 Excel 다운로드 시도...")
+            
+            try:
+                async with new_page.expect_download(timeout=60000) as download_info:
+                    await download_btn.click()
+                    logger.info("다운로드 버튼 클릭 완료")
+                
+                download = await download_info.value
+                
+                # 파일 저장
+                download_path = os.path.join(self.download_dir, download.suggested_filename)
+                await download.save_as(download_path)
+                logger.info(f"업체배출량 Excel 다운로드 완료: {download_path}")
+                
+                # Excel 파일 읽기
+                try:
+                    df = pd.read_excel(download_path)
+                    logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                    return df
+                except Exception as e:
+                    logger.error(f"Excel 파일 읽기 실패: {e}")
+                    return None
+                    
+            except Exception as e:
+                logger.warning(f"Excel 다운로드 실패: {e}")
+                await self._save_debug("emission_stats_04_download_failed", new_page)
+                
+                # ★★★ 폴백: 테이블 목록이라도 반환 ★★★
+                logger.info("폴백: 테이블 목록 스크래핑 시도...")
+                df = await self._extract_table_with_locator(iframe_locator, "명세서배출량통계")
+                if df is not None and len(df) > 0:
+                    logger.info(f"테이블 목록 추출 성공: {len(df)}행")
+                    return df
+                return None
             
         except Exception as e:
             logger.error(f"명세서배출량통계 스크래핑 실패: {e}")
