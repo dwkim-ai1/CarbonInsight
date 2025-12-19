@@ -2581,10 +2581,10 @@ class NGMSScraper:
                 await download.save_as(download_path)
                 logger.info(f"업체배출량 Excel 다운로드 완료: {download_path}")
                 
-                # Excel 파일 읽기
+                # Excel 파일 읽기 (명세서배출량통계는 헤더 구조가 다양하므로 header=None)
                 try:
-                    df = pd.read_excel(download_path, header=1)
-                    logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
+                    df = pd.read_excel(download_path, header=None)
+                    logger.info(f"Excel 파일 읽기 성공: {len(df)}행 (헤더 자동 감지 예정)")
                     return df
                 except Exception as e:
                     logger.error(f"Excel 파일 읽기 실패: {e}")
