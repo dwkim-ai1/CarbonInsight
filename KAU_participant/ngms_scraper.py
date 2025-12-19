@@ -2300,7 +2300,7 @@ class NGMSScraper:
                 
                 await self._save_debug(f"excel_02_after_download_{data_type}", new_page)
                 
-                df = pd.read_excel(download_path)
+                df = pd.read_excel(download_path, header=1)
                 logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                 return df
                 
@@ -2315,7 +2315,7 @@ class NGMSScraper:
                 if excel_files:
                     download_path = max(excel_files, key=os.path.getctime)
                     logger.info(f"다운로드 폴더에서 파일 발견: {download_path}")
-                    df = pd.read_excel(download_path)
+                    df = pd.read_excel(download_path, header=1)
                     logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                     return df
                 
@@ -2348,7 +2348,7 @@ class NGMSScraper:
                     await download.save_as(download_path)
                     logger.info(f"Excel 다운로드 완료: {download_path}")
                     
-                    df = pd.read_excel(download_path)
+                    df = pd.read_excel(download_path, header=1)
                     logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                     return df
                     
@@ -2363,7 +2363,7 @@ class NGMSScraper:
                     if excel_files:
                         download_path = max(excel_files, key=os.path.getctime)
                         logger.info(f"다운로드 폴더에서 파일 발견: {download_path}")
-                        df = pd.read_excel(download_path)
+                        df = pd.read_excel(download_path, header=1)
                         logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                         return df
             
@@ -2554,7 +2554,7 @@ class NGMSScraper:
                 
                 # Excel 파일 읽기
                 try:
-                    df = pd.read_excel(download_path)
+                    df = pd.read_excel(download_path, header=1)
                     logger.info(f"Excel 파일 읽기 성공: {len(df)}행")
                     return df
                 except Exception as e:
