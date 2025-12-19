@@ -336,6 +336,41 @@ class GoogleSheetsHandler:
         
         sheet_name = SHEET_NAMES[f"{data_type}_stack"]
         columns = COLUMNS[data_type]
+        key_columns = KEY_COLUMNS.get(data_type, [])
+        
+        # ★★★ 필수 컬럼 검증 ★★★
+        if key_columns:
+            missing_keys = [col for col in key_columns if col not in data.columns]
+            if missing_keys:
+                logger.error(f"⚠️ 필수 키 컬럼이 없음: {missing_keys}")
+                logger.error(f"  데이터 컬럼: {list(data.columns)}")
+                logger.error(f"  필요 컬럼: {key_columns}")
+                
+                # 빈 데이터로 저장 방지
+                return {
+                    "sheet_name": sheet_name,
+                    "rows_added": 0,
+                    "update_time": get_current_timestamp(),
+                    "error": f"필수 컬럼 없음: {missing_keys}"
+                }
+        
+        # ★★★ 데이터 컬럼 중 유효한 것만 확인 ★★★
+        valid_columns = [col for col in columns if col in data.columns]
+        if len(valid_columns) < len(columns) // 2:
+            logger.warning(f"⚠️ 유효한 컬럼이 너무 적음: {len(valid_columns)}/{len(columns)}")
+            logger.warning(f"  데이터 컬럼: {list(data.columns)}")
+            logger.warning(f"  예상 컬럼: {columns}")
+        
+        # ★★★ 실제 데이터가 있는지 확인 (빈 값 제외) ★★★
+        non_empty_rows = data.dropna(how='all')
+        if len(non_empty_rows) == 0:
+            logger.warning("⚠️ 모든 행이 비어있음, 저장 건너뜀")
+            return {
+                "sheet_name": sheet_name,
+                "rows_added": 0,
+                "update_time": get_current_timestamp(),
+                "error": "모든 행이 비어있음"
+            }
         
         # Columns for stack sheet include metadata
         stack_columns = columns + ['_변경유형', '_변경일시']
