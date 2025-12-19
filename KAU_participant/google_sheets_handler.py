@@ -232,6 +232,15 @@ class GoogleSheetsHandler:
             # Get current row count
             existing_data = worksheet.get_all_values()
             next_row = len(existing_data) + 1
+            required_rows = next_row + len(records_to_add)
+            
+            # ★★★ 행 수가 부족하면 자동 확장 ★★★
+            current_row_count = worksheet.row_count
+            if required_rows > current_row_count:
+                # 여유있게 1.5배 또는 최소 1000행 추가
+                new_row_count = max(required_rows + 1000, int(current_row_count * 1.5))
+                worksheet.add_rows(new_row_count - current_row_count)
+                logger.info(f"시트 행 확장: {current_row_count} → {new_row_count}")
             
             # Append new records
             worksheet.update(f'A{next_row}', records_to_add)
@@ -297,6 +306,14 @@ class GoogleSheetsHandler:
             # Get current row count
             existing_data = worksheet.get_all_values()
             next_row = len(existing_data) + 1
+            required_rows = next_row + len(records_to_add)
+            
+            # ★★★ 행 수가 부족하면 자동 확장 ★★★
+            current_row_count = worksheet.row_count
+            if required_rows > current_row_count:
+                new_row_count = max(required_rows + 1000, int(current_row_count * 1.5))
+                worksheet.add_rows(new_row_count - current_row_count)
+                logger.info(f"시트 행 확장: {current_row_count} → {new_row_count}")
             
             # Append new records
             worksheet.update(f'A{next_row}', records_to_add)
