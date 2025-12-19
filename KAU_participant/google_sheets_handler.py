@@ -103,16 +103,29 @@ class GoogleSheetsHandler:
         """
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
-            records = worksheet.get_all_records()
-            if records:
-                df = pd.DataFrame(records)
+            
+            # ★★★ get_all_values 사용 (중복 헤더 문제 방지) ★★★
+            all_values = worksheet.get_all_values()
+            
+            if all_values and len(all_values) > 1:
+                # 첫 행을 헤더로, 나머지를 데이터로
+                headers = all_values[0]
+                data = all_values[1:]
+                df = pd.DataFrame(data, columns=headers)
                 logger.info(f"시트 데이터 로드: {sheet_name} ({len(df)}행)")
                 return df
+            elif all_values and len(all_values) == 1:
+                # 헤더만 있는 경우
+                logger.info(f"시트에 데이터 없음 (헤더만 존재): {sheet_name}")
+                return pd.DataFrame()
             else:
                 logger.info(f"시트에 데이터 없음: {sheet_name}")
                 return pd.DataFrame()
         except gspread.WorksheetNotFound:
             logger.info(f"시트 없음: {sheet_name}")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"시트 데이터 로드 실패: {sheet_name} - {e}")
             return pd.DataFrame()
     
     def update_latest_sheet(
