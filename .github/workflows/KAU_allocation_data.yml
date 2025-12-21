@@ -1,7 +1,8 @@
 # .github/workflows/update_allocation_data.yml
-# ETRS 배출권 할당 데이터 자동 수집 및 Google Sheets 업데이트
+# ETRS/ORS 배출권/상쇄 데이터 자동 수집 및 Google Sheets 업데이트
+# 총 32개 시트 관리: 16개 데이터셋 × 2(최신+이력)
 
-name: Update ETRS Allocation Data
+name: Update Allocation Data (ETRS/ORS)
 
 on:
   # 매주 월요일 오전 9시 (KST) = 일요일 자정 (UTC)
@@ -10,13 +11,35 @@ on:
   
   # 수동 실행
   workflow_dispatch:
+    inputs:
+      data_source:
+        description: '수집할 데이터 소스'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all          # ETRS + ORS 전체
+          - etrs_only    # ETRS만
+          - ors_only     # ORS만
+      
+      etrs_periods:
+        description: 'ETRS 계획기간 (쉼표 구분)'
+        required: false
+        default: '1,2,3'
+        type: string
+      
+      debug_mode:
+        description: '디버그 모드'
+        required: false
+        default: false
+        type: boolean
 
 env:
   PYTHON_VERSION: '3.11'
 
 jobs:
-  collect-etrs:
-    name: ETRS 데이터 수집
+  collect-allocation-data:
+    name: 배출권/상쇄 데이터 수집
     runs-on: ubuntu-latest
     
     steps:
@@ -31,20 +54,67 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install requests pandas openpyxl xlrd gspread google-auth
+          pip install --upgrade pip
+          pip install -r requirements/requirements_allocation.txt
+          playwright install chromium
+          playwright install-deps chromium
       
-      - name: Collect ETRS data
+      - name: Create debug directory
+        if: ${{ github.event.inputs.debug_mode == 'true' }}
+        run: mkdir -p /tmp/allocation_debug
+      
+      - name: Run data collection
         run: |
           cd KAU_allocation
           python main.py
         env:
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+          ETRS_ONLY: ${{ github.event.inputs.data_source == 'etrs_only' && 'true' || 'false' }}
+          ORS_ONLY: ${{ github.event.inputs.data_source == 'ors_only' && 'true' || 'false' }}
+          ETRS_PERIODS: ${{ github.event.inputs.etrs_periods || '1,2,3' }}
+          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+          DEBUG_DIR: /tmp/allocation_debug
       
-      - name: Upload artifacts
+      - name: Upload debug artifacts
+        if: ${{ always() && github.event.inputs.debug_mode == 'true' }}
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: etrs-data
+          name: debug-screenshots
+          path: /tmp/allocation_debug/
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      - name: Upload data artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allocation-data
           path: KAU_allocation/data/*.xlsx
           retention-days: 30
+          if-no-files-found: ignore
+
+  summary:
+    name: 실행 결과 요약
+    runs-on: ubuntu-latest
+    needs: [collect-allocation-data]
+    if: always()
+    
+    steps:
+      - name: Check results
+        run: |
+          echo "====================================="
+          echo "ETRS/ORS 데이터 수집 결과"
+          echo "====================================="
+          echo ""
+          echo "수집 작업: ${{ needs.collect-allocation-data.result }}"
+          echo ""
+          
+          if [ "${{ needs.collect-allocation-data.result }}" == "success" ]; then
+            echo "✅ 데이터 수집 완료"
+          elif [ "${{ needs.collect-allocation-data.result }}" == "failure" ]; then
+            echo "❌ 데이터 수집 실패"
+            exit 1
+          else
+            echo "⚠️ 데이터 수집 상태: ${{ needs.collect-allocation-data.result }}"
+          fi
