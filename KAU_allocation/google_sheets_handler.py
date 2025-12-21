@@ -10,6 +10,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
+# Absolute imports
 from config import SHEET_NAMES, KEY_COLUMNS, VALUE_COLUMNS, COLUMNS
 from utils import (
     setup_logging, 
@@ -179,7 +180,7 @@ class GoogleSheetsHandler:
         plan_period: int = None
     ) -> Dict[str, Any]:
         """
-        Update the 'stack' sheet with changes (upsert logic)
+        Update the 'stack' sheet with changes (append new/changed records)
         
         Args:
             data_type: Type of data
@@ -196,7 +197,6 @@ class GoogleSheetsHandler:
             sheet_name = SHEET_NAMES.get(f"{data_type}_stack", f"{data_type}_이력")
         
         columns = COLUMNS.get(data_type, [])
-        key_columns = KEY_COLUMNS.get(data_type, [])
         
         stack_columns = columns + ['_변경유형', '_변경일시', '_계획기간']
         
@@ -214,82 +214,63 @@ class GoogleSheetsHandler:
                 existing_df = pd.DataFrame(data, columns=headers)
             else:
                 existing_df = pd.DataFrame(columns=stack_columns)
+                # Write headers if new sheet
+                if not all_values:
+                    worksheet.update('A1', [stack_columns])
         except Exception as e:
             logger.warning(f"기존 데이터 읽기 실패: {e}")
             existing_df = pd.DataFrame(columns=stack_columns)
         
+        records_to_append = []
+        
         # Process added records
         added_df = changes.get('added', pd.DataFrame())
         if not added_df.empty:
-            added_copy = added_df.copy()
-            added_copy['_변경유형'] = '신규'
-            added_copy['_변경일시'] = update_time
-            added_copy['_계획기간'] = f"{plan_period}차" if plan_period else ""
-            
-            for col in stack_columns:
-                if col not in added_copy.columns:
-                    added_copy[col] = ''
-            
-            rows_added = len(added_copy)
-            logger.info(f"신규 데이터 {rows_added}건 추가")
-        else:
-            added_copy = pd.DataFrame()
+            for _, row in added_df.iterrows():
+                record = {col: row.get(col, '') for col in columns if col in row.index}
+                record['_변경유형'] = '신규'
+                record['_변경일시'] = update_time
+                record['_계획기간'] = f"{plan_period}차" if plan_period else ""
+                records_to_append.append(record)
+            logger.info(f"신규 데이터 {len(added_df)}건 준비")
         
         # Process changed records
         changed_df = changes.get('changed', pd.DataFrame())
-        rows_updated = 0
         if not changed_df.empty:
-            changed_copy = changed_df.copy()
-            changed_copy['_변경유형'] = '변경'
-            changed_copy['_변경일시'] = update_time
-            changed_copy['_계획기간'] = f"{plan_period}차" if plan_period else ""
-            
-            for col in stack_columns:
-                if col not in changed_copy.columns:
-                    changed_copy[col] = ''
-            
-            rows_updated = len(changed_copy)
-            
-            # Append changed as new rows (history tracking)
-            if added_copy.empty:
-                added_copy = changed_copy
-            else:
-                added_copy = pd.concat([added_copy, changed_copy], ignore_index=True)
-            
-            rows_added += rows_updated
-            logger.info(f"변경 데이터 {rows_updated}건 추가")
+            for _, row in changed_df.iterrows():
+                record = {col: row.get(col, '') for col in columns if col in row.index}
+                record['_변경유형'] = '변경'
+                record['_변경일시'] = update_time
+                record['_계획기간'] = f"{plan_period}차" if plan_period else ""
+                records_to_append.append(record)
+            logger.info(f"변경 데이터 {len(changed_df)}건 준비")
         
-        # Log removed records (don't delete, just note)
+        # Log removed records
         removed_df = changes.get('removed', pd.DataFrame())
         if not removed_df.empty:
             logger.info(f"삭제 감지: {len(removed_df)}건 (기록만 유지)")
         
-        # Write to sheet if there are changes
-        if rows_added > 0:
-            # Merge with existing
-            for col in existing_df.columns:
-                if col not in added_copy.columns:
-                    added_copy[col] = ''
-            added_copy = added_copy[existing_df.columns] if not existing_df.empty else added_copy
+        # Append to sheet
+        if records_to_append:
+            # Convert to list of lists
+            new_rows = []
+            for record in records_to_append:
+                row = [str(record.get(col, '')) for col in stack_columns]
+                new_rows.append(row)
             
-            final_df = pd.concat([existing_df, added_copy], ignore_index=True) if not existing_df.empty else added_copy
-            
-            # Convert to string
-            final_df = final_df.fillna('')
-            for col in final_df.columns:
-                final_df[col] = final_df[col].astype(str)
-            
-            all_data = [final_df.columns.tolist()] + final_df.values.tolist()
+            # Get next row position
+            next_row = len(existing_df) + 2  # +1 for header, +1 for 1-based index
             
             # Expand rows if needed
-            required_rows = len(all_data) + 100
+            required_rows = next_row + len(new_rows) + 100
             if required_rows > worksheet.row_count:
                 worksheet.add_rows(required_rows - worksheet.row_count)
             
-            worksheet.clear()
-            worksheet.update(all_data, value_input_option='USER_ENTERED')
+            # Append
+            worksheet.update(f'A{next_row}', new_rows, value_input_option='USER_ENTERED')
+            rows_added = len(new_rows)
             
-            logger.info(f"✅ 누적 시트 업데이트 완료: {sheet_name} (신규 +{rows_added})")
+            logger.info(f"✅ 누적 시트 업데이트 완료: {sheet_name} (+{rows_added}건)")
         else:
             logger.info(f"누적 시트 변경 없음: {sheet_name}")
         
@@ -319,7 +300,8 @@ class GoogleSheetsHandler:
         Returns:
             Complete update result
         """
-        logger.info(f"=== {data_type} {plan_period}차 업데이트 시작 ===")
+        period_str = f" {plan_period}차" if plan_period else ""
+        logger.info(f"=== {data_type}{period_str} 업데이트 시작 ===")
         
         # 1. Update latest sheet
         latest_result = self.update_latest_sheet(data_type, new_data, plan_period)
@@ -347,11 +329,11 @@ class GoogleSheetsHandler:
                 'changed': pd.DataFrame()
             }
         else:
-            # Filter old_data columns
-            old_data = old_data[[c for c in old_data.columns if not c.startswith('_')]]
+            # Filter old_data columns (exclude metadata)
+            old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
             
             changes = compare_dataframes(
-                old_data, 
+                old_data_filtered, 
                 new_data, 
                 available_key_cols,
                 available_value_cols
@@ -362,7 +344,7 @@ class GoogleSheetsHandler:
         
         # 4. Create summary
         summary = create_update_summary(
-            f"{data_type} {plan_period}차" if plan_period else data_type,
+            f"{data_type}{period_str}",
             len(new_data),
             stack_result['added_count'],
             stack_result['removed_count'],
