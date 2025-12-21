@@ -1,6 +1,6 @@
-# Allocation Data Collector Dependencies
+# ETRS Allocation Data Collector Dependencies
 
-# HTTP 요청 (ETRS)
+# HTTP 요청
 requests>=2.28.0
 
 # 데이터 처리
@@ -11,6 +11,25 @@ xlrd>=2.0.1
 # Google Sheets
 gspread>=5.7.0
 google-auth>=2.16.0
+```
 
-# 브라우저 자동화 (NGMS)
-playwright>=1.40.0
+---
+
+## 폴더 구조 최종
+```
+your-repo/
+├── .github/workflows/
+│   └── update_allocation_data.yml
+├── KAU_allocation/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── utils.py
+│   ├── google_sheets_handler.py
+│   ├── etrs_scraper.py
+│   ├── main.py
+│   ├── data/
+│   └── .gitignore
+├── KAU_participant/
+│   └── ... (기존 유지)
+└── requirements/
+    └── requirements_allocation.txt
