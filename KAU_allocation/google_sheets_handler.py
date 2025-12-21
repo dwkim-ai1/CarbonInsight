@@ -1,29 +1,44 @@
 """
-ETRS Google Sheets Handler
+ETRS/ORS Google Sheets Handler
 Google Sheets 데이터 처리 모듈
+
+32개 시트 관리:
+- 16개 최신 데이터 시트 (ETRS_*, ORS_*)
+- 16개 이력 시트 (*_이력)
 """
 
-import json
 import os
-from typing import List, Dict, Any
+import sys
+import json
+from typing import List, Dict, Optional, Any
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
 # Absolute imports
-from config import SHEET_NAMES, KEY_COLUMNS, VALUE_COLUMNS, COLUMNS
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from config import (
+    ETRS_DATASETS,
+    ORS_DATASETS,
+    ALL_DATASETS,
+    KEY_COLUMNS,
+    VALUE_COLUMNS,
+    COLUMNS,
+    PLAN_PERIODS,
+)
 from utils import (
-    setup_logging, 
-    compare_dataframes, 
+    setup_logging,
+    compare_dataframes,
     get_current_timestamp,
-    create_update_summary
+    create_update_summary,
 )
 
 logger = setup_logging()
 
 
-class GoogleSheetsHandler:
-    """Google Sheets 데이터 처리 클래스"""
+class AllocationSheetsHandler:
+    """ETRS/ORS Google Sheets 데이터 처리 클래스"""
     
     SCOPES = [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -32,7 +47,7 @@ class GoogleSheetsHandler:
     
     def __init__(self, credentials_json: str, spreadsheet_id: str):
         """
-        Initialize Google Sheets handler
+        Initialize handler
         
         Args:
             credentials_json: Service account credentials JSON string
@@ -43,11 +58,11 @@ class GoogleSheetsHandler:
         self._connect()
     
     def _setup_credentials(self, credentials_json: str) -> None:
-        """Setup Google credentials from JSON string"""
+        """Setup Google credentials"""
         try:
             creds_dict = json.loads(credentials_json)
             self.credentials = Credentials.from_service_account_info(
-                creds_dict, 
+                creds_dict,
                 scopes=self.SCOPES
             )
             logger.info("Google credentials 설정 완료")
@@ -66,29 +81,34 @@ class GoogleSheetsHandler:
             raise
     
     def _get_or_create_worksheet(
-        self, 
-        sheet_name: str, 
-        rows: int = 1000,
-        cols: int = 20
+        self,
+        sheet_name: str,
+        columns: List[str] = None
     ) -> gspread.Worksheet:
-        """Get existing worksheet or create new one"""
+        """Get or create worksheet"""
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
-            logger.info(f"기존 시트 사용: {sheet_name}")
+            logger.debug(f"기존 시트 사용: {sheet_name}")
         except gspread.WorksheetNotFound:
+            # Create new worksheet
+            num_cols = len(columns) + 5 if columns else 20
             worksheet = self.spreadsheet.add_worksheet(
-                title=sheet_name, 
-                rows=rows, 
-                cols=cols
+                title=sheet_name,
+                rows=1000,
+                cols=num_cols
             )
+            
+            # Add headers if provided
+            if columns:
+                headers = columns + ['_변경유형', '_변경일시', '_계획기간']
+                worksheet.update('A1', [headers])
+            
             logger.info(f"새 시트 생성: {sheet_name}")
         
         return worksheet
     
     def get_sheet_data(self, sheet_name: str) -> pd.DataFrame:
-        """
-        Get all data from a worksheet as DataFrame
-        """
+        """Get all data from worksheet"""
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
             all_values = worksheet.get_all_values()
@@ -97,285 +117,481 @@ class GoogleSheetsHandler:
                 headers = all_values[0]
                 data = all_values[1:]
                 df = pd.DataFrame(data, columns=headers)
-                logger.info(f"시트 데이터 로드: {sheet_name} ({len(df)}행)")
+                logger.debug(f"시트 데이터 로드: {sheet_name} ({len(df)}행)")
                 return df
             elif all_values and len(all_values) == 1:
-                logger.info(f"시트에 데이터 없음 (헤더만 존재): {sheet_name}")
-                return pd.DataFrame()
+                logger.debug(f"시트에 헤더만 존재: {sheet_name}")
+                return pd.DataFrame(columns=all_values[0])
             else:
-                logger.info(f"시트에 데이터 없음: {sheet_name}")
                 return pd.DataFrame()
         except gspread.WorksheetNotFound:
-            logger.info(f"시트 없음: {sheet_name}")
+            logger.debug(f"시트 없음: {sheet_name}")
             return pd.DataFrame()
         except Exception as e:
             logger.warning(f"시트 데이터 로드 실패: {sheet_name} - {e}")
             return pd.DataFrame()
     
-    def update_latest_sheet(
-        self, 
-        data_type: str, 
-        new_data: pd.DataFrame,
-        plan_period: int = None
+    # =========================================================
+    # ETRS 데이터 처리
+    # =========================================================
+    
+    def update_etrs_latest_sheet(
+        self,
+        dataset_name: str,
+        period_data: Dict[int, pd.DataFrame]
     ) -> Dict[str, Any]:
         """
-        Update the 'latest' sheet with new data (full replacement)
+        Update ETRS latest sheet (combine all periods)
         
         Args:
-            data_type: Type of data (사전할당량, etc.)
-            new_data: New data to write
-            plan_period: Plan period (1, 2, or 3)
+            dataset_name: Dataset name
+            period_data: Dictionary of period -> DataFrame
             
         Returns:
-            Update result dictionary
+            Update result
         """
-        # Build sheet name
-        if plan_period:
-            sheet_name = f"ETRS_{data_type}_{plan_period}차"
-        else:
-            sheet_name = SHEET_NAMES.get(f"{data_type}_latest", f"ETRS_{data_type}")
+        if dataset_name not in ETRS_DATASETS:
+            logger.error(f"알 수 없는 데이터셋: {dataset_name}")
+            return {"success": False}
         
-        worksheet = self._get_or_create_worksheet(
-            sheet_name, 
-            rows=len(new_data) + 100,
-            cols=len(new_data.columns) + 5
-        )
+        dataset = ETRS_DATASETS[dataset_name]
+        sheet_name = dataset['sheet_latest']
+        columns = COLUMNS.get(dataset_name, [])
+        
+        # Combine all periods
+        all_data = []
+        for period, df in period_data.items():
+            df_copy = df.copy()
+            if '_계획기간' not in df_copy.columns:
+                df_copy['_계획기간'] = f"{period}차"
+            all_data.append(df_copy)
+        
+        if not all_data:
+            logger.warning(f"업데이트할 데이터 없음: {dataset_name}")
+            return {"success": False}
+        
+        combined_df = pd.concat(all_data, ignore_index=True)
         
         # Get existing data for comparison
         old_data = self.get_sheet_data(sheet_name)
         
-        # Clear and write new data
+        # Update sheet
+        worksheet = self._get_or_create_worksheet(sheet_name, columns)
         worksheet.clear()
         
-        # Prepare data with metadata
         update_time = get_current_timestamp()
+        combined_df['_업데이트일시'] = update_time
         
-        new_data_with_meta = new_data.copy()
-        new_data_with_meta['_업데이트일시'] = update_time
+        # Write data
+        headers = list(combined_df.columns)
+        data_rows = combined_df.fillna('').astype(str).values.tolist()
+        all_rows = [headers] + data_rows
         
-        # Convert to string for gspread
-        for col in new_data_with_meta.columns:
-            new_data_with_meta[col] = new_data_with_meta[col].astype(str).replace('nan', '').replace('None', '')
+        worksheet.update('A1', all_rows)
         
-        # Write headers and data
-        headers = list(new_data_with_meta.columns)
-        data_rows = new_data_with_meta.values.tolist()
-        
-        all_data = [headers] + data_rows
-        worksheet.update(all_data, value_input_option='USER_ENTERED')
-        
-        logger.info(f"✅ 최신 시트 업데이트 완료: {sheet_name} ({len(new_data)}행)")
+        logger.info(f"✅ 최신 시트 업데이트: {sheet_name} ({len(combined_df)}행)")
         
         return {
+            "success": True,
             "sheet_name": sheet_name,
-            "rows_updated": len(new_data),
+            "rows": len(combined_df),
             "update_time": update_time,
             "old_data": old_data
         }
     
-    def update_stack_sheet(
-        self, 
-        data_type: str, 
-        changes: Dict[str, pd.DataFrame],
-        plan_period: int = None
+    def update_etrs_history_sheet(
+        self,
+        dataset_name: str,
+        period_data: Dict[int, pd.DataFrame],
+        old_data: pd.DataFrame = None
     ) -> Dict[str, Any]:
         """
-        Update the 'stack' sheet with changes (append new/changed records)
+        Update ETRS history sheet (append changes only)
         
         Args:
-            data_type: Type of data
-            changes: Dictionary with 'added', 'removed', 'changed' DataFrames
-            plan_period: Plan period
+            dataset_name: Dataset name
+            period_data: Dictionary of period -> DataFrame
+            old_data: Previous data for comparison
             
         Returns:
-            Update result dictionary
+            Update result
         """
-        # Build sheet name
-        if plan_period:
-            sheet_name = f"{data_type}_이력_{plan_period}차"
+        if dataset_name not in ETRS_DATASETS:
+            return {"success": False}
+        
+        dataset = ETRS_DATASETS[dataset_name]
+        sheet_name = dataset['sheet_history']
+        columns = COLUMNS.get(dataset_name, [])
+        key_cols = KEY_COLUMNS.get(dataset_name, [])
+        value_cols = VALUE_COLUMNS.get(dataset_name, [])
+        
+        # Combine all periods
+        all_data = []
+        for period, df in period_data.items():
+            df_copy = df.copy()
+            if '_계획기간' not in df_copy.columns:
+                df_copy['_계획기간'] = f"{period}차"
+            all_data.append(df_copy)
+        
+        if not all_data:
+            return {"success": False}
+        
+        new_data = pd.concat(all_data, ignore_index=True)
+        
+        # Detect changes
+        if old_data is None or old_data.empty:
+            changes = {
+                'added': new_data.copy(),
+                'removed': pd.DataFrame(),
+                'changed': pd.DataFrame()
+            }
         else:
-            sheet_name = SHEET_NAMES.get(f"{data_type}_stack", f"{data_type}_이력")
-        
-        columns = COLUMNS.get(data_type, [])
-        
-        stack_columns = columns + ['_변경유형', '_변경일시', '_계획기간']
-        
-        worksheet = self._get_or_create_worksheet(sheet_name, rows=5000, cols=len(stack_columns) + 5)
-        
-        update_time = get_current_timestamp()
-        rows_added = 0
-        
-        # Get existing data
-        try:
-            all_values = worksheet.get_all_values()
-            if all_values and len(all_values) > 1:
-                headers = all_values[0]
-                data = all_values[1:]
-                existing_df = pd.DataFrame(data, columns=headers)
+            # Filter columns
+            available_key_cols = [c for c in key_cols if c in new_data.columns and c in old_data.columns]
+            available_value_cols = [c for c in value_cols if c in new_data.columns]
+            
+            # Filter old_data columns
+            old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
+            
+            if available_key_cols:
+                changes = compare_dataframes(
+                    old_data_filtered,
+                    new_data,
+                    available_key_cols,
+                    available_value_cols
+                )
             else:
-                existing_df = pd.DataFrame(columns=stack_columns)
-                # Write headers if new sheet
-                if not all_values:
-                    worksheet.update('A1', [stack_columns])
-        except Exception as e:
-            logger.warning(f"기존 데이터 읽기 실패: {e}")
-            existing_df = pd.DataFrame(columns=stack_columns)
+                changes = {
+                    'added': new_data.copy(),
+                    'removed': pd.DataFrame(),
+                    'changed': pd.DataFrame()
+                }
         
-        records_to_append = []
+        # Prepare rows to append
+        update_time = get_current_timestamp()
+        rows_to_add = []
         
-        # Process added records
-        added_df = changes.get('added', pd.DataFrame())
-        if not added_df.empty:
-            for _, row in added_df.iterrows():
-                record = {col: row.get(col, '') for col in columns if col in row.index}
-                record['_변경유형'] = '신규'
-                record['_변경일시'] = update_time
-                record['_계획기간'] = f"{plan_period}차" if plan_period else ""
-                records_to_append.append(record)
-            logger.info(f"신규 데이터 {len(added_df)}건 준비")
+        # Added records
+        if not changes['added'].empty:
+            for _, row in changes['added'].iterrows():
+                row_dict = row.to_dict()
+                row_dict['_변경유형'] = '신규'
+                row_dict['_변경일시'] = update_time
+                rows_to_add.append(row_dict)
         
-        # Process changed records
-        changed_df = changes.get('changed', pd.DataFrame())
-        if not changed_df.empty:
-            for _, row in changed_df.iterrows():
-                record = {col: row.get(col, '') for col in columns if col in row.index}
-                record['_변경유형'] = '변경'
-                record['_변경일시'] = update_time
-                record['_계획기간'] = f"{plan_period}차" if plan_period else ""
-                records_to_append.append(record)
-            logger.info(f"변경 데이터 {len(changed_df)}건 준비")
+        # Changed records
+        if not changes['changed'].empty:
+            for _, row in changes['changed'].iterrows():
+                row_dict = row.to_dict()
+                row_dict['_변경유형'] = '변경'
+                row_dict['_변경일시'] = update_time
+                rows_to_add.append(row_dict)
         
-        # Log removed records
-        removed_df = changes.get('removed', pd.DataFrame())
-        if not removed_df.empty:
-            logger.info(f"삭제 감지: {len(removed_df)}건 (기록만 유지)")
-        
-        # Append to sheet
-        if records_to_append:
-            # Convert to list of lists
+        # Append to history sheet
+        if rows_to_add:
+            worksheet = self._get_or_create_worksheet(sheet_name, columns)
+            
+            # Get current data
+            existing = worksheet.get_all_values()
+            
+            # Ensure headers exist
+            if not existing:
+                headers = columns + ['_변경유형', '_변경일시', '_계획기간']
+                worksheet.update('A1', [headers])
+                existing = [headers]
+            
+            headers = existing[0]
+            next_row = len(existing) + 1
+            
+            # Prepare rows
             new_rows = []
-            for record in records_to_append:
-                row = [str(record.get(col, '')) for col in stack_columns]
-                new_rows.append(row)
+            for row_dict in rows_to_add:
+                row_values = [str(row_dict.get(h, '')) for h in headers]
+                new_rows.append(row_values)
             
-            # Get next row position
-            next_row = len(existing_df) + 2  # +1 for header, +1 for 1-based index
-            
-            # Expand rows if needed
-            required_rows = next_row + len(new_rows) + 100
+            # Expand sheet if needed
+            required_rows = next_row + len(new_rows)
             if required_rows > worksheet.row_count:
-                worksheet.add_rows(required_rows - worksheet.row_count)
+                worksheet.add_rows(required_rows - worksheet.row_count + 100)
             
-            # Append
-            worksheet.update(f'A{next_row}', new_rows, value_input_option='USER_ENTERED')
-            rows_added = len(new_rows)
+            # Write rows
+            worksheet.update(f'A{next_row}', new_rows)
             
-            logger.info(f"✅ 누적 시트 업데이트 완료: {sheet_name} (+{rows_added}건)")
+            logger.info(f"✅ 이력 시트 업데이트: {sheet_name} (+{len(new_rows)}행)")
         else:
-            logger.info(f"누적 시트 변경 없음: {sheet_name}")
+            logger.info(f"ℹ️ 이력 시트 변경 없음: {sheet_name}")
         
         return {
+            "success": True,
             "sheet_name": sheet_name,
-            "rows_added": rows_added,
-            "update_time": update_time,
-            "added_count": len(changes.get('added', pd.DataFrame())),
-            "removed_count": len(changes.get('removed', pd.DataFrame())),
-            "changed_count": len(changes.get('changed', pd.DataFrame()))
+            "added": len(changes['added']),
+            "changed": len(changes['changed']),
+            "removed": len(changes['removed']),
+            "update_time": update_time
         }
     
-    def process_update(
-        self, 
-        data_type: str, 
-        new_data: pd.DataFrame,
-        plan_period: int = None
+    def process_etrs_update(
+        self,
+        dataset_name: str,
+        period_data: Dict[int, pd.DataFrame]
     ) -> Dict[str, Any]:
         """
-        Process full update: update latest sheet and stack changes
+        Process full ETRS update (latest + history)
         
         Args:
-            data_type: Type of data
-            new_data: New data from ETRS
-            plan_period: Plan period
+            dataset_name: Dataset name
+            period_data: Dictionary of period -> DataFrame
+            
+        Returns:
+            Update result
+        """
+        logger.info(f"\n{'='*40}")
+        logger.info(f"📊 {dataset_name} 업데이트")
+        logger.info(f"{'='*40}")
+        
+        # Update latest sheet
+        latest_result = self.update_etrs_latest_sheet(dataset_name, period_data)
+        
+        if not latest_result.get("success"):
+            return {"success": False, "error": "Latest sheet update failed"}
+        
+        # Update history sheet
+        history_result = self.update_etrs_history_sheet(
+            dataset_name,
+            period_data,
+            latest_result.get('old_data')
+        )
+        
+        # Summary
+        total_rows = latest_result.get('rows', 0)
+        added = history_result.get('added', 0)
+        changed = history_result.get('changed', 0)
+        
+        summary = f"""
+{dataset_name} 업데이트 완료:
+  - 최신 시트: {total_rows}행
+  - 신규: {added}건
+  - 변경: {changed}건
+"""
+        logger.info(summary)
+        
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "latest_sheet": latest_result,
+            "history_sheet": history_result
+        }
+    
+    # =========================================================
+    # ORS 데이터 처리
+    # =========================================================
+    
+    def update_ors_latest_sheet(
+        self,
+        dataset_name: str,
+        df: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """Update ORS latest sheet"""
+        if dataset_name not in ORS_DATASETS:
+            logger.error(f"알 수 없는 ORS 데이터셋: {dataset_name}")
+            return {"success": False}
+        
+        dataset = ORS_DATASETS[dataset_name]
+        sheet_name = dataset['sheet_latest']
+        columns = COLUMNS.get(dataset_name, [])
+        
+        # Get existing data
+        old_data = self.get_sheet_data(sheet_name)
+        
+        # Update sheet
+        worksheet = self._get_or_create_worksheet(sheet_name, columns)
+        worksheet.clear()
+        
+        update_time = get_current_timestamp()
+        df_copy = df.copy()
+        df_copy['_업데이트일시'] = update_time
+        
+        headers = list(df_copy.columns)
+        data_rows = df_copy.fillna('').astype(str).values.tolist()
+        all_rows = [headers] + data_rows
+        
+        worksheet.update('A1', all_rows)
+        
+        logger.info(f"✅ ORS 최신 시트 업데이트: {sheet_name} ({len(df)}행)")
+        
+        return {
+            "success": True,
+            "sheet_name": sheet_name,
+            "rows": len(df),
+            "update_time": update_time,
+            "old_data": old_data
+        }
+    
+    def update_ors_history_sheet(
+        self,
+        dataset_name: str,
+        df: pd.DataFrame,
+        old_data: pd.DataFrame = None
+    ) -> Dict[str, Any]:
+        """Update ORS history sheet"""
+        if dataset_name not in ORS_DATASETS:
+            return {"success": False}
+        
+        dataset = ORS_DATASETS[dataset_name]
+        sheet_name = dataset['sheet_history']
+        columns = COLUMNS.get(dataset_name, [])
+        key_cols = KEY_COLUMNS.get(dataset_name, [])
+        value_cols = VALUE_COLUMNS.get(dataset_name, [])
+        
+        # Detect changes
+        if old_data is None or old_data.empty:
+            changes = {
+                'added': df.copy(),
+                'removed': pd.DataFrame(),
+                'changed': pd.DataFrame()
+            }
+        else:
+            available_key_cols = [c for c in key_cols if c in df.columns and c in old_data.columns]
+            available_value_cols = [c for c in value_cols if c in df.columns]
+            
+            old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
+            
+            if available_key_cols:
+                changes = compare_dataframes(old_data_filtered, df, available_key_cols, available_value_cols)
+            else:
+                changes = {'added': df.copy(), 'removed': pd.DataFrame(), 'changed': pd.DataFrame()}
+        
+        # Prepare rows
+        update_time = get_current_timestamp()
+        rows_to_add = []
+        
+        if not changes['added'].empty:
+            for _, row in changes['added'].iterrows():
+                row_dict = row.to_dict()
+                row_dict['_변경유형'] = '신규'
+                row_dict['_변경일시'] = update_time
+                rows_to_add.append(row_dict)
+        
+        if not changes['changed'].empty:
+            for _, row in changes['changed'].iterrows():
+                row_dict = row.to_dict()
+                row_dict['_변경유형'] = '변경'
+                row_dict['_변경일시'] = update_time
+                rows_to_add.append(row_dict)
+        
+        # Append
+        if rows_to_add:
+            worksheet = self._get_or_create_worksheet(sheet_name, columns)
+            existing = worksheet.get_all_values()
+            
+            if not existing:
+                headers = columns + ['_변경유형', '_변경일시']
+                worksheet.update('A1', [headers])
+                existing = [headers]
+            
+            headers = existing[0]
+            next_row = len(existing) + 1
+            
+            new_rows = []
+            for row_dict in rows_to_add:
+                row_values = [str(row_dict.get(h, '')) for h in headers]
+                new_rows.append(row_values)
+            
+            required_rows = next_row + len(new_rows)
+            if required_rows > worksheet.row_count:
+                worksheet.add_rows(required_rows - worksheet.row_count + 100)
+            
+            worksheet.update(f'A{next_row}', new_rows)
+            logger.info(f"✅ ORS 이력 시트 업데이트: {sheet_name} (+{len(new_rows)}행)")
+        
+        return {
+            "success": True,
+            "sheet_name": sheet_name,
+            "added": len(changes['added']),
+            "changed": len(changes['changed']),
+            "update_time": update_time
+        }
+    
+    def process_ors_update(
+        self,
+        dataset_name: str,
+        df: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """Process full ORS update"""
+        logger.info(f"\n{'='*40}")
+        logger.info(f"🌿 ORS {dataset_name} 업데이트")
+        logger.info(f"{'='*40}")
+        
+        latest_result = self.update_ors_latest_sheet(dataset_name, df)
+        
+        if not latest_result.get("success"):
+            return {"success": False}
+        
+        history_result = self.update_ors_history_sheet(
+            dataset_name, df, latest_result.get('old_data')
+        )
+        
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "latest_sheet": latest_result,
+            "history_sheet": history_result
+        }
+    
+    # =========================================================
+    # 통합 업데이트
+    # =========================================================
+    
+    def process_all_updates(
+        self,
+        etrs_data: Dict[str, Dict[int, pd.DataFrame]],
+        ors_data: Dict[str, pd.DataFrame]
+    ) -> Dict[str, Any]:
+        """
+        Process all updates (ETRS + ORS)
+        
+        Args:
+            etrs_data: ETRS data (dataset -> period -> DataFrame)
+            ors_data: ORS data (dataset -> DataFrame)
             
         Returns:
             Complete update result
         """
-        period_str = f" {plan_period}차" if plan_period else ""
-        logger.info(f"=== {data_type}{period_str} 업데이트 시작 ===")
-        
-        # 1. Update latest sheet
-        latest_result = self.update_latest_sheet(data_type, new_data, plan_period)
-        old_data = latest_result['old_data']
-        
-        # 2. Compare and detect changes
-        key_cols = KEY_COLUMNS.get(data_type, [])
-        value_cols = VALUE_COLUMNS.get(data_type, [])
-        
-        # Filter to existing columns
-        available_key_cols = [c for c in key_cols if c in new_data.columns]
-        available_value_cols = [c for c in value_cols if c in new_data.columns]
-        
-        if old_data.empty:
-            changes = {
-                'added': new_data.copy(),
-                'removed': pd.DataFrame(),
-                'changed': pd.DataFrame()
-            }
-        elif not available_key_cols:
-            logger.warning("키 컬럼을 찾을 수 없음, 전체 데이터를 신규로 처리")
-            changes = {
-                'added': new_data.copy(),
-                'removed': pd.DataFrame(),
-                'changed': pd.DataFrame()
-            }
-        else:
-            # Filter old_data columns (exclude metadata)
-            old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
-            
-            changes = compare_dataframes(
-                old_data_filtered, 
-                new_data, 
-                available_key_cols,
-                available_value_cols
-            )
-        
-        # 3. Update stack sheet
-        stack_result = self.update_stack_sheet(data_type, changes, plan_period)
-        
-        # 4. Create summary
-        summary = create_update_summary(
-            f"{data_type}{period_str}",
-            len(new_data),
-            stack_result['added_count'],
-            stack_result['removed_count'],
-            stack_result['changed_count']
-        )
-        logger.info(summary)
-        
-        return {
-            'data_type': data_type,
-            'plan_period': plan_period,
-            'latest_sheet': latest_result,
-            'stack_sheet': stack_result,
-            'summary': summary,
-            'has_changes': stack_result['rows_added'] > 0
+        results = {
+            'etrs': {},
+            'ors': {},
+            'success': True
         }
+        
+        # Process ETRS
+        for dataset_name, period_data in etrs_data.items():
+            try:
+                result = self.process_etrs_update(dataset_name, period_data)
+                results['etrs'][dataset_name] = result
+            except Exception as e:
+                logger.error(f"ETRS {dataset_name} 업데이트 실패: {e}")
+                results['etrs'][dataset_name] = {"success": False, "error": str(e)}
+        
+        # Process ORS
+        for dataset_name, df in ors_data.items():
+            try:
+                result = self.process_ors_update(dataset_name, df)
+                results['ors'][dataset_name] = result
+            except Exception as e:
+                logger.error(f"ORS {dataset_name} 업데이트 실패: {e}")
+                results['ors'][dataset_name] = {"success": False, "error": str(e)}
+        
+        return results
 
 
-def create_handler_from_env() -> GoogleSheetsHandler:
-    """
-    Create GoogleSheetsHandler using environment variables
-    
-    Environment variables:
-        GOOGLE_SHEETS_CREDS: Service account credentials JSON
-        KAU_SHEET_ID: Google Sheets spreadsheet ID
-    """
+def create_handler_from_env() -> AllocationSheetsHandler:
+    """Create handler from environment variables"""
     credentials_json = os.environ.get('GOOGLE_SHEETS_CREDS')
     spreadsheet_id = os.environ.get('KAU_SHEET_ID')
     
     if not credentials_json:
-        raise ValueError("GOOGLE_SHEETS_CREDS 환경변수가 설정되지 않았습니다.")
+        raise ValueError("GOOGLE_SHEETS_CREDS 환경변수가 설정되지 않음")
     if not spreadsheet_id:
-        raise ValueError("KAU_SHEET_ID 환경변수가 설정되지 않았습니다.")
+        raise ValueError("KAU_SHEET_ID 환경변수가 설정되지 않음")
     
-    return GoogleSheetsHandler(credentials_json, spreadsheet_id)
+    return AllocationSheetsHandler(credentials_json, spreadsheet_id)
