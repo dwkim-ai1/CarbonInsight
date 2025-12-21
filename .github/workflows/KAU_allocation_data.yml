@@ -46,7 +46,7 @@ jobs:
       
       - name: Collect ETRS data
         run: |
-          python KAU_allocationcollect_etrs.py
+          python KAU_allocation/collect_etrs.py
         env:
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
@@ -55,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: etrs-data
-          path: KAU_allocationdata/etrs_*.xlsx
+          path: KAU_allocation/data/etrs_*.xlsx
           retention-days: 30
 
   collect-ngms:
@@ -81,7 +81,7 @@ jobs:
       
       - name: Collect NGMS data
         run: |
-          python KAU_allocationcollect_ngms.py
+          python KAU_allocation/collect_ngms.py
         env:
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
@@ -90,7 +90,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ngms-data
-          path: KAU_allocationdata/ngms_*.xlsx
+          path: KAU_allocation/data/ngms_*.xlsx
           retention-days: 30
 
   notify:
