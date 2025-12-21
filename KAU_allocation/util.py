@@ -40,12 +40,6 @@ def ensure_directory(path: str) -> None:
 def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Clean Excel data by removing empty rows and standardizing format
-    
-    Args:
-        df: Raw DataFrame from Excel
-        
-    Returns:
-        Cleaned DataFrame
     """
     logger = logging.getLogger(__name__)
     
@@ -73,16 +67,7 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_excel_format(content: bytes) -> str:
-    """
-    Detect Excel file format from content
-    
-    Args:
-        content: File content bytes
-        
-    Returns:
-        'xlsx' or 'xls'
-    """
-    # xlsx: PK (50 4B), xls: D0 CF 11 E0
+    """Detect Excel file format from content"""
     if content[:2] == b'PK':
         return 'xlsx'
     elif content[:4] == b'\xd0\xcf\x11\xe0':
@@ -92,15 +77,7 @@ def detect_excel_format(content: bytes) -> str:
 
 
 def read_excel_auto(content: bytes) -> pd.DataFrame:
-    """
-    Read Excel content with automatic format detection
-    
-    Args:
-        content: File content bytes
-        
-    Returns:
-        DataFrame
-    """
+    """Read Excel content with automatic format detection"""
     from io import BytesIO
     
     file_format = detect_excel_format(content)
@@ -110,18 +87,7 @@ def read_excel_auto(content: bytes) -> pd.DataFrame:
     elif file_format == 'xls':
         return pd.read_excel(BytesIO(content), engine='xlrd')
     else:
-        # Try both
         try:
             return pd.read_excel(BytesIO(content), engine='openpyxl')
         except:
             return pd.read_excel(BytesIO(content), engine='xlrd')
-
-
-def format_number(value) -> str:
-    """Format number with comma separators"""
-    try:
-        if pd.isna(value):
-            return ""
-        return f"{int(float(value)):,}"
-    except (ValueError, TypeError):
-        return str(value)
