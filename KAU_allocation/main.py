@@ -121,21 +121,3 @@ if __name__ == "__main__":
     if not result['success']:
         sys.exit(1)
     sys.exit(0)
-```
-
----
-
-## 7. `KAU_allocation/.gitignore`
-```
-# 다운로드된 데이터 파일
-data/*.xlsx
-data/*.xls
-data/*.csv
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# 환경변수
-.env
