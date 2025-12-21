@@ -1,11 +1,15 @@
 """
-ETRS Data Scraper Utilities
+ETRS/ORS Data Scraper Utilities
 유틸리티 함수 모음
 """
 
 import logging
 import os
+import sys
 import hashlib
+
+# Absolute imports support
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pandas as pd
@@ -293,6 +297,131 @@ def create_update_summary(
         f"  - 삭제: {removed}건\n"
         f"  - 변경: {changed}건"
     )
+
+
+def convert_period_year_columns(df: pd.DataFrame, plan_period: int) -> pd.DataFrame:
+    """
+    "N차년도" 형태의 컬럼명을 실제 연도("YYYY년")로 변환
+    
+    예: 3차 계획기간의 "1차년도 조기감축" → "2021년 조기감축"
+    
+    Args:
+        df: 변환할 DataFrame
+        plan_period: 계획기간 (1, 2, 3, 4, 5)
+        
+    Returns:
+        컬럼명이 변환된 DataFrame
+    """
+    import re
+    
+    logger = logging.getLogger(__name__)
+    
+    if df.empty:
+        return df
+    
+    # 계획기간별 연도 매핑
+    period_years = {
+        1: [2015, 2016, 2017],
+        2: [2018, 2019, 2020],
+        3: [2021, 2022, 2023, 2024, 2025],
+        4: [2026, 2027, 2028, 2029, 2030],
+        5: [2031, 2032, 2033, 2034, 2035],
+    }
+    
+    if plan_period not in period_years:
+        logger.warning(f"알 수 없는 계획기간: {plan_period}")
+        return df
+    
+    year_list = period_years[plan_period]
+    
+    # 컬럼명 변환
+    new_columns = []
+    converted_count = 0
+    
+    for col in df.columns:
+        col_str = str(col)
+        new_col = col_str
+        
+        # 패턴 1: "N차년도" 또는 "N차 년도" (예: "1차년도", "1차 년도")
+        match = re.search(r'(\d)차\s*년도', col_str)
+        if match:
+            nth_year = int(match.group(1))
+            if 1 <= nth_year <= len(year_list):
+                actual_year = year_list[nth_year - 1]
+                # "1차년도" → "2021년", "1차 년도 조기감축" → "2021년 조기감축"
+                new_col = re.sub(r'\d차\s*년도', f'{actual_year}년', col_str)
+                converted_count += 1
+                logger.debug(f"컬럼 변환: '{col_str}' → '{new_col}'")
+        
+        # 패턴 2: "N년차" (예: "1년차", "2년차")
+        elif re.search(r'(\d)년차', col_str):
+            match = re.search(r'(\d)년차', col_str)
+            nth_year = int(match.group(1))
+            if 1 <= nth_year <= len(year_list):
+                actual_year = year_list[nth_year - 1]
+                new_col = re.sub(r'\d년차', f'{actual_year}년', col_str)
+                converted_count += 1
+                logger.debug(f"컬럼 변환: '{col_str}' → '{new_col}'")
+        
+        new_columns.append(new_col)
+    
+    if converted_count > 0:
+        df.columns = new_columns
+        logger.info(f"N차년도 → 실제연도 변환: {converted_count}개 컬럼 ({plan_period}차 계획기간)")
+        logger.debug(f"변환된 컬럼: {[c for c in new_columns if '년' in c][:5]}...")
+    
+    return df
+
+
+def normalize_year_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    다양한 연도 컬럼 형식을 표준 형식("YYYY년")으로 통일
+    
+    예: "2021", "2021년도", "'21" → "2021년"
+    
+    Args:
+        df: 변환할 DataFrame
+        
+    Returns:
+        컬럼명이 정규화된 DataFrame
+    """
+    import re
+    
+    logger = logging.getLogger(__name__)
+    
+    if df.empty:
+        return df
+    
+    new_columns = []
+    converted_count = 0
+    
+    for col in df.columns:
+        col_str = str(col).strip()
+        new_col = col_str
+        
+        # 이미 "YYYY년" 형식이면 통과
+        if re.match(r'^\d{4}년$', col_str):
+            new_columns.append(new_col)
+            continue
+        
+        # "YYYY년도" → "YYYY년"
+        match = re.match(r'^(\d{4})년도$', col_str)
+        if match:
+            new_col = f"{match.group(1)}년"
+            converted_count += 1
+        
+        # "YYYY" (숫자만) → "YYYY년"
+        elif re.match(r'^(20\d{2})$', col_str):
+            new_col = f"{col_str}년"
+            converted_count += 1
+        
+        new_columns.append(new_col)
+    
+    if converted_count > 0:
+        df.columns = new_columns
+        logger.debug(f"연도 컬럼 정규화: {converted_count}개")
+    
+    return df
 
 
 def save_debug_info(
