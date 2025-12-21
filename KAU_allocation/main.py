@@ -1,135 +1,209 @@
 """
-ETRS Data Update Main Script
-배출권등록부시스템 데이터 업데이트 메인 스크립트
+ETRS/ORS Data Update Main Script
+배출권등록부/상쇄등록부 데이터 업데이트 메인 스크립트
 
-This script:
-1. Downloads data from ETRS website
-2. Updates Google Sheets with latest data
-3. Tracks changes in history sheets
+총 32개 시트 관리:
+- ETRS 8개 × 2(최신+이력) = 16개 시트
+- ORS 8개 × 2(최신+이력) = 16개 시트
 """
 
+import asyncio
 import os
 import sys
+import tempfile
 
-# Add current directory to path for absolute imports
+# Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import DATASETS, PLAN_PERIODS
-from etrs_scraper import ETRSScraper
+from etrs_scraper import AllocationScraper
 from google_sheets_handler import create_handler_from_env
-from utils import setup_logging, get_current_timestamp
+from utils import setup_logging, get_current_timestamp, ensure_directory
 
 logger = setup_logging()
 
+# Debug directory
+DEBUG_DIR = os.environ.get('DEBUG_DIR', '/tmp/allocation_debug')
 
-def main() -> dict:
+
+async def main() -> dict:
     """
     Main execution function
     
     Returns:
-        Dictionary with results for each dataset/period
+        Dictionary with results
     """
     logger.info("=" * 60)
-    logger.info("ETRS 데이터 업데이트 시작")
-    logger.info(f"실행 시간: {get_current_timestamp()}")
+    logger.info("🚀 ETRS/ORS 데이터 업데이트 시작")
+    logger.info(f"⏰ 실행 시간: {get_current_timestamp()}")
     logger.info("=" * 60)
+    
+    # Check options from environment
+    etrs_only = os.environ.get('ETRS_ONLY', 'false').lower() == 'true'
+    ors_only = os.environ.get('ORS_ONLY', 'false').lower() == 'true'
+    debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
+    
+    # Parse periods
+    periods_str = os.environ.get('ETRS_PERIODS', '1,2,3')
+    try:
+        periods = [int(p.strip()) for p in periods_str.split(',')]
+    except:
+        periods = [1, 2, 3]
+    
+    logger.info(f"설정:")
+    logger.info(f"  - ETRS: {'활성화' if not ors_only else '비활성화'}")
+    logger.info(f"  - ORS: {'활성화' if not etrs_only else '비활성화'}")
+    logger.info(f"  - 계획기간: {periods}")
+    logger.info(f"  - 디버그 모드: {'활성화' if debug_mode else '비활성화'}")
     
     results = {
         'success': False,
-        'datasets': {},
-        'errors': [],
+        'etrs': {},
+        'ors': {},
+        'errors': []
     }
+    
+    # Setup debug directory
+    if debug_mode:
+        ensure_directory(DEBUG_DIR)
+        logger.info(f"📁 디버그 디렉토리: {DEBUG_DIR}")
     
     try:
         # Step 1: Initialize Google Sheets handler
-        logger.info("\n[1/2] Google Sheets 연결 중...")
+        logger.info("\n[1/3] 📊 Google Sheets 연결 중...")
         sheets_handler = create_handler_from_env()
         logger.info("✅ Google Sheets 연결 완료")
         
-        # Step 2: Download and update data
-        logger.info("\n[2/2] ETRS 데이터 수집 및 업데이트 중...")
+        # Step 2: Download data
+        logger.info("\n[2/3] 📥 데이터 다운로드 중...")
         
-        scraper = ETRSScraper()
+        download_dir = tempfile.mkdtemp()
+        scraper = AllocationScraper(
+            download_dir=download_dir,
+            debug_mode=debug_mode
+        )
         
-        # 계획기간별 수집
-        for period in PLAN_PERIODS.keys():
-            logger.info(f"\n{'='*50}")
-            logger.info(f"📅 계획기간 {period}차 ({PLAN_PERIODS[period]})")
-            logger.info(f"{'='*50}")
+        if debug_mode:
+            scraper.debug_dir = DEBUG_DIR
+            ensure_directory(str(scraper.debug_dir))
+        
+        try:
+            await scraper.initialize()
             
-            for dataset_name, dataset_config in DATASETS.items():
-                try:
-                    logger.info(f"\n--- {dataset_name} ---")
-                    
-                    # Download
-                    df = scraper.download_excel(dataset_name, period)
-                    
-                    if df is None or len(df) == 0:
-                        logger.warning(f"⚠️ {dataset_name} {period}차: 데이터 없음")
-                        continue
-                    
-                    logger.info(f"📊 데이터 크기: {df.shape}")
-                    logger.info(f"📋 컬럼: {list(df.columns)[:5]}...")
-                    
-                    # Process update (latest + stack)
-                    result = sheets_handler.process_update(dataset_name, df, period)
-                    
-                    # Record result
-                    key = f"{dataset_name}_{period}차"
-                    results['datasets'][key] = {
-                        'success': True,
-                        'rows': len(df),
-                        'has_changes': result.get('has_changes', False)
-                    }
-                    
-                except Exception as e:
-                    error_msg = f"{dataset_name} {period}차: {str(e)}"
-                    logger.error(f"❌ {error_msg}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    results['errors'].append(error_msg)
-                    results['datasets'][f"{dataset_name}_{period}차"] = {
-                        'success': False,
-                        'error': str(e),
-                    }
+            # Download data
+            if etrs_only:
+                downloaded = {
+                    'etrs': await scraper.download_all_etrs(periods),
+                    'ors': {}
+                }
+            elif ors_only:
+                downloaded = {
+                    'etrs': {},
+                    'ors': await scraper.download_all_ors()
+                }
+            else:
+                downloaded = await scraper.download_all(periods, include_ors=True)
+                
+        finally:
+            await scraper.close()
         
-        # Determine overall success
-        successful = [k for k, v in results['datasets'].items() if v.get('success')]
-        results['success'] = len(successful) > 0
+        # Check if we have any data
+        etrs_count = sum(len(pd) for pd in downloaded.get('etrs', {}).values())
+        ors_count = len(downloaded.get('ors', {}))
+        
+        if etrs_count == 0 and ors_count == 0:
+            raise Exception("다운로드된 데이터가 없습니다")
+        
+        logger.info(f"✅ 다운로드 완료: ETRS {etrs_count}개, ORS {ors_count}개 데이터셋")
+        
+        # Step 3: Update Google Sheets
+        logger.info("\n[3/3] 📤 Google Sheets 업데이트 중...")
+        
+        # Update ETRS
+        for dataset_name, period_data in downloaded.get('etrs', {}).items():
+            try:
+                result = sheets_handler.process_etrs_update(dataset_name, period_data)
+                results['etrs'][dataset_name] = {
+                    'success': result.get('success', False),
+                    'rows': sum(len(df) for df in period_data.values())
+                }
+                
+                if result.get('success'):
+                    logger.info(f"✓ ETRS {dataset_name}: 업데이트 완료")
+                else:
+                    logger.warning(f"✗ ETRS {dataset_name}: 업데이트 실패")
+                    
+            except Exception as e:
+                error_msg = f"ETRS {dataset_name}: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                results['errors'].append(error_msg)
+                results['etrs'][dataset_name] = {'success': False, 'error': str(e)}
+        
+        # Update ORS
+        for dataset_name, df in downloaded.get('ors', {}).items():
+            try:
+                result = sheets_handler.process_ors_update(dataset_name, df)
+                results['ors'][dataset_name] = {
+                    'success': result.get('success', False),
+                    'rows': len(df)
+                }
+                
+                if result.get('success'):
+                    logger.info(f"✓ ORS {dataset_name}: 업데이트 완료")
+                else:
+                    logger.warning(f"✗ ORS {dataset_name}: 업데이트 실패")
+                    
+            except Exception as e:
+                error_msg = f"ORS {dataset_name}: {str(e)}"
+                logger.error(f"❌ {error_msg}")
+                results['errors'].append(error_msg)
+                results['ors'][dataset_name] = {'success': False, 'error': str(e)}
+        
+        # Determine success
+        etrs_success = sum(1 for r in results['etrs'].values() if r.get('success'))
+        ors_success = sum(1 for r in results['ors'].values() if r.get('success'))
+        results['success'] = (etrs_success + ors_success) > 0
         
     except Exception as e:
-        logger.error(f"실행 중 오류 발생: {e}")
+        logger.error(f"❌ 실행 중 오류: {e}")
         import traceback
         logger.error(traceback.format_exc())
         results['errors'].append(str(e))
     
     # Print summary
     logger.info("\n" + "=" * 60)
-    logger.info("📈 실행 결과 요약")
+    logger.info("📋 실행 결과 요약")
     logger.info("=" * 60)
     
-    for key, info in results['datasets'].items():
-        status = "✅ 성공" if info.get('success') else "❌ 실패"
-        if info.get('success'):
-            changes = "📝 변경있음" if info.get('has_changes') else "➖ 변경없음"
-            logger.info(f"  {key}: {status} ({info.get('rows', 0)}행, {changes})")
-        else:
-            logger.info(f"  {key}: {status} - {info.get('error', 'Unknown')}")
+    logger.info("\n[ETRS - 배출권등록부]")
+    for name, info in results['etrs'].items():
+        status = "✅" if info.get('success') else "❌"
+        rows = info.get('rows', 0)
+        logger.info(f"  {status} {name}: {rows}행")
+    
+    logger.info("\n[ORS - 상쇄등록부]")
+    for name, info in results['ors'].items():
+        status = "✅" if info.get('success') else "❌"
+        rows = info.get('rows', 0)
+        logger.info(f"  {status} {name}: {rows}행")
     
     if results['errors']:
-        logger.warning(f"\n⚠️ 총 {len(results['errors'])}개의 오류 발생")
+        logger.warning(f"\n⚠️ 오류 {len(results['errors'])}건:")
+        for err in results['errors']:
+            logger.warning(f"  - {err}")
     
+    overall = "✅ 성공" if results['success'] else "❌ 실패"
     logger.info(f"\n{'='*60}")
-    logger.info(f"🏁 전체 결과: {'✅ 성공' if results['success'] else '❌ 실패'}")
+    logger.info(f"전체 결과: {overall}")
     logger.info("=" * 60)
     
     return results
 
 
+def run():
+    """Synchronous entry point"""
+    return asyncio.run(main())
+
+
 if __name__ == "__main__":
-    result = main()
-    
-    # Exit with appropriate code
-    if not result['success']:
-        sys.exit(1)
-    sys.exit(0)
+    result = run()
+    sys.exit(0 if result['success'] else 1)
