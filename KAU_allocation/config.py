@@ -153,7 +153,39 @@ PLAN_PERIODS = {
     1: {"name": "1차", "years": "2015-2017", "year_list": [2015, 2016, 2017]},
     2: {"name": "2차", "years": "2018-2020", "year_list": [2018, 2019, 2020]},
     3: {"name": "3차", "years": "2021-2025", "year_list": [2021, 2022, 2023, 2024, 2025]},
+    4: {"name": "4차", "years": "2026-2030", "year_list": [2026, 2027, 2028, 2029, 2030]},
+    5: {"name": "5차", "years": "2031-2035", "year_list": [2031, 2032, 2033, 2034, 2035]},
 }
+
+# =====================================================
+# N차년도 → 실제연도 변환 매핑
+# 예: 3차 계획기간의 "1차년도" → "2021년"
+# =====================================================
+def get_year_from_period_year(plan_period: int, nth_year: int) -> int:
+    """
+    계획기간 내 N차년도를 실제 연도로 변환
+    
+    Args:
+        plan_period: 계획기간 (1, 2, 3, 4, 5)
+        nth_year: 계획기간 내 연차 (1, 2, 3, ...)
+        
+    Returns:
+        실제 연도 (예: 2021)
+    """
+    if plan_period not in PLAN_PERIODS:
+        return None
+    year_list = PLAN_PERIODS[plan_period]["year_list"]
+    if nth_year < 1 or nth_year > len(year_list):
+        return None
+    return year_list[nth_year - 1]
+
+# N차년도 컬럼명 패턴 → 실제 연도 컬럼명 변환용
+# "1차년도", "1차 년도", "1차년도 조기감축" 등의 패턴 처리
+YEAR_COLUMN_PATTERNS = [
+    # (패턴, 연차 추출 방법)
+    (r"(\d)차\s*년도", lambda m: int(m.group(1))),  # "1차년도", "1차 년도"
+    (r"(\d+)년", lambda m: int(m.group(1))),  # "2021년" - 이미 연도인 경우
+]
 
 # =====================================================
 # 부문 코드 (ETRS 검색 필터용)
