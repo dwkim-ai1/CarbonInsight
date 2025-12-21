@@ -23,9 +23,9 @@ DATA_DIR = SCRIPT_DIR / "data"
 
 def get_gspread_client():
     """Google Sheets 클라이언트 생성"""
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+    creds_json = os.environ.get("GOOGLE_SHEETS_CREDS")
     if not creds_json:
-        raise ValueError("GOOGLE_CREDENTIALS 환경변수가 설정되지 않았습니다.")
+        raise ValueError("GOOGLE_SHEETS_CREDS 환경변수가 설정되지 않았습니다.")
     
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -200,9 +200,9 @@ def main():
     print(f"시간: {datetime.now().isoformat()}")
     print("=" * 60)
     
-    spreadsheet_id = os.environ.get("SPREADSHEET_ID")
+    spreadsheet_id = os.environ.get("KAU_SHEET_ID")
     if not spreadsheet_id:
-        raise ValueError("SPREADSHEET_ID 환경변수가 설정되지 않았습니다.")
+        raise ValueError("KAU_SHEET_ID 환경변수가 설정되지 않았습니다.")
     
     DATA_DIR.mkdir(exist_ok=True)
     
