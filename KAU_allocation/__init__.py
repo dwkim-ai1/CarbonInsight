@@ -5,6 +5,7 @@ KAU_allocation - ETRS Data Scraper Package
 This package provides tools to:
 - Scrape data from ETRS website (https://etrs.gir.go.kr)
 - Update Google Sheets with downloaded data
+- Track changes over time
 
 Data types handled:
 - 사전할당량 (Pre-allocation)
@@ -20,13 +21,15 @@ __author__ = "KAU Data Team"
 
 from .config import (
     ETRS_BASE_URL,
+    DATASETS,
+    PLAN_PERIODS,
     SHEET_NAMES,
     COLUMNS,
-    DATASETS,
 )
 
 from .utils import (
     setup_logging,
+    compare_dataframes,
     clean_excel_data,
 )
 
@@ -37,19 +40,32 @@ from .google_sheets_handler import (
 
 from .etrs_scraper import (
     ETRSScraper,
+    run_scraper,
 )
 
 from .main import main
 
 __all__ = [
+    # Config
     'ETRS_BASE_URL',
+    'DATASETS',
+    'PLAN_PERIODS',
     'SHEET_NAMES',
     'COLUMNS',
-    'DATASETS',
+    
+    # Utils
     'setup_logging',
+    'compare_dataframes',
     'clean_excel_data',
+    
+    # Google Sheets
     'GoogleSheetsHandler',
     'create_handler_from_env',
+    
+    # Scraper
     'ETRSScraper',
+    'run_scraper',
+    
+    # Main
     'main',
 ]
