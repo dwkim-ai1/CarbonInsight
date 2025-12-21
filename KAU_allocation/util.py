@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 import pandas as pd
 
-from config import COLUMN_MAPPING
+# Note: COLUMN_MAPPING is imported here but may cause circular import
+# So we handle it carefully
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -25,6 +26,15 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     return logging.getLogger("ETRS_Scraper")
 
 
+def get_column_mapping() -> Dict[str, str]:
+    """Get column mapping (lazy load to avoid circular import)"""
+    try:
+        from config import COLUMN_MAPPING
+        return COLUMN_MAPPING
+    except ImportError:
+        return {}
+
+
 def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
     컬럼명을 표준화된 이름으로 변환
@@ -33,6 +43,8 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     
     if df.empty:
         return df
+    
+    column_mapping = get_column_mapping()
     
     original_columns = list(df.columns)
     new_columns = []
@@ -43,8 +55,8 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         new_col = col_str
         
         # 정확한 매핑 먼저 시도
-        if col_str in COLUMN_MAPPING:
-            new_col = COLUMN_MAPPING[col_str]
+        if col_str in column_mapping:
+            new_col = column_mapping[col_str]
             if col_str != new_col:
                 renamed_count += 1
                 logger.debug(f"컬럼명 변환: '{col_str}' → '{new_col}'")
@@ -84,7 +96,12 @@ def calculate_data_hash(df: pd.DataFrame, key_columns: List[str]) -> str:
     if df.empty:
         return ""
     
-    df_sorted = df.sort_values(by=key_columns).reset_index(drop=True)
+    # Filter to existing key columns
+    available_keys = [c for c in key_columns if c in df.columns]
+    if not available_keys:
+        available_keys = df.columns.tolist()[:2]
+    
+    df_sorted = df.sort_values(by=available_keys).reset_index(drop=True)
     data_str = df_sorted.to_string()
     return hashlib.md5(data_str.encode()).hexdigest()
 
@@ -98,9 +115,17 @@ def compare_dataframes(
     """
     Compare two dataframes and find changes
     
+    Args:
+        old_df: Previous data
+        new_df: New data
+        key_columns: Columns to identify unique records
+        value_columns: Columns to check for changes
+        
     Returns:
         Dictionary with 'added', 'removed', 'changed' DataFrames
     """
+    logger = logging.getLogger(__name__)
+    
     result = {
         "added": pd.DataFrame(),
         "removed": pd.DataFrame(),
@@ -115,14 +140,17 @@ def compare_dataframes(
         result["removed"] = old_df.copy()
         return result
     
-    # Ensure key columns exist
-    for col in key_columns:
-        if col not in old_df.columns or col not in new_df.columns:
-            raise ValueError(f"Key column '{col}' not found in dataframes")
+    # Filter to existing columns
+    available_key_cols = [c for c in key_columns if c in old_df.columns and c in new_df.columns]
+    
+    if not available_key_cols:
+        logger.warning("키 컬럼을 찾을 수 없음, 전체 데이터를 신규로 처리")
+        result["added"] = new_df.copy()
+        return result
     
     # Create composite key
-    old_keys = old_df[key_columns].astype(str).agg('|'.join, axis=1)
-    new_keys = new_df[key_columns].astype(str).agg('|'.join, axis=1)
+    old_keys = old_df[available_key_cols].astype(str).agg('|'.join, axis=1)
+    new_keys = new_df[available_key_cols].astype(str).agg('|'.join, axis=1)
     
     # Find added records
     added_mask = ~new_keys.isin(old_keys)
@@ -137,30 +165,35 @@ def compare_dataframes(
     common_old = old_df[~removed_mask].copy()
     
     if not common_new.empty and not common_old.empty:
-        merged = common_new.merge(
-            common_old, 
-            on=key_columns, 
-            suffixes=('_new', '_old'),
-            how='inner'
-        )
+        # Filter value columns
+        available_value_cols = [c for c in value_columns if c in common_new.columns and c in common_old.columns]
         
-        changed_mask = pd.Series([False] * len(merged))
-        for col in value_columns:
-            if col in common_new.columns and col in common_old.columns:
+        if available_value_cols:
+            merged = common_new.merge(
+                common_old, 
+                on=available_key_cols, 
+                suffixes=('_new', '_old'),
+                how='inner'
+            )
+            
+            changed_mask = pd.Series([False] * len(merged))
+            for col in available_value_cols:
                 new_col = f"{col}_new" if f"{col}_new" in merged.columns else col
                 old_col = f"{col}_old" if f"{col}_old" in merged.columns else col
                 if new_col in merged.columns and old_col in merged.columns:
                     col_changed = ~(
-                        (merged[new_col] == merged[old_col]) | 
+                        (merged[new_col].astype(str) == merged[old_col].astype(str)) | 
                         (merged[new_col].isna() & merged[old_col].isna())
                     )
                     changed_mask = changed_mask | col_changed
-        
-        if changed_mask.any():
-            changed_keys = merged[changed_mask][key_columns]
-            changed_key_str = changed_keys.astype(str).agg('|'.join, axis=1)
-            new_key_str = new_df[key_columns].astype(str).agg('|'.join, axis=1)
-            result["changed"] = new_df[new_key_str.isin(changed_key_str)].copy()
+            
+            if changed_mask.any():
+                changed_keys = merged[changed_mask][available_key_cols]
+                changed_key_str = changed_keys.astype(str).agg('|'.join, axis=1)
+                new_key_str = new_df[available_key_cols].astype(str).agg('|'.join, axis=1)
+                result["changed"] = new_df[new_key_str.isin(changed_key_str)].copy()
+    
+    logger.info(f"비교 결과: 신규 {len(result['added'])}건, 삭제 {len(result['removed'])}건, 변경 {len(result['changed'])}건")
     
     return result
 
@@ -173,6 +206,8 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     
     if df.empty:
         return df
+    
+    original_len = len(df)
     
     # Remove completely empty rows
     df = df.dropna(how='all')
@@ -196,15 +231,22 @@ def clean_excel_data(df: pd.DataFrame) -> pd.DataFrame:
     # Reset index
     df = df.reset_index(drop=True)
     
-    logger.debug(f"데이터 정제 완료: {len(df)}행")
+    cleaned_len = len(df)
+    if original_len != cleaned_len:
+        logger.debug(f"데이터 정제: {original_len}행 → {cleaned_len}행")
     
     return df
 
 
 def detect_excel_format(content: bytes) -> str:
-    """Detect Excel file format from content"""
+    """Detect Excel file format from content bytes"""
+    if len(content) < 4:
+        return 'unknown'
+    
+    # XLSX files start with PK (zip signature)
     if content[:2] == b'PK':
         return 'xlsx'
+    # XLS files start with compound document signature
     elif content[:4] == b'\xd0\xcf\x11\xe0':
         return 'xls'
     else:
@@ -215,17 +257,25 @@ def read_excel_auto(content: bytes) -> pd.DataFrame:
     """Read Excel content with automatic format detection"""
     from io import BytesIO
     
-    file_format = detect_excel_format(content)
+    logger = logging.getLogger(__name__)
     
-    if file_format == 'xlsx':
-        return pd.read_excel(BytesIO(content), engine='openpyxl')
-    elif file_format == 'xls':
-        return pd.read_excel(BytesIO(content), engine='xlrd')
-    else:
-        try:
+    file_format = detect_excel_format(content)
+    logger.debug(f"감지된 Excel 형식: {file_format}")
+    
+    try:
+        if file_format == 'xlsx':
             return pd.read_excel(BytesIO(content), engine='openpyxl')
-        except:
+        elif file_format == 'xls':
             return pd.read_excel(BytesIO(content), engine='xlrd')
+        else:
+            # Try both
+            try:
+                return pd.read_excel(BytesIO(content), engine='openpyxl')
+            except:
+                return pd.read_excel(BytesIO(content), engine='xlrd')
+    except Exception as e:
+        logger.error(f"Excel 읽기 실패: {e}")
+        raise
 
 
 def create_update_summary(
@@ -243,3 +293,16 @@ def create_update_summary(
         f"  - 삭제: {removed}건\n"
         f"  - 변경: {changed}건"
     )
+
+
+def save_debug_info(
+    content: str, 
+    filename: str, 
+    debug_dir: str = "debug"
+) -> str:
+    """Save debug information to file"""
+    ensure_directory(debug_dir)
+    filepath = os.path.join(debug_dir, filename)
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return filepath
