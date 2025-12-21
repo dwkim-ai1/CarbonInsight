@@ -5,9 +5,8 @@ ETRS Data Update Main Script
 
 import os
 import sys
-from datetime import datetime
 
-# Add parent directory to path for imports
+# Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import DATASETS, PLAN_PERIODS
@@ -19,12 +18,7 @@ logger = setup_logging()
 
 
 def main() -> dict:
-    """
-    Main execution function
-    
-    Returns:
-        Dictionary with results
-    """
+    """Main execution function"""
     logger.info("=" * 60)
     logger.info("ETRS 데이터 업데이트 시작")
     logger.info(f"실행 시간: {get_current_timestamp()}")
@@ -47,14 +41,13 @@ def main() -> dict:
         
         scraper = ETRSScraper()
         
-        # 수집할 데이터셋 (현재 확인된 것만)
-        active_datasets = ["사전할당량"]  # 다른 데이터셋은 엔드포인트 확인 후 추가
-        
         # 계획기간별 수집
         for period in PLAN_PERIODS.keys():
-            logger.info(f"\n--- 계획기간 {period}차 ---")
+            logger.info(f"\n{'='*40}")
+            logger.info(f"계획기간 {period}차")
+            logger.info(f"{'='*40}")
             
-            for dataset_name in active_datasets:
+            for dataset_name, dataset_config in DATASETS.items():
                 try:
                     # Download
                     df = scraper.download_excel(dataset_name, period)
@@ -63,20 +56,22 @@ def main() -> dict:
                         logger.warning(f"⚠️ {dataset_name} {period}차: 데이터 없음")
                         continue
                     
-                    # Update Google Sheets
-                    sheet_name = f"{DATASETS[dataset_name]['sheet_prefix']}_{period}차"
-                    sheets_handler.update_sheet(sheet_name, df)
+                    # Process update (latest + stack)
+                    result = sheets_handler.process_update(dataset_name, df, period)
                     
                     # Record result
                     key = f"{dataset_name}_{period}차"
                     results['datasets'][key] = {
                         'success': True,
                         'rows': len(df),
+                        'has_changes': result.get('has_changes', False)
                     }
                     
                 except Exception as e:
                     error_msg = f"{dataset_name} {period}차: {str(e)}"
                     logger.error(f"❌ {error_msg}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
                     results['errors'].append(error_msg)
                     results['datasets'][f"{dataset_name}_{period}차"] = {
                         'success': False,
@@ -101,7 +96,8 @@ def main() -> dict:
     for key, info in results['datasets'].items():
         status = "✅ 성공" if info.get('success') else "❌ 실패"
         if info.get('success'):
-            logger.info(f"{key}: {status} ({info.get('rows', 0)}행)")
+            changes = "변경있음" if info.get('has_changes') else "변경없음"
+            logger.info(f"{key}: {status} ({info.get('rows', 0)}행, {changes})")
         else:
             logger.info(f"{key}: {status} - {info.get('error', 'Unknown')}")
     
@@ -117,7 +113,6 @@ def main() -> dict:
 if __name__ == "__main__":
     result = main()
     
-    # Exit with appropriate code
     if not result['success']:
         sys.exit(1)
     sys.exit(0)
