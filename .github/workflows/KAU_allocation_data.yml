@@ -1,0 +1,110 @@
+# .github/workflows/update_allocation_data.yml
+# GIR 온실가스 배출권 할당 데이터 자동 수집 및 Google Sheets 업데이트
+
+name: Update Allocation Data
+
+on:
+  # 매주 월요일 오전 9시 (KST) = 일요일 자정 (UTC)
+  schedule:
+    - cron: '0 0 * * 1'
+  
+  # 수동 실행
+  workflow_dispatch:
+    inputs:
+      data_source:
+        description: '수집할 데이터 소스'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - etrs
+          - ngms
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  collect-etrs:
+    name: ETRS 데이터 수집
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.data_source == 'all' || github.event.inputs.data_source == 'etrs' || github.event_name == 'schedule' }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements/requirements_allocation.txt
+      
+      - name: Collect ETRS data
+        run: |
+          python allocation/collect_etrs.py
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: etrs-data
+          path: allocation/data/etrs_*.xlsx
+          retention-days: 30
+
+  collect-ngms:
+    name: NGMS 데이터 수집
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.data_source == 'all' || github.event.inputs.data_source == 'ngms' || github.event_name == 'schedule' }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements/requirements_allocation.txt
+          playwright install chromium
+          playwright install-deps chromium
+      
+      - name: Collect NGMS data
+        run: |
+          python allocation/collect_ngms.py
+        env:
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          KAU_SHEET_ID: ${{ secrets.KAU_SHEET_ID }}
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngms-data
+          path: allocation/data/ngms_*.xlsx
+          retention-days: 30
+
+  notify:
+    name: 완료 알림
+    runs-on: ubuntu-latest
+    needs: [collect-etrs, collect-ngms]
+    if: always()
+    
+    steps:
+      - name: Check results
+        run: |
+          echo "ETRS: ${{ needs.collect-etrs.result }}"
+          echo "NGMS: ${{ needs.collect-ngms.result }}"
+          
+          if [ "${{ needs.collect-etrs.result }}" == "failure" ] || [ "${{ needs.collect-ngms.result }}" == "failure" ]; then
+            echo "::warning::일부 수집 작업이 실패했습니다."
+          fi
