@@ -60,7 +60,24 @@ def download_etrs_excel(menu_id, plan_period, endpoint="infoOpenList10Excel"):
     response = requests.get(url, params=params, headers=headers, timeout=120)
     response.raise_for_status()
     
-    return pd.read_excel(BytesIO(response.content))
+    content = response.content
+    
+    # 파일 형식 감지 (xls vs xlsx)
+    # xlsx: PK (50 4B), xls: D0 CF 11 E0
+    if content[:2] == b'PK':
+        # xlsx 형식
+        df = pd.read_excel(BytesIO(content), engine='openpyxl')
+    elif content[:4] == b'\xd0\xcf\x11\xe0':
+        # xls 형식
+        df = pd.read_excel(BytesIO(content), engine='xlrd')
+    else:
+        # 기본값으로 시도
+        try:
+            df = pd.read_excel(BytesIO(content), engine='openpyxl')
+        except:
+            df = pd.read_excel(BytesIO(content), engine='xlrd')
+    
+    return df
 
 
 def update_sheet(gc, spreadsheet_id, sheet_name, df):
@@ -79,6 +96,11 @@ def update_sheet(gc, spreadsheet_id, sheet_name, df):
     
     # DataFrame을 리스트로 변환 (NaN 처리)
     df_clean = df.fillna("")
+    
+    # 숫자/날짜 타입을 문자열로 변환 (gspread 호환)
+    for col in df_clean.columns:
+        df_clean[col] = df_clean[col].astype(str).replace('nan', '')
+    
     data = [df_clean.columns.tolist()] + df_clean.values.tolist()
     
     worksheet.update(data, value_input_option='USER_ENTERED')
@@ -104,24 +126,15 @@ def main():
     print("✅ Google Sheets 인증 완료")
     
     # 수집할 데이터 정의
+    # 참고: ETRS 정보공개 페이지별 엔드포인트
+    # - 사전할당량 (menuId=24): infoOpenList10Excel
+    # - 기타 데이터는 엔드포인트 확인 필요
     datasets = [
         {
             "name": "사전할당량",
             "menu_id": 24,
             "endpoint": "infoOpenList10Excel",
             "sheet_name": "ETRS_사전할당량",
-        },
-        {
-            "name": "인증배출량",
-            "menu_id": 20,
-            "endpoint": "infoOpenList06Excel",
-            "sheet_name": "ETRS_인증배출량",
-        },
-        {
-            "name": "추가할당량",
-            "menu_id": 14,
-            "endpoint": "infoOpenList02Excel",
-            "sheet_name": "ETRS_추가할당량",
         },
     ]
     
