@@ -36,6 +36,8 @@ from utils import (
     clean_excel_data,
     read_excel_auto,
     ensure_directory,
+    convert_period_year_columns,
+    normalize_year_columns,
 )
 
 logger = setup_logging()
@@ -168,6 +170,9 @@ class AllocationScraper:
             
             if df is not None and len(df) > 0:
                 logger.info(f"✅ Excel 다운로드 성공: {len(df)}행")
+                # ★★★ N차년도 → 실제연도 컬럼 변환 ★★★
+                df = convert_period_year_columns(df, plan_period)
+                df = normalize_year_columns(df)
                 return df
             
             # Fallback: Scrape HTML table with pagination
@@ -176,6 +181,9 @@ class AllocationScraper:
             
             if df is not None and len(df) > 0:
                 logger.info(f"✅ 테이블 스크래핑 성공: {len(df)}행")
+                # ★★★ N차년도 → 실제연도 컬럼 변환 ★★★
+                df = convert_period_year_columns(df, plan_period)
+                df = normalize_year_columns(df)
                 return df
             
             logger.warning(f"⚠️ 데이터 수집 실패: {dataset_name} {plan_period}차")
