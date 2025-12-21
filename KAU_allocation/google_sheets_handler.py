@@ -221,7 +221,6 @@ class AllocationSheetsHandler:
         
         dataset = ETRS_DATASETS[dataset_name]
         sheet_name = dataset['sheet_history']
-        columns = COLUMNS.get(dataset_name, [])
         key_cols = KEY_COLUMNS.get(dataset_name, [])
         value_cols = VALUE_COLUMNS.get(dataset_name, [])
         
@@ -238,6 +237,9 @@ class AllocationSheetsHandler:
         
         new_data = pd.concat(all_data, ignore_index=True)
         
+        # ★★★ 실제 데이터의 컬럼을 사용 (config 대신) ★★★
+        actual_columns = [c for c in new_data.columns if not c.startswith('_')]
+        
         # Detect changes
         if old_data is None or old_data.empty:
             changes = {
@@ -246,9 +248,19 @@ class AllocationSheetsHandler:
                 'changed': pd.DataFrame()
             }
         else:
-            # Filter columns
+            # Filter columns - 실제 데이터에 있는 컬럼만 사용
             available_key_cols = [c for c in key_cols if c in new_data.columns and c in old_data.columns]
             available_value_cols = [c for c in value_cols if c in new_data.columns]
+            
+            # 키 컬럼이 없으면 실제 데이터의 공통 컬럼에서 찾기
+            if not available_key_cols:
+                common_cols = [c for c in new_data.columns if c in old_data.columns and not c.startswith('_')]
+                # 업체명, 부문 등 기본 키 컬럼 시도
+                for key_candidate in ['업체명', '부문', '업종', '구분']:
+                    if key_candidate in common_cols:
+                        available_key_cols.append(key_candidate)
+                if len(available_key_cols) == 0 and common_cols:
+                    available_key_cols = common_cols[:2]  # 처음 2개 컬럼 사용
             
             # Filter old_data columns
             old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
@@ -289,19 +301,34 @@ class AllocationSheetsHandler:
         
         # Append to history sheet
         if rows_to_add:
-            worksheet = self._get_or_create_worksheet(sheet_name, columns)
+            # ★★★ 시트 가져오기 (헤더 없이 생성) ★★★
+            worksheet = self._get_or_create_worksheet(sheet_name)
             
             # Get current data
             existing = worksheet.get_all_values()
             
-            # Ensure headers exist
-            if not existing:
-                headers = columns + ['_변경유형', '_변경일시', '_계획기간']
+            # ★★★ 헤더가 없으면 실제 데이터의 컬럼으로 생성 ★★★
+            if not existing or len(existing) == 0:
+                # 실제 데이터 컬럼 + 메타데이터 컬럼
+                headers = actual_columns + ['_변경유형', '_변경일시', '_계획기간']
                 worksheet.update('A1', [headers])
                 existing = [headers]
+                logger.info(f"이력 시트 헤더 생성: {headers[:5]}...")
             
             headers = existing[0]
             next_row = len(existing) + 1
+            
+            # ★★★ 헤더 컬럼 부족 시 확장 ★★★
+            all_needed_cols = set()
+            for row_dict in rows_to_add:
+                all_needed_cols.update(row_dict.keys())
+            
+            missing_cols = [c for c in all_needed_cols if c not in headers]
+            if missing_cols:
+                # 기존 헤더에 새 컬럼 추가
+                headers = headers + missing_cols
+                worksheet.update('A1', [headers])
+                logger.info(f"이력 시트 헤더 확장: +{missing_cols}")
             
             # Prepare rows
             new_rows = []
@@ -311,8 +338,12 @@ class AllocationSheetsHandler:
             
             # Expand sheet if needed
             required_rows = next_row + len(new_rows)
+            required_cols = len(headers)
+            
             if required_rows > worksheet.row_count:
                 worksheet.add_rows(required_rows - worksheet.row_count + 100)
+            if required_cols > worksheet.col_count:
+                worksheet.add_cols(required_cols - worksheet.col_count + 10)
             
             # Write rows
             worksheet.update(f'A{next_row}', new_rows)
@@ -439,9 +470,11 @@ class AllocationSheetsHandler:
         
         dataset = ORS_DATASETS[dataset_name]
         sheet_name = dataset['sheet_history']
-        columns = COLUMNS.get(dataset_name, [])
         key_cols = KEY_COLUMNS.get(dataset_name, [])
         value_cols = VALUE_COLUMNS.get(dataset_name, [])
+        
+        # ★★★ 실제 데이터의 컬럼을 사용 ★★★
+        actual_columns = [c for c in df.columns if not c.startswith('_')]
         
         # Detect changes
         if old_data is None or old_data.empty:
@@ -453,6 +486,15 @@ class AllocationSheetsHandler:
         else:
             available_key_cols = [c for c in key_cols if c in df.columns and c in old_data.columns]
             available_value_cols = [c for c in value_cols if c in df.columns]
+            
+            # 키 컬럼이 없으면 실제 데이터의 공통 컬럼에서 찾기
+            if not available_key_cols:
+                common_cols = [c for c in df.columns if c in old_data.columns and not c.startswith('_')]
+                for key_candidate in ['사업명', '방법론명', '구분', '번호']:
+                    if key_candidate in common_cols:
+                        available_key_cols.append(key_candidate)
+                if len(available_key_cols) == 0 and common_cols:
+                    available_key_cols = common_cols[:2]
             
             old_data_filtered = old_data[[c for c in old_data.columns if not c.startswith('_')]]
             
@@ -481,16 +523,30 @@ class AllocationSheetsHandler:
         
         # Append
         if rows_to_add:
-            worksheet = self._get_or_create_worksheet(sheet_name, columns)
+            # ★★★ 시트 가져오기 (헤더 없이 생성) ★★★
+            worksheet = self._get_or_create_worksheet(sheet_name)
             existing = worksheet.get_all_values()
             
-            if not existing:
-                headers = columns + ['_변경유형', '_변경일시']
+            # ★★★ 헤더가 없으면 실제 데이터의 컬럼으로 생성 ★★★
+            if not existing or len(existing) == 0:
+                headers = actual_columns + ['_변경유형', '_변경일시']
                 worksheet.update('A1', [headers])
                 existing = [headers]
+                logger.info(f"ORS 이력 시트 헤더 생성: {headers[:5]}...")
             
             headers = existing[0]
             next_row = len(existing) + 1
+            
+            # ★★★ 헤더 컬럼 부족 시 확장 ★★★
+            all_needed_cols = set()
+            for row_dict in rows_to_add:
+                all_needed_cols.update(row_dict.keys())
+            
+            missing_cols = [c for c in all_needed_cols if c not in headers]
+            if missing_cols:
+                headers = headers + missing_cols
+                worksheet.update('A1', [headers])
+                logger.info(f"ORS 이력 시트 헤더 확장: +{missing_cols}")
             
             new_rows = []
             for row_dict in rows_to_add:
@@ -498,8 +554,12 @@ class AllocationSheetsHandler:
                 new_rows.append(row_values)
             
             required_rows = next_row + len(new_rows)
+            required_cols = len(headers)
+            
             if required_rows > worksheet.row_count:
                 worksheet.add_rows(required_rows - worksheet.row_count + 100)
+            if required_cols > worksheet.col_count:
+                worksheet.add_cols(required_cols - worksheet.col_count + 10)
             
             worksheet.update(f'A{next_row}', new_rows)
             logger.info(f"✅ ORS 이력 시트 업데이트: {sheet_name} (+{len(new_rows)}행)")
