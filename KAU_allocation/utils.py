@@ -424,6 +424,134 @@ def normalize_year_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    컬럼 순서를 표준화된 순서로 정렬
+    
+    순서:
+    1. 번호/순번
+    2. 업체명/회사명/법인명
+    3. 부문
+    4. 업종
+    5. 계획기간/배출권거래제 정보
+    6. 연도별 데이터 (오름차순: 2015년, 2016년, ...)
+    7. 기타 데이터 컬럼
+    8. 메타데이터 (_변경유형, _변경일시 등)
+    
+    Args:
+        df: 정렬할 DataFrame
+        
+    Returns:
+        컬럼이 정렬된 DataFrame
+    """
+    import re
+    
+    logger = logging.getLogger(__name__)
+    
+    if df.empty:
+        return df
+    
+    columns = list(df.columns)
+    
+    # 그룹별로 컬럼 분류
+    priority_cols = []      # 1순위: 번호, 업체명
+    entity_cols = []        # 2순위: 부문, 업종
+    period_cols = []        # 3순위: 계획기간
+    year_cols = []          # 4순위: 연도별 데이터
+    other_cols = []         # 5순위: 기타
+    meta_cols = []          # 6순위: 메타데이터 (_로 시작)
+    
+    # 1순위 컬럼 (순서 중요)
+    priority_order = ['번호', '순번', 'NO', 'No', 'no', '업체명', '회사명', '법인명', '관리업체명', '사업명', '방법론명']
+    
+    # 2순위 컬럼
+    entity_order = ['부문', '업종', '지정업종', '구분', '지정구분']
+    
+    # 3순위 컬럼
+    period_patterns = ['계획기간', '기간', '배출권거래제', '차', '유상여부']
+    
+    for col in columns:
+        col_str = str(col)
+        
+        # 메타데이터 컬럼 (맨 뒤로)
+        if col_str.startswith('_'):
+            meta_cols.append(col)
+        # 1순위: 번호, 업체명 계열
+        elif col_str in priority_order or any(p in col_str for p in ['번호', '순번', '업체명', '회사명', '법인명']):
+            priority_cols.append(col)
+        # 2순위: 부문, 업종 계열
+        elif col_str in entity_order or col_str in ['부문', '업종']:
+            entity_cols.append(col)
+        # 3순위: 계획기간 계열
+        elif any(p in col_str for p in period_patterns):
+            period_cols.append(col)
+        # 4순위: 연도 컬럼 (YYYY년, YYYY년 조기감축 등)
+        elif re.search(r'\d{4}년', col_str):
+            year_cols.append(col)
+        # 5순위: 나머지
+        else:
+            other_cols.append(col)
+    
+    # 1순위 컬럼을 지정된 순서대로 정렬
+    def priority_sort_key(col):
+        col_str = str(col)
+        for i, p in enumerate(priority_order):
+            if p == col_str or p in col_str:
+                return i
+        return len(priority_order)
+    
+    priority_cols.sort(key=priority_sort_key)
+    
+    # 2순위 컬럼을 지정된 순서대로 정렬
+    def entity_sort_key(col):
+        col_str = str(col)
+        for i, e in enumerate(entity_order):
+            if e == col_str or e in col_str:
+                return i
+        return len(entity_order)
+    
+    entity_cols.sort(key=entity_sort_key)
+    
+    # 연도 컬럼 오름차순 정렬
+    def year_sort_key(col):
+        col_str = str(col)
+        match = re.search(r'(\d{4})년', col_str)
+        if match:
+            return int(match.group(1))
+        return 9999
+    
+    year_cols.sort(key=year_sort_key)
+    
+    # 메타데이터 컬럼 정렬 (_계획기간 → _변경유형 → _변경일시 → _업데이트일시)
+    meta_order = ['_계획기간', '_변경유형', '_변경일시', '_업데이트일시']
+    def meta_sort_key(col):
+        col_str = str(col)
+        for i, m in enumerate(meta_order):
+            if m == col_str:
+                return i
+        return len(meta_order)
+    
+    meta_cols.sort(key=meta_sort_key)
+    
+    # 최종 순서 조합
+    final_order = priority_cols + entity_cols + period_cols + year_cols + other_cols + meta_cols
+    
+    # 누락된 컬럼 확인 (혹시 분류되지 않은 컬럼)
+    missing = [c for c in columns if c not in final_order]
+    if missing:
+        logger.debug(f"분류되지 않은 컬럼: {missing}")
+        final_order = final_order[:len(final_order)-len(meta_cols)] + missing + meta_cols
+    
+    # 컬럼 재정렬
+    final_order = [c for c in final_order if c in df.columns]
+    
+    if final_order != columns:
+        logger.debug(f"컬럼 재정렬: {final_order[:5]}...{final_order[-2:]}")
+        return df[final_order]
+    
+    return df
+
+
 def save_debug_info(
     content: str, 
     filename: str, 
