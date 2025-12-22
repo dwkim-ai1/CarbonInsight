@@ -2,6 +2,11 @@
 # ETRS/ORS 배출권/상쇄 데이터 자동 수집 및 Google Sheets 업데이트
 # 총 32개 시트 관리: 16개 데이터셋 × 2(최신+이력)
 
+# ★★★ 변경사항 (v1.1) ★★★
+# - current_year_only 옵션 추가: 현재 연도만 수집
+# - 자동 실행(schedule): 기본적으로 현재 연도만 수집 (incremental mode)
+# - 수동 실행: 전체 수집 또는 현재 연도만 수집 선택 가능
+
 name: 03_ETRS/ORS_Data_updater
 
 on:
@@ -27,6 +32,12 @@ on:
         required: false
         default: '1,2,3'
         type: string
+      
+      current_year_only:
+        description: '현재 연도만 수집 (자동 수집 모드)'
+        required: false
+        default: false
+        type: boolean
       
       debug_mode:
         description: '디버그 모드'
@@ -73,6 +84,9 @@ jobs:
           ETRS_ONLY: ${{ github.event.inputs.data_source == 'etrs_only' && 'true' || 'false' }}
           ORS_ONLY: ${{ github.event.inputs.data_source == 'ors_only' && 'true' || 'false' }}
           ETRS_PERIODS: ${{ github.event.inputs.etrs_periods || '1,2,3' }}
+          # ★★★ 자동 수집(schedule)에서는 기본적으로 현재 연도만 수집 ★★★
+          # 수동 실행에서는 사용자 선택에 따름
+          CURRENT_YEAR_ONLY: ${{ github.event_name == 'schedule' && 'true' || github.event.inputs.current_year_only || 'false' }}
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
           DEBUG_DIR: /tmp/allocation_debug
       
@@ -108,6 +122,15 @@ jobs:
           echo "====================================="
           echo ""
           echo "수집 작업: ${{ needs.collect-allocation-data.result }}"
+          echo "실행 트리거: ${{ github.event_name }}"
+          echo ""
+          
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "📅 자동 수집 모드: 현재 연도만 수집"
+          else
+            echo "🔧 수동 실행 모드"
+            echo "   - 현재 연도만: ${{ github.event.inputs.current_year_only }}"
+          fi
           echo ""
           
           if [ "${{ needs.collect-allocation-data.result }}" == "success" ]; then
