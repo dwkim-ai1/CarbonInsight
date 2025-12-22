@@ -1,7 +1,7 @@
 # .github/workflows/KAU_price_collector.yml
 # KRX ETS v3.2 - pytesseract 경량화 + Job별 최적화
 
-name: KRX ETS Data Collector v3.2 (pytesseract 경량화)
+name: 01_KRX_ETS_Data_updater
 
 on:
   schedule:
