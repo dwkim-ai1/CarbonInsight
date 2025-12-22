@@ -1,7 +1,7 @@
 # NGMS Data Update Workflow
 # 국가온실가스종합관리시스템 데이터 월간 업데이트
 
-name: NGMS Data Update
+name: 02_NGMS_Data_Updater
 
 on:
   # 매월 1일 오전 9시 (KST) 실행 = UTC 0시
