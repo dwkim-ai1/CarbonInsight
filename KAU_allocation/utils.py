@@ -257,11 +257,29 @@ def detect_excel_format(content: bytes) -> str:
         return 'unknown'
 
 
-def read_excel_auto(content: bytes) -> pd.DataFrame:
-    """Read Excel content with automatic format detection"""
+def read_excel_auto(content) -> pd.DataFrame:
+    """
+    Read Excel content with automatic format detection
+    
+    Args:
+        content: bytes 데이터 또는 파일 경로(str)
+        
+    Returns:
+        DataFrame
+    """
     from io import BytesIO
     
     logger = logging.getLogger(__name__)
+    
+    # ★★★ 파일 경로인 경우 파일을 읽어서 bytes로 변환 ★★★
+    if isinstance(content, str):
+        try:
+            with open(content, 'rb') as f:
+                content = f.read()
+            logger.debug(f"파일에서 Excel 데이터 로드: {len(content)} bytes")
+        except Exception as e:
+            logger.error(f"파일 읽기 실패: {e}")
+            raise
     
     file_format = detect_excel_format(content)
     logger.debug(f"감지된 Excel 형식: {file_format}")
