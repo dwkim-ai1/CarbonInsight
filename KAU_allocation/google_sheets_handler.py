@@ -126,6 +126,8 @@ class AllocationSheetsHandler:
     def get_sheet_data(self, sheet_name: str, use_cache: bool = True) -> pd.DataFrame:
         """
         시트 데이터 읽기 (캐시 사용)
+        
+        ★★★ 헤더 검증: 첫 번째 행이 유효한 헤더인지 확인 ★★★
         """
         # 캐시 확인
         if use_cache and sheet_name in self.sheet_cache:
@@ -140,14 +142,29 @@ class AllocationSheetsHandler:
             if all_values and len(all_values) > 1:
                 headers = all_values[0]
                 data = all_values[1:]
+                
+                # ★★★ 헤더 유효성 검증 ★★★
+                # 유효한 헤더: 문자열이고, 숫자로만 이루어지지 않음
+                valid_header = self._is_valid_header(headers)
+                
+                if not valid_header:
+                    logger.warning(f"⚠️ {sheet_name}: 헤더가 없거나 유효하지 않음 - 첫 번째 행: {headers[:5]}...")
+                    # 헤더가 없으면 빈 DataFrame 반환 (안전 모드)
+                    return pd.DataFrame()
+                
                 df = pd.DataFrame(data, columns=headers)
                 self.sheet_cache[sheet_name] = df
                 logger.debug(f"시트 데이터 로드: {sheet_name} ({len(df)}행)")
                 return df
             elif all_values and len(all_values) == 1:
-                df = pd.DataFrame(columns=all_values[0])
-                self.sheet_cache[sheet_name] = df
-                return df
+                headers = all_values[0]
+                if self._is_valid_header(headers):
+                    df = pd.DataFrame(columns=headers)
+                    self.sheet_cache[sheet_name] = df
+                    return df
+                else:
+                    logger.warning(f"⚠️ {sheet_name}: 헤더만 있어야 하는데 데이터처럼 보임")
+                    return pd.DataFrame()
             else:
                 return pd.DataFrame()
         except gspread.WorksheetNotFound:
@@ -155,6 +172,47 @@ class AllocationSheetsHandler:
         except Exception as e:
             logger.warning(f"시트 데이터 로드 실패: {sheet_name} - {e}")
             return pd.DataFrame()
+    
+    def _is_valid_header(self, row: List[str]) -> bool:
+        """
+        행이 유효한 헤더인지 검증
+        
+        유효한 헤더 조건:
+        1. 빈 값이 아닌 셀이 최소 2개 이상
+        2. 알려진 헤더 키워드 포함 (업체명, 부문, 이행연도 등)
+        3. 순수 숫자로만 이루어진 셀이 과반수 미만
+        """
+        if not row:
+            return False
+        
+        # 빈 값 제외
+        non_empty = [str(cell).strip() for cell in row if str(cell).strip()]
+        
+        if len(non_empty) < 2:
+            return False
+        
+        # 알려진 헤더 키워드 체크
+        known_headers = {'업체명', '부문', '이행연도', '계획기간', '할당량', '배출량', 
+                        '인증', '이월', '차입', '상쇄', '순번', '업종', '사업장'}
+        
+        for cell in non_empty:
+            for keyword in known_headers:
+                if keyword in cell:
+                    return True
+        
+        # 숫자로만 이루어진 셀 비율 체크
+        numeric_count = 0
+        for cell in non_empty:
+            # 숫자, 쉼표, 마이너스만 있으면 숫자로 간주
+            cleaned = cell.replace(',', '').replace('-', '').replace('.', '')
+            if cleaned.isdigit():
+                numeric_count += 1
+        
+        # 숫자 셀이 과반수 이상이면 데이터 행으로 간주
+        if numeric_count >= len(non_empty) / 2:
+            return False
+        
+        return True
     
     def clear_cache(self, sheet_name: str = None):
         """캐시 클리어"""
@@ -305,13 +363,34 @@ class AllocationSheetsHandler:
         """시트에 데이터 추가 (1-2 API 호출)"""
         worksheet = self._get_or_create_worksheet(sheet_name)
         
-        # 현재 데이터 끝 위치 찾기
+        # 현재 데이터 확인
         current_data = worksheet.get_all_values()
-        next_row = len(current_data) + 1
-        need_header = len(current_data) == 0
         
         headers = data.columns.tolist()
         rows = data.fillna('').astype(str).values.tolist()
+        
+        # ★★★ 헤더 확인 로직 개선 ★★★
+        if len(current_data) == 0:
+            # 완전히 빈 시트
+            need_header = True
+            next_row = 2  # 헤더 다음 행
+        elif all(not str(cell).strip() for cell in current_data[0]):
+            # 첫 번째 행이 모두 빈 값
+            logger.debug(f"{sheet_name}: 첫 번째 행이 비어있음 - 헤더 추가")
+            need_header = True
+            next_row = 2  # 헤더 다음 행
+        elif not self._is_valid_header(current_data[0]):
+            # 첫 번째 행이 유효한 헤더가 아님 (데이터처럼 보임)
+            logger.warning(f"⚠️ {sheet_name}: 헤더 없음 감지 - 헤더 추가 후 데이터 append")
+            need_header = True
+            # 기존 데이터가 있으므로, 헤더를 먼저 쓰고 기존 데이터 유지
+            # 이 경우 기존 데이터 위에 헤더를 삽입해야 하므로 별도 처리
+            self._insert_header_and_append(worksheet, headers, rows, current_data)
+            return
+        else:
+            # 정상적인 헤더 존재
+            need_header = False
+            next_row = len(current_data) + 1
         
         # 시트 크기 확장 (필요 시 1회 API 호출)
         required_rows = next_row + len(rows) + 10
@@ -328,11 +407,42 @@ class AllocationSheetsHandler:
         batch_data = []
         if need_header:
             batch_data.append({'range': 'A1', 'values': [headers]})
+            next_row = 2  # 헤더 다음 행부터
         if rows:
             batch_data.append({'range': f'A{next_row}', 'values': rows})
         
         if batch_data:
             worksheet.batch_update(batch_data, value_input_option='RAW')
+    
+    def _insert_header_and_append(
+        self, 
+        worksheet, 
+        headers: List[str], 
+        new_rows: List[List[str]], 
+        existing_data: List[List[str]]
+    ) -> None:
+        """
+        헤더가 없는 시트에 헤더를 삽입하고 새 데이터 추가
+        
+        기존 데이터 위에 헤더를 추가하고, 새 데이터를 맨 아래에 append
+        """
+        # 시트 크기 확장
+        total_rows = 1 + len(existing_data) + len(new_rows) + 10
+        total_cols = max(len(headers), max(len(row) for row in existing_data) if existing_data else 0) + 2
+        
+        if worksheet.row_count < total_rows or worksheet.col_count < total_cols:
+            worksheet.resize(rows=total_rows, cols=total_cols)
+            time.sleep(1)
+        
+        # 전체 데이터 구성: 헤더 + 기존 데이터 + 새 데이터
+        all_data = [headers] + existing_data + new_rows
+        
+        # 전체 교체 (기존 데이터 + 헤더 + 새 데이터)
+        worksheet.clear()
+        time.sleep(1)
+        worksheet.update('A1', all_data, value_input_option='RAW')
+        
+        logger.info(f"  → 헤더 삽입 완료: 기존 {len(existing_data)}행 + 신규 {len(new_rows)}행")
     
     # =========================================================
     # ETRS 데이터 처리 (큐 시스템 사용)
@@ -475,8 +585,8 @@ class AllocationSheetsHandler:
         old_data = self.get_sheet_data(sheet_latest, use_cache=False)
         
         if old_data.empty:
-            # 첫 실행 - 새 데이터만 저장
-            logger.info(f"첫 실행: {len(new_df)}행 저장")
+            # ★★★ 첫 실행 또는 헤더 없는 시트 → 새 데이터로 전체 교체 ★★★
+            logger.info(f"기존 데이터 없음 (첫 실행 또는 헤더 없음): {len(new_df)}행 저장")
             self.queue_latest_update(sheet_latest, new_df)
             self.queue_history_update(sheet_history, new_df, '신규')
             return {
