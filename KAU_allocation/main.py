@@ -5,12 +5,18 @@ ETRS/ORS Data Update Main Script
 총 32개 시트 관리:
 - ETRS 8개 × 2(최신+이력) = 16개 시트
 - ORS 8개 × 2(최신+이력) = 16개 시트
+
+★★★ 변경사항 (v1.1) ★★★
+1. CURRENT_YEAR_ONLY 환경변수 지원 (자동 수집 모드)
+2. 인증배출량 등 이행연도 데이터셋: 기존 데이터에 새 연도 데이터 merge
+3. 이력 시트: 변경분만 append (기존과 동일)
 """
 
 import asyncio
 import os
 import sys
 import tempfile
+from datetime import datetime
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +48,9 @@ async def main() -> dict:
     ors_only = os.environ.get('ORS_ONLY', 'false').lower() == 'true'
     debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
     
+    # ★★★ 자동 수집 모드: 현재 연도만 수집 ★★★
+    current_year_only = os.environ.get('CURRENT_YEAR_ONLY', 'false').lower() == 'true'
+    
     # Parse periods
     periods_str = os.environ.get('ETRS_PERIODS', '1,2,3')
     try:
@@ -53,7 +62,12 @@ async def main() -> dict:
     logger.info(f"  - ETRS: {'활성화' if not ors_only else '비활성화'}")
     logger.info(f"  - ORS: {'활성화' if not etrs_only else '비활성화'}")
     logger.info(f"  - 계획기간: {periods}")
+    logger.info(f"  - 현재 연도만 수집: {'예' if current_year_only else '아니오'}")
     logger.info(f"  - 디버그 모드: {'활성화' if debug_mode else '비활성화'}")
+    
+    if current_year_only:
+        current_year = datetime.now().year
+        logger.info(f"  - 대상 연도: {current_year}년")
     
     results = {
         'success': False,
@@ -92,7 +106,10 @@ async def main() -> dict:
             # Download data
             if etrs_only:
                 downloaded = {
-                    'etrs': await scraper.download_all_etrs(periods),
+                    'etrs': await scraper.download_all_etrs(
+                        periods, 
+                        current_year_only=current_year_only
+                    ),
                     'ors': {}
                 }
             elif ors_only:
@@ -101,7 +118,11 @@ async def main() -> dict:
                     'ors': await scraper.download_all_ors()
                 }
             else:
-                downloaded = await scraper.download_all(periods, include_ors=True)
+                downloaded = await scraper.download_all(
+                    periods, 
+                    include_ors=True,
+                    current_year_only=current_year_only
+                )
                 
         finally:
             await scraper.close()
@@ -121,7 +142,18 @@ async def main() -> dict:
         # Update ETRS
         for dataset_name, period_data in downloaded.get('etrs', {}).items():
             try:
-                result = sheets_handler.process_etrs_update(dataset_name, period_data)
+                # ★★★ 자동 수집 모드에서는 incremental update 사용 ★★★
+                if current_year_only:
+                    result = sheets_handler.process_etrs_update_incremental(
+                        dataset_name, 
+                        period_data
+                    )
+                else:
+                    result = sheets_handler.process_etrs_update(
+                        dataset_name, 
+                        period_data
+                    )
+                
                 results['etrs'][dataset_name] = {
                     'success': result.get('success', False),
                     'rows': sum(len(df) for df in period_data.values())
@@ -138,7 +170,7 @@ async def main() -> dict:
                 results['errors'].append(error_msg)
                 results['etrs'][dataset_name] = {'success': False, 'error': str(e)}
         
-        # Update ORS
+        # Update ORS (ORS는 항상 전체 교체)
         for dataset_name, df in downloaded.get('ors', {}).items():
             try:
                 result = sheets_handler.process_ors_update(dataset_name, df)
