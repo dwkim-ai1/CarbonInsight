@@ -308,14 +308,12 @@ class AllocationScraper:
     async def _click_search_button(self, page) -> None:
         """Click search button"""
         try:
-            # Try various selectors
+            # Try various selectors (예전 버전과 동일)
             search_selectors = [
                 'input[type="submit"][value="검색"]',
                 'button:has-text("검색")',
                 'input[value="검색"]',
                 '.btn30.btnNavy',
-                'button.btn30.btnNavy',
-                'a.btn30.btnNavy',
             ]
             
             for selector in search_selectors:
@@ -325,7 +323,7 @@ class AllocationScraper:
                     logger.info("검색 버튼 클릭")
                     return
             
-            logger.warning("검색 버튼을 찾지 못함")
+            logger.debug("검색 버튼을 찾을 수 없음")
         except Exception as e:
             logger.debug(f"검색 버튼 클릭 실패: {e}")
     
@@ -337,45 +335,40 @@ class AllocationScraper:
     ) -> Optional[pd.DataFrame]:
         """Try to download Excel file"""
         try:
-            # Find Excel download button
+            # Find Excel download button (예전 버전과 동일한 selector)
             excel_selectors = [
                 'a:has-text("엑셀다운로드")',
-                'button:has-text("엑셀다운로드")',
+                'a:has-text("Excel다운로드")',
                 'a[href*="Excel"]',
-                '.btnGreen:has-text("엑셀")',
-                '#downloadExcelButton',
+                '.btn40.btnGreen',
             ]
             
-            excel_btn = None
             for selector in excel_selectors:
                 btn = page.locator(selector).first
                 if await btn.count() > 0:
-                    excel_btn = btn
-                    break
+                    logger.info("Excel 다운로드 버튼 발견")
+                    
+                    # Start download
+                    async with page.expect_download(timeout=60000) as download_info:
+                        await btn.click()
+                    
+                    download = await download_info.value
+                    
+                    # Save file
+                    filename = f"etrs_{dataset_name}_{plan_period}차_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    filepath = self.download_dir / filename
+                    await download.save_as(str(filepath))
+                    
+                    logger.info(f"💾 Excel 저장: {filepath}")
+                    
+                    # Read Excel (직접 pandas 사용 - 예전 버전과 동일)
+                    df = pd.read_excel(filepath)
+                    df = clean_excel_data(df)
+                    
+                    return df
             
-            if not excel_btn:
-                logger.debug("Excel 다운로드 버튼 없음")
-                return None
-            
-            # Start download
-            async with page.expect_download(timeout=90000) as download_info:
-                await excel_btn.click()
-            
-            download = await download_info.value
-            
-            # Save to temp file
-            temp_path = self.download_dir / f"{dataset_name}_{plan_period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            await download.save_as(str(temp_path))
-            
-            logger.debug(f"Excel 저장: {temp_path}")
-            
-            # Read Excel
-            df = read_excel_auto(str(temp_path))
-            
-            if df is not None:
-                df = clean_excel_data(df)
-            
-            return df
+            logger.debug("Excel 다운로드 버튼 없음")
+            return None
             
         except Exception as e:
             logger.debug(f"Excel 다운로드 실패: {e}")
@@ -386,82 +379,100 @@ class AllocationScraper:
         page,
         dataset_name: str
     ) -> Optional[pd.DataFrame]:
-        """Scrape HTML table with pagination handling"""
+        """Scrape HTML table with pagination support (예전 버전 복원)"""
         all_data = []
-        page_num = 1
-        max_pages = 100  # Safety limit
+        headers = []
+        current_page = 1
+        max_pages = 200
+        seen_first_rows = set()
         
-        while page_num <= max_pages:
+        # Extract headers
+        try:
+            header_cells = await page.locator('table.boardList thead th').all_text_contents()
+            headers = [h.strip() for h in header_cells if h.strip()]
+            logger.info(f"헤더 추출: {headers[:5]}...")
+        except Exception as e:
+            logger.debug(f"헤더 추출 실패: {e}")
+        
+        while current_page <= max_pages:
+            # Extract current page data
             try:
-                # Extract current page data
-                df_page = await self._extract_table_data(page)
+                rows = page.locator('table.boardList tbody tr')
+                row_count = await rows.count()
                 
-                if df_page is None or len(df_page) == 0:
+                if row_count == 0:
+                    logger.info(f"페이지 {current_page}: 데이터 없음")
                     break
                 
-                all_data.append(df_page)
-                logger.debug(f"페이지 {page_num}: {len(df_page)}행")
+                page_data = []
+                for i in range(row_count):
+                    row = rows.nth(i)
+                    cells = await row.locator('td').all_text_contents()
+                    cells = [c.strip().replace('\n', ' ').replace('\t', '') for c in cells]
+                    
+                    if any(c for c in cells):
+                        page_data.append(cells)
                 
-                # Try to go to next page
-                next_btn = page.locator('a.btnNextPage, a[title*="다음"], .btnNextPage').first
-                
-                if await next_btn.count() == 0:
+                if not page_data:
                     break
                 
-                # Check if next button is disabled
-                is_disabled = await next_btn.get_attribute('class')
-                if is_disabled and 'disabled' in is_disabled:
+                # Check for duplicate page
+                first_row_key = '|'.join(str(v) for v in page_data[0][:3])
+                if first_row_key in seen_first_rows:
+                    logger.info(f"페이지 {current_page}: 중복 데이터 감지, 종료")
                     break
                 
-                await next_btn.click()
-                await asyncio.sleep(2)
-                page_num += 1
+                seen_first_rows.add(first_row_key)
+                all_data.extend(page_data)
+                logger.info(f"페이지 {current_page}: {len(page_data)}행 추출 (누적: {len(all_data)}행)")
+                
+                # Click next page
+                next_clicked = await self._click_next_page(page, current_page)
+                if not next_clicked:
+                    logger.info("마지막 페이지")
+                    break
+                
+                current_page += 1
+                await asyncio.sleep(1)
                 
             except Exception as e:
-                logger.debug(f"페이지 {page_num} 처리 오류: {e}")
+                logger.debug(f"페이지 {current_page} 추출 실패: {e}")
                 break
         
         if all_data:
-            combined = pd.concat(all_data, ignore_index=True)
-            # Remove duplicates
-            combined = combined.drop_duplicates()
-            return combined
+            # Create DataFrame
+            if headers and len(headers) >= len(all_data[0]):
+                df = pd.DataFrame(all_data, columns=headers[:len(all_data[0])])
+            else:
+                df = pd.DataFrame(all_data)
+            
+            df = clean_excel_data(df)
+            return df
         
         return None
     
-    async def _extract_table_data(self, page) -> Optional[pd.DataFrame]:
-        """Extract data from current table"""
+    async def _click_next_page(self, page, current_page: int) -> bool:
+        """Click next page button"""
         try:
-            # Get headers
-            headers = await page.locator('table thead th, table.list thead th').all_text_contents()
-            headers = [h.strip() for h in headers if h.strip()]
+            next_page = current_page + 1
             
-            # Get rows
-            rows = page.locator('table tbody tr, table.list tbody tr')
-            row_count = await rows.count()
+            # Try clicking page number
+            page_link = page.locator(f'.pagination a:has-text("{next_page}")').first
+            if await page_link.count() > 0:
+                await page_link.click()
+                await asyncio.sleep(1)
+                return True
             
-            data = []
-            for i in range(row_count):
-                row = rows.nth(i)
-                cells = await row.locator('td').all_text_contents()
-                cells = [c.strip() for c in cells]
-                if any(c for c in cells):  # Skip empty rows
-                    data.append(cells)
+            # Try next button
+            next_btn = page.locator('.pagination a.btnNextPage, a[title="다음페이지"]').first
+            if await next_btn.count() > 0:
+                await next_btn.click()
+                await asyncio.sleep(1)
+                return True
             
-            if data:
-                # Match headers to data
-                if headers and len(headers) >= len(data[0]):
-                    df = pd.DataFrame(data, columns=headers[:len(data[0])])
-                else:
-                    df = pd.DataFrame(data)
-                
-                return clean_excel_data(df)
-            
-            return None
-            
-        except Exception as e:
-            logger.debug(f"테이블 추출 오류: {e}")
-            return None
+            return False
+        except:
+            return False
     
     # =========================================================
     # ORS 스크래핑 (상쇄등록부)
@@ -470,6 +481,8 @@ class AllocationScraper:
     async def scrape_ors_table(self, dataset_name: str) -> Optional[pd.DataFrame]:
         """
         Scrape ORS table data
+        
+        ★★★ 개선: Excel 데이터에 빈 컬럼이 있으면 HTML 스크래핑으로 보완 ★★★
         
         Args:
             dataset_name: ORS dataset name
@@ -495,14 +508,36 @@ class AllocationScraper:
             
             await self._save_debug(f"ors_{dataset_name}_01_loaded", page)
             
-            # Try Excel download
-            df = await self._try_ors_excel_download(page, dataset_name)
+            # 1단계: Excel 다운로드 시도
+            excel_df = await self._try_ors_excel_download(page, dataset_name)
             
-            if df is not None and len(df) > 0:
-                logger.info(f"✅ ORS Excel 다운로드 성공: {len(df)}행")
-                return df
+            if excel_df is not None and len(excel_df) > 0:
+                logger.info(f"✅ ORS Excel 다운로드 성공: {len(excel_df)}행")
+                
+                # ★★★ 2단계: 데이터 품질 검증 (빈 컬럼 체크) ★★★
+                empty_columns = self._find_empty_columns(excel_df)
+                
+                if empty_columns:
+                    logger.warning(f"⚠️ Excel에 빈 컬럼 발견: {empty_columns}")
+                    logger.info("📋 HTML 스크래핑으로 빈 컬럼 보완 시도...")
+                    
+                    # HTML 스크래핑 시도
+                    html_df = await self._scrape_ors_html_table(page, dataset_name)
+                    
+                    if html_df is not None and len(html_df) > 0:
+                        # ★★★ 3단계: Excel과 HTML 데이터 병합 ★★★
+                        merged_df = self._merge_with_html_data(
+                            excel_df, html_df, empty_columns, dataset_name
+                        )
+                        if merged_df is not None:
+                            logger.info(f"✅ 데이터 보완 완료: {len(merged_df)}행")
+                            return merged_df
+                    
+                    logger.warning("HTML 보완 실패, Excel 데이터 그대로 사용")
+                
+                return excel_df
             
-            # Fallback: HTML scraping
+            # Excel 실패 시: HTML 스크래핑 폴백
             logger.info("📋 ORS 테이블 스크래핑으로 폴백...")
             df = await self._scrape_ors_html_table(page, dataset_name)
             
@@ -520,43 +555,162 @@ class AllocationScraper:
         finally:
             await page.close()
     
+    def _find_empty_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        데이터프레임에서 빈 컬럼(모든 값이 비어있는 컬럼) 찾기
+        
+        Args:
+            df: 검사할 DataFrame
+            
+        Returns:
+            빈 컬럼명 리스트
+        """
+        empty_cols = []
+        for col in df.columns:
+            # NaN, 빈 문자열, 공백만 있는 경우 빈 컬럼으로 판단
+            non_empty = df[col].dropna().astype(str).str.strip()
+            non_empty = non_empty[non_empty != '']
+            
+            if len(non_empty) == 0:
+                empty_cols.append(col)
+        
+        return empty_cols
+    
+    def _merge_with_html_data(
+        self, 
+        excel_df: pd.DataFrame, 
+        html_df: pd.DataFrame,
+        empty_columns: List[str],
+        dataset_name: str
+    ) -> Optional[pd.DataFrame]:
+        """
+        Excel 데이터의 빈 컬럼을 HTML 데이터로 보완
+        
+        ★★★ 컬럼명 매칭 로직 ★★★
+        1. 정확히 같은 컬럼명
+        2. 유사한 컬럼명 (부분 일치)
+        3. 위치 기반 매칭 (같은 인덱스의 컬럼)
+        
+        Args:
+            excel_df: Excel에서 읽은 DataFrame
+            html_df: HTML 스크래핑 DataFrame
+            empty_columns: 보완이 필요한 빈 컬럼명 리스트
+            dataset_name: 데이터셋 이름 (로깅용)
+            
+        Returns:
+            병합된 DataFrame 또는 None
+        """
+        try:
+            result_df = excel_df.copy()
+            
+            for empty_col in empty_columns:
+                html_col = self._find_matching_column(empty_col, html_df.columns.tolist())
+                
+                if html_col and html_col in html_df.columns:
+                    # HTML 데이터의 해당 컬럼이 실제로 데이터가 있는지 확인
+                    html_non_empty = html_df[html_col].dropna().astype(str).str.strip()
+                    html_non_empty = html_non_empty[html_non_empty != '']
+                    
+                    if len(html_non_empty) > 0:
+                        # 행 수가 같으면 직접 대체
+                        if len(excel_df) == len(html_df):
+                            result_df[empty_col] = html_df[html_col].values
+                            logger.info(f"  ✅ '{empty_col}' ← HTML '{html_col}' (직접 대체)")
+                        else:
+                            # 행 수가 다르면 키 컬럼으로 매칭 시도
+                            logger.debug(f"행 수 불일치: Excel {len(excel_df)} vs HTML {len(html_df)}")
+                            # 간단히 앞에서부터 채우기 (더 정교한 매칭 필요시 확장)
+                            min_rows = min(len(excel_df), len(html_df))
+                            result_df.loc[:min_rows-1, empty_col] = html_df[html_col].iloc[:min_rows].values
+                            logger.info(f"  ✅ '{empty_col}' ← HTML '{html_col}' (부분 대체: {min_rows}행)")
+                    else:
+                        logger.debug(f"  ⚠️ HTML '{html_col}'도 비어있음")
+                else:
+                    logger.debug(f"  ⚠️ '{empty_col}'에 매칭되는 HTML 컬럼 없음")
+            
+            return result_df
+            
+        except Exception as e:
+            logger.error(f"데이터 병합 실패: {e}")
+            return None
+    
+    def _find_matching_column(self, target_col: str, html_columns: List[str]) -> Optional[str]:
+        """
+        Excel 컬럼명과 매칭되는 HTML 컬럼명 찾기
+        
+        매칭 우선순위:
+        1. 정확히 같은 이름
+        2. 부분 문자열 포함
+        3. 키워드 매칭 (예: '모니터링' 포함)
+        """
+        target_lower = target_col.lower().strip()
+        
+        # 1. 정확한 매칭
+        for html_col in html_columns:
+            if html_col.strip() == target_col.strip():
+                return html_col
+        
+        # 2. 대소문자 무시 매칭
+        for html_col in html_columns:
+            if html_col.lower().strip() == target_lower:
+                return html_col
+        
+        # 3. 부분 문자열 포함 (target이 html_col에 포함되거나 반대)
+        for html_col in html_columns:
+            html_lower = html_col.lower().strip()
+            if target_lower in html_lower or html_lower in target_lower:
+                return html_col
+        
+        # 4. 키워드 기반 매칭
+        keyword_mapping = {
+            '모니터링': ['monitoring', '모니터링기간', 'period'],
+            'cer': ['cer', '일련번호', 'serial'],
+            '심의': ['심의', 'decision', '완료일'],
+            '사업명': ['사업명', 'project', 'title'],
+        }
+        
+        for keyword, synonyms in keyword_mapping.items():
+            if keyword in target_lower:
+                for html_col in html_columns:
+                    html_lower = html_col.lower()
+                    if any(syn in html_lower for syn in synonyms):
+                        return html_col
+        
+        return None
+    
     async def _try_ors_excel_download(
         self,
         page,
         dataset_name: str
     ) -> Optional[pd.DataFrame]:
-        """Try to download ORS Excel file"""
+        """Try to download Excel from ORS"""
         try:
             excel_selectors = [
-                'a:has-text("엑셀다운로드")',
+                'a:has-text("엑셀")',
+                'a:has-text("Excel")',
                 'button:has-text("엑셀")',
-                'a[href*="Excel"]',
                 '.btn_excel',
             ]
             
-            excel_btn = None
             for selector in excel_selectors:
                 btn = page.locator(selector).first
                 if await btn.count() > 0:
-                    excel_btn = btn
-                    break
+                    logger.info("ORS Excel 버튼 발견")
+                    
+                    async with page.expect_download(timeout=60000) as download_info:
+                        await btn.click()
+                    
+                    download = await download_info.value
+                    filename = f"ors_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    filepath = self.download_dir / filename
+                    await download.save_as(str(filepath))
+                    
+                    # Read Excel (직접 pandas 사용 - 예전 버전과 동일)
+                    df = pd.read_excel(filepath)
+                    df = clean_excel_data(df)
+                    return df
             
-            if not excel_btn:
-                return None
-            
-            async with page.expect_download(timeout=90000) as download_info:
-                await excel_btn.click()
-            
-            download = await download_info.value
-            temp_path = self.download_dir / f"ors_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            await download.save_as(str(temp_path))
-            
-            df = read_excel_auto(str(temp_path))
-            if df is not None:
-                df = clean_excel_data(df)
-            
-            return df
-            
+            return None
         except Exception as e:
             logger.debug(f"ORS Excel 다운로드 실패: {e}")
             return None
@@ -566,23 +720,63 @@ class AllocationScraper:
         page,
         dataset_name: str
     ) -> Optional[pd.DataFrame]:
-        """Scrape ORS HTML table"""
+        """
+        Scrape ORS HTML table
+        
+        ★★★ 개선: 각 셀을 개별적으로 처리하여 모니터링기간 등 멀티라인 셀 지원 ★★★
+        """
+        import re
+        
         try:
-            # Get headers
-            header_cells = await page.locator('table thead th, table.list thead th').all_text_contents()
-            headers = [h.strip() for h in header_cells if h.strip()]
+            # ★★★ 헤더 추출: inner_text로 정확한 텍스트 추출 ★★★
+            headers = []
+            header_cells = page.locator('table thead th, table.list thead th')
+            header_count = await header_cells.count()
             
-            # Extract data
+            for i in range(header_count):
+                try:
+                    # inner_text()는 렌더링된 텍스트를 반환 (줄바꿈 처리됨)
+                    text = await header_cells.nth(i).inner_text(timeout=5000)
+                    # 줄바꿈을 공백으로 변환하고 첫 줄만 사용 (영문 설명 제거)
+                    text = text.split('\n')[0].strip()
+                    if text:
+                        headers.append(text)
+                except Exception as e:
+                    logger.debug(f"헤더 셀 {i} 추출 실패: {e}")
+                    continue
+            
+            logger.info(f"ORS 헤더 추출: {headers}")
+            
+            # ★★★ 데이터 추출: 각 셀을 개별적으로 처리 ★★★
             rows = page.locator('table tbody tr, table.list tbody tr')
             row_count = await rows.count()
             
             data = []
             for i in range(row_count):
                 row = rows.nth(i)
-                cells = await row.locator('td').all_text_contents()
-                cells = [c.strip() for c in cells]
-                if any(c for c in cells):
-                    data.append(cells)
+                cells = row.locator('td')
+                cell_count = await cells.count()
+                
+                row_data = []
+                for j in range(cell_count):
+                    try:
+                        # ★★★ inner_text()로 각 셀 텍스트 추출 ★★★
+                        text = await cells.nth(j).inner_text(timeout=5000)
+                        # 줄바꿈과 탭을 공백으로 변환, 연속 공백 제거
+                        text = re.sub(r'[\n\r\t]+', ' ', text)
+                        text = re.sub(r'\s+', ' ', text).strip()
+                        row_data.append(text)
+                    except Exception as e:
+                        logger.debug(f"셀 ({i},{j}) 추출 실패: {e}")
+                        row_data.append('')
+                
+                # 빈 행이 아니면 추가
+                if any(c for c in row_data):
+                    data.append(row_data)
+            
+            logger.info(f"ORS 데이터 추출: {len(data)}행")
+            if data:
+                logger.debug(f"첫 행 데이터: {data[0]}")
             
             if data:
                 if headers and len(headers) >= len(data[0]):
@@ -595,7 +789,9 @@ class AllocationScraper:
             
             return None
         except Exception as e:
-            logger.debug(f"ORS 테이블 스크래핑 실패: {e}")
+            logger.error(f"ORS 테이블 스크래핑 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     # =========================================================
