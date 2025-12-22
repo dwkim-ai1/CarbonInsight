@@ -42,6 +42,7 @@ ETRS_DATASETS = {
         "url_path": "/home/index.do?menuId=20",
         "excel_endpoint": "infoOpenList06Excel",
         "has_plan_period": True,
+        "has_implementation_year": True,  # ★ 이행연도 선택 필요
         "sheet_latest": "ETRS_인증배출량",
         "sheet_history": "인증배출량_이력",
     },
@@ -74,6 +75,7 @@ ETRS_DATASETS = {
         "url_path": "/home/index.do?menuId=18",
         "excel_endpoint": "infoOpenList08Excel",
         "has_plan_period": True,
+        "has_implementation_year": True,  # ★ 이행연도 선택 필요
         "sheet_latest": "ETRS_배출권이월량",
         "sheet_history": "배출권이월량_이력",
     },
@@ -82,6 +84,7 @@ ETRS_DATASETS = {
         "url_path": "/home/index.do?menuId=19",
         "excel_endpoint": "infoOpenList09Excel",
         "has_plan_period": True,
+        "has_implementation_year": True,  # ★ 이행연도 선택 필요
         "sheet_latest": "ETRS_배출권차입량",
         "sheet_history": "배출권차입량_이력",
     },
