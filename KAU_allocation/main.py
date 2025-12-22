@@ -38,10 +38,10 @@ async def main() -> dict:
     Returns:
         Dictionary with results
     """
-    logger.info("=" * 60)
+    logger.info("+" * 60)
     logger.info("🚀 ETRS/ORS 데이터 업데이트 시작")
     logger.info(f"⏰ 실행 시간: {get_current_timestamp()}")
-    logger.info("=" * 60)
+    logger.info("+" * 60)
     
     # Check options from environment
     etrs_only = os.environ.get('ETRS_ONLY', 'false').lower() == 'true'
@@ -233,9 +233,9 @@ async def main() -> dict:
             logger.warning(f"  - {err}")
     
     overall = "✅ 성공" if results['success'] else "❌ 실패"
-    logger.info(f"\n{'='*60}")
+    logger.info(f"\n{'+'*60}")
     logger.info(f"전체 결과: {overall}")
-    logger.info("=" * 60)
+    logger.info("+" * 60)
     
     return results
 
