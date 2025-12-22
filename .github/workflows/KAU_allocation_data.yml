@@ -7,7 +7,7 @@ name: Update Allocation Data (ETRS/ORS)
 on:
   # 매주 월요일 오전 9시 (KST) = 일요일 자정 (UTC)
   schedule:
-    - cron: '0 0 * * 1'
+    - cron: '0 0 2 * *'
   
   # 수동 실행
   workflow_dispatch:
