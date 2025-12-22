@@ -118,7 +118,8 @@ class AllocationScraper:
         self,
         dataset_name: str,
         plan_period: int,
-        sector: str = "전체"
+        sector: str = "전체",
+        implementation_year: int = None  # ★ 이행연도 파라미터 추가
     ) -> Optional[pd.DataFrame]:
         """
         Scrape ETRS table data using Playwright
@@ -127,6 +128,7 @@ class AllocationScraper:
             dataset_name: Dataset name (사전할당량, etc.)
             plan_period: Plan period (1, 2, 3)
             sector: Sector filter
+            implementation_year: Implementation year (이행연도) for certain datasets
             
         Returns:
             DataFrame with scraped data
@@ -142,18 +144,23 @@ class AllocationScraper:
         try:
             # Build URL
             url = f"{ETRS_BASE_URL}{dataset['url_path']}"
-            logger.info(f"📥 스크래핑 중: {dataset_name} ({plan_period}차)")
+            year_str = f" {implementation_year}년" if implementation_year else ""
+            logger.info(f"📥 스크래핑 중: {dataset_name} ({plan_period}차{year_str})")
             logger.debug(f"URL: {url}")
             
             # Navigate to page
             await page.goto(url, wait_until='networkidle', timeout=60000)
             await asyncio.sleep(2)
             
-            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_01_loaded", page)
+            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_{implementation_year or 'all'}_01_loaded", page)
             
             # Select plan period
             if dataset.get('has_plan_period'):
                 await self._select_plan_period(page, plan_period)
+            
+            # ★★★ 이행연도 선택 (해당 데이터셋만) ★★★
+            if dataset.get('has_implementation_year') and implementation_year:
+                await self._select_implementation_year(page, implementation_year)
             
             # Select sector (if specified)
             if sector != "전체":
@@ -163,13 +170,16 @@ class AllocationScraper:
             await self._click_search_button(page)
             await asyncio.sleep(3)
             
-            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_02_searched", page)
+            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_{implementation_year or 'all'}_02_searched", page)
             
             # Try Excel download first (more reliable for full data)
             df = await self._try_excel_download(page, dataset_name, plan_period)
             
             if df is not None and len(df) > 0:
                 logger.info(f"✅ Excel 다운로드 성공: {len(df)}행")
+                # ★★★ 이행연도 컬럼 추가 (해당 데이터셋만) ★★★
+                if implementation_year:
+                    df['이행연도'] = implementation_year
                 # ★★★ N차년도 → 실제연도 컬럼 변환 ★★★
                 df = convert_period_year_columns(df, plan_period)
                 df = normalize_year_columns(df)
@@ -181,19 +191,22 @@ class AllocationScraper:
             
             if df is not None and len(df) > 0:
                 logger.info(f"✅ 테이블 스크래핑 성공: {len(df)}행")
+                # ★★★ 이행연도 컬럼 추가 (해당 데이터셋만) ★★★
+                if implementation_year:
+                    df['이행연도'] = implementation_year
                 # ★★★ N차년도 → 실제연도 컬럼 변환 ★★★
                 df = convert_period_year_columns(df, plan_period)
                 df = normalize_year_columns(df)
                 return df
             
-            logger.warning(f"⚠️ 데이터 수집 실패: {dataset_name} {plan_period}차")
+            logger.warning(f"⚠️ 데이터 수집 실패: {dataset_name} {plan_period}차{year_str}")
             return None
             
         except Exception as e:
             logger.error(f"❌ 스크래핑 오류: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_error", page)
+            await self._save_debug(f"etrs_{dataset_name}_{plan_period}_{implementation_year or 'all'}_error", page)
             return None
         finally:
             await page.close()
@@ -208,6 +221,44 @@ class AllocationScraper:
             await asyncio.sleep(1)
         except Exception as e:
             logger.debug(f"계획기간 선택 실패: {e}")
+    
+    async def _select_implementation_year(self, page, year: int) -> None:
+        """Select implementation year (이행연도) from dropdown"""
+        try:
+            # 이행연도 select 찾기 (여러 패턴 시도)
+            selectors = [
+                'select[id*="implYear"]',
+                'select[id*="year"]',
+                'select[name*="implYear"]',
+                'select[name*="year"]',
+            ]
+            
+            for selector in selectors:
+                select = page.locator(selector).first
+                if await select.count() > 0:
+                    # 옵션 확인
+                    options = await select.locator('option').all_text_contents()
+                    logger.debug(f"이행연도 옵션: {options[:5]}...")
+                    
+                    # 연도로 선택 시도
+                    try:
+                        await select.select_option(value=str(year))
+                        logger.info(f"이행연도 선택: {year}년")
+                        await asyncio.sleep(1)
+                        return
+                    except:
+                        # value가 다른 형식일 수 있으므로 label로 시도
+                        try:
+                            await select.select_option(label=str(year))
+                            logger.info(f"이행연도 선택 (label): {year}년")
+                            await asyncio.sleep(1)
+                            return
+                        except:
+                            pass
+            
+            logger.warning(f"이행연도 선택 실패: {year}")
+        except Exception as e:
+            logger.debug(f"이행연도 선택 오류: {e}")
     
     async def _select_sector(self, page, sector: str) -> None:
         """Select sector from dropdown"""
@@ -426,6 +477,8 @@ class AllocationScraper:
             df = await self._try_ors_excel_download(page, dataset_name)
             
             if df is not None and len(df) > 0:
+                # ★★★ 컬럼 정규화 적용 ★★★
+                df = normalize_year_columns(df)
                 logger.info(f"✅ ORS Excel 다운로드 성공: {len(df)}행")
                 return df
             
@@ -434,6 +487,8 @@ class AllocationScraper:
             df = await self._scrape_ors_html_table(page, dataset_name)
             
             if df is not None and len(df) > 0:
+                # ★★★ 컬럼 정규화 적용 ★★★
+                df = normalize_year_columns(df)
                 logger.info(f"✅ ORS 테이블 스크래핑 성공: {len(df)}행")
                 return df
             
@@ -545,18 +600,51 @@ class AllocationScraper:
             periods = list(PLAN_PERIODS.keys())
         
         results = {}
+        dataset = ETRS_DATASETS.get(dataset_name, {})
+        has_impl_year = dataset.get('has_implementation_year', False)
         
         for period in periods:
             logger.info(f"\n--- {dataset_name} {period}차 ---")
-            df = await self.scrape_etrs_table(dataset_name, period)
             
-            if df is not None and len(df) > 0:
-                # Add plan period column
-                df['_계획기간'] = f"{period}차"
-                results[period] = df
-                logger.info(f"✓ {period}차: {len(df)}행")
+            # ★★★ 이행연도가 필요한 데이터셋: 각 연도별로 수집 후 병합 ★★★
+            if has_impl_year:
+                year_list = PLAN_PERIODS.get(period, {}).get('year_list', [])
+                
+                if not year_list:
+                    logger.warning(f"{period}차 계획기간 연도 정보 없음")
+                    continue
+                
+                period_dfs = []
+                for year in year_list:
+                    logger.info(f"  📅 {year}년 이행연도 수집 중...")
+                    df = await self.scrape_etrs_table(dataset_name, period, implementation_year=year)
+                    
+                    if df is not None and len(df) > 0:
+                        period_dfs.append(df)
+                        logger.info(f"    ✓ {year}년: {len(df)}행")
+                    else:
+                        logger.debug(f"    ✗ {year}년: 데이터 없음")
+                
+                # 모든 연도 데이터 병합
+                if period_dfs:
+                    combined_df = pd.concat(period_dfs, ignore_index=True)
+                    combined_df['_계획기간'] = f"{period}차"
+                    results[period] = combined_df
+                    logger.info(f"✓ {period}차 합계: {len(combined_df)}행 ({len(period_dfs)}개 연도)")
+                else:
+                    logger.warning(f"✗ {period}차: 모든 연도 데이터 없음")
+            
+            # ★★★ 이행연도 불필요한 데이터셋: 기존 방식 ★★★
             else:
-                logger.warning(f"✗ {period}차: 데이터 없음")
+                df = await self.scrape_etrs_table(dataset_name, period)
+                
+                if df is not None and len(df) > 0:
+                    # Add plan period column
+                    df['_계획기간'] = f"{period}차"
+                    results[period] = df
+                    logger.info(f"✓ {period}차: {len(df)}행")
+                else:
+                    logger.warning(f"✗ {period}차: 데이터 없음")
         
         return results
     
