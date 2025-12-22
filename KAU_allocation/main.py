@@ -128,9 +128,9 @@ async def main() -> dict:
                 }
                 
                 if result.get('success'):
-                    logger.info(f"✓ ETRS {dataset_name}: 업데이트 완료")
+                    logger.info(f"✓ ETRS {dataset_name}: 큐 추가 완료")
                 else:
-                    logger.warning(f"✗ ETRS {dataset_name}: 업데이트 실패")
+                    logger.warning(f"✗ ETRS {dataset_name}: 큐 추가 실패")
                     
             except Exception as e:
                 error_msg = f"ETRS {dataset_name}: {str(e)}"
@@ -148,15 +148,24 @@ async def main() -> dict:
                 }
                 
                 if result.get('success'):
-                    logger.info(f"✓ ORS {dataset_name}: 업데이트 완료")
+                    logger.info(f"✓ ORS {dataset_name}: 큐 추가 완료")
                 else:
-                    logger.warning(f"✗ ORS {dataset_name}: 업데이트 실패")
+                    logger.warning(f"✗ ORS {dataset_name}: 큐 추가 실패")
                     
             except Exception as e:
                 error_msg = f"ORS {dataset_name}: {str(e)}"
                 logger.error(f"❌ {error_msg}")
                 results['errors'].append(error_msg)
                 results['ors'][dataset_name] = {'success': False, 'error': str(e)}
+        
+        # ★★★ 모든 업데이트를 한 번에 플러시 (API 쿼터 보호) ★★★
+        logger.info("\n[3-2/3] 📝 Google Sheets 플러시 중...")
+        flush_result = sheets_handler.flush_all_updates()
+        
+        if flush_result.get('failed', 0) > 0:
+            results['errors'].append(f"플러시 실패: {flush_result['failed']}개 시트")
+        
+        logger.info(f"✅ 플러시 완료: {flush_result.get('updated', 0)}개 시트 업데이트")
         
         # Determine success
         etrs_success = sum(1 for r in results['etrs'].values() if r.get('success'))
