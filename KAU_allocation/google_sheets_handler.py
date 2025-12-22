@@ -10,6 +10,10 @@ Google Sheets 데이터 처리 모듈 (큐 시스템)
 - 모든 업데이트를 메모리에 큐잉
 - flush_all_updates()로 한 번에 처리
 - 시트당 최대 2회 API 호출 (읽기 1회, 쓰기 1회)
+
+★★★ 변경사항 (v1.1) ★★★
+- process_etrs_update_incremental(): 기존 데이터에 새 연도 데이터 merge
+- 자동 수집 모드 지원
 """
 
 import os
@@ -239,109 +243,75 @@ class AllocationSheetsHandler:
             "details": {}
         }
         
-        # 시트별로 순차 처리 (API 쿼터 보호)
         for sheet_name, update_info in self.update_queue.items():
             try:
                 mode = update_info['mode']
                 data = update_info['data']
                 
                 if mode == 'replace':
-                    self._flush_replace(sheet_name, data)
+                    self._write_sheet_replace(sheet_name, data)
                 else:  # append
-                    self._flush_append(sheet_name, data)
+                    self._write_sheet_append(sheet_name, data)
                 
-                results["updated"] += 1
-                results["details"][sheet_name] = {
-                    "success": True,
-                    "mode": mode,
-                    "rows": len(data)
+                results['updated'] += 1
+                results['details'][sheet_name] = {
+                    'success': True,
+                    'mode': mode,
+                    'rows': len(data)
                 }
                 
                 logger.info(f"✅ {sheet_name}: {len(data)}행 ({mode})")
                 
-                # ★★★ API 쿼터 보호: 시트 간 대기 ★★★
+                # API 쿼터 보호
                 time.sleep(API_WRITE_DELAY)
                 
             except Exception as e:
                 logger.error(f"❌ {sheet_name} 업데이트 실패: {e}")
-                results["failed"] += 1
-                results["details"][sheet_name] = {
-                    "success": False,
-                    "error": str(e)
+                results['failed'] += 1
+                results['details'][sheet_name] = {
+                    'success': False,
+                    'error': str(e)
                 }
-                
-                # 에러 발생해도 다음 시트 처리 (더 긴 대기)
-                time.sleep(API_WRITE_DELAY * 2)
         
         # 큐 클리어
         self.update_queue.clear()
         self.sheet_cache.clear()
         
+        results['success'] = results['failed'] == 0
         logger.info(f"\n✅ 큐 플러시 완료: 성공 {results['updated']}, 실패 {results['failed']}")
         
         return results
     
-    def _flush_replace(self, sheet_name: str, data: pd.DataFrame) -> None:
-        """
-        전체 교체 모드로 시트 업데이트 (최소 API 호출)
-        """
-        worksheet = self._get_or_create_worksheet(sheet_name)
+    def _write_sheet_replace(self, sheet_name: str, data: pd.DataFrame) -> None:
+        """시트 전체 교체 (1-2 API 호출)"""
+        worksheet = self._get_or_create_worksheet(
+            sheet_name,
+            rows=max(1000, len(data) + 100),
+            cols=max(30, len(data.columns) + 5)
+        )
         
-        # 데이터 준비: 헤더 + 모든 데이터를 하나의 리스트로
-        headers = list(data.columns)
-        rows = data.fillna('').astype(str).values.tolist()
-        all_data = [headers] + rows
-        
-        # 시트 크기 확인 및 조정 (필요 시 1회 API 호출)
-        required_rows = len(all_data) + 10
-        required_cols = len(headers) + 2
-        
-        if worksheet.row_count < required_rows or worksheet.col_count < required_cols:
-            worksheet.resize(
-                rows=max(worksheet.row_count, required_rows),
-                cols=max(worksheet.col_count, required_cols)
-            )
-            time.sleep(1)
-        
-        # ★★★ clear + update (2회 API 호출) ★★★
+        # 기존 데이터 클리어 (1 API 호출)
         worksheet.clear()
-        time.sleep(0.5)
+        time.sleep(1)
+        
+        # 새 데이터 쓰기 (1 API 호출)
+        headers = data.columns.tolist()
+        rows = data.fillna('').astype(str).values.tolist()
+        
+        all_data = [headers] + rows
         worksheet.update('A1', all_data, value_input_option='RAW')
     
-    def _flush_append(self, sheet_name: str, data: pd.DataFrame) -> None:
-        """
-        추가 모드로 시트 업데이트 (최소 API 호출)
-        """
+    def _write_sheet_append(self, sheet_name: str, data: pd.DataFrame) -> None:
+        """시트에 데이터 추가 (1-2 API 호출)"""
         worksheet = self._get_or_create_worksheet(sheet_name)
         
-        # 기존 데이터 확인 (1 API 호출)
-        existing = worksheet.get_all_values()
-        time.sleep(0.5)
+        # 현재 데이터 끝 위치 찾기
+        current_data = worksheet.get_all_values()
+        next_row = len(current_data) + 1
+        need_header = len(current_data) == 0
         
-        # 헤더 결정
-        if not existing or len(existing) == 0:
-            headers = list(data.columns)
-            next_row = 2
-            need_header = True
-        else:
-            headers = existing[0]
-            next_row = len(existing) + 1
-            need_header = False
-            
-            # 새 컬럼이 있으면 헤더 확장
-            new_cols = [c for c in data.columns if c not in headers]
-            if new_cols:
-                # 메타데이터 컬럼은 맨 뒤로
-                meta_cols = [h for h in headers if h.startswith('_')]
-                non_meta = [h for h in headers if not h.startswith('_')]
-                headers = non_meta + new_cols + meta_cols
-                need_header = True
-        
-        # 데이터 준비 (헤더 순서에 맞춰서)
-        rows = []
-        for _, row in data.iterrows():
-            row_values = [str(row.get(h, '')) if h in row.index else '' for h in headers]
-            rows.append(row_values)
+        headers = data.columns.tolist()
+        rows = data.fillna('').astype(str).values.tolist()
         
         # 시트 크기 확장 (필요 시 1회 API 호출)
         required_rows = next_row + len(rows) + 10
@@ -375,6 +345,7 @@ class AllocationSheetsHandler:
     ) -> Dict[str, Any]:
         """
         ETRS 데이터셋 업데이트 처리 (큐에 추가만, 실제 쓰기는 flush에서)
+        전체 데이터 교체 모드
         """
         logger.info(f"\n{'='*40}")
         logger.info(f"📊 {dataset_name} 처리 중...")
@@ -454,6 +425,199 @@ class AllocationSheetsHandler:
             "rows": len(combined_df),
             "changes": changes
         }
+    
+    def process_etrs_update_incremental(
+        self,
+        dataset_name: str,
+        period_data: Dict[int, pd.DataFrame]
+    ) -> Dict[str, Any]:
+        """
+        ★★★ ETRS 데이터셋 증분 업데이트 처리 (자동 수집 모드) ★★★
+        
+        올바른 로직:
+        - 최신 연도 데이터만 수집
+        - 누적 시트의 기존 데이터에 없는 최신 연도 데이터만 필터링
+        - 해당 데이터만 append (기존 데이터는 건드리지 않음)
+        
+        예: 기존 ETRS_인증배출량에 2021~2023년 데이터가 있고,
+            새로 수집한 2024년 데이터 중 기존에 없는 것만 append
+        """
+        logger.info(f"\n{'='*40}")
+        logger.info(f"📊 {dataset_name} 증분 업데이트 처리 중...")
+        logger.info(f"{'='*40}")
+        
+        if dataset_name not in ETRS_DATASETS:
+            logger.error(f"알 수 없는 데이터셋: {dataset_name}")
+            return {"success": False}
+        
+        dataset = ETRS_DATASETS[dataset_name]
+        sheet_latest = dataset['sheet_latest']
+        sheet_history = dataset['sheet_history']
+        key_cols = KEY_COLUMNS.get(dataset_name, [])
+        value_cols = VALUE_COLUMNS.get(dataset_name, [])
+        has_impl_year = dataset.get('has_implementation_year', False)
+        
+        # 새로 수집한 데이터 합치기
+        new_data_list = []
+        for period, df in period_data.items():
+            df_copy = df.copy()
+            if '_계획기간' not in df_copy.columns:
+                df_copy['_계획기간'] = f"{period}차"
+            new_data_list.append(df_copy)
+        
+        if not new_data_list:
+            logger.warning(f"새 데이터 없음: {dataset_name}")
+            return {"success": False}
+        
+        new_df = pd.concat(new_data_list, ignore_index=True)
+        
+        # 기존 데이터 가져오기
+        old_data = self.get_sheet_data(sheet_latest, use_cache=False)
+        
+        if old_data.empty:
+            # 첫 실행 - 새 데이터만 저장
+            logger.info(f"첫 실행: {len(new_df)}행 저장")
+            self.queue_latest_update(sheet_latest, new_df)
+            self.queue_history_update(sheet_history, new_df, '신규')
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "rows": len(new_df),
+                "changes": {'added': len(new_df), 'changed': 0}
+            }
+        
+        # ★★★ 핵심 로직: 기존 데이터에 없는 새 데이터만 필터링 ★★★
+        if has_impl_year and '이행연도' in new_df.columns:
+            # 이행연도 데이터셋: 업체명 + 부문 + 이행연도로 중복 체크
+            rows_to_append = self._filter_new_rows_by_impl_year(old_data, new_df, key_cols)
+        else:
+            # 일반 데이터셋: 키 컬럼으로 중복 체크
+            rows_to_append = self._filter_new_rows_by_key(old_data, new_df, key_cols)
+        
+        if rows_to_append.empty:
+            logger.info(f"추가할 새 데이터 없음 (이미 모든 데이터가 존재)")
+            return {
+                "success": True,
+                "dataset_name": dataset_name,
+                "rows": len(old_data),
+                "changes": {'added': 0, 'changed': 0}
+            }
+        
+        logger.info(f"기존 {len(old_data)}행 + 신규 {len(rows_to_append)}행 append")
+        
+        # ★★★ 기존 데이터 유지 + 새 데이터 append ★★★
+        combined_df = pd.concat([old_data, rows_to_append], ignore_index=True)
+        
+        # 정렬 (이행연도 있으면 내림차순)
+        if '이행연도' in combined_df.columns:
+            combined_df = combined_df.sort_values('이행연도', ascending=False)
+        
+        # ★★★ 최신 시트 업데이트 큐잉 ★★★
+        self.queue_latest_update(sheet_latest, combined_df)
+        
+        # ★★★ 이력 시트에 새로 추가된 데이터만 append ★★★
+        self.queue_history_update(sheet_history, rows_to_append, '신규')
+        
+        changes = {'added': len(rows_to_append), 'changed': 0}
+        
+        logger.info(f"  → 최신: {len(combined_df)}행, 신규 append: {changes['added']}행")
+        
+        return {
+            "success": True,
+            "dataset_name": dataset_name,
+            "rows": len(combined_df),
+            "changes": changes
+        }
+    
+    def _filter_new_rows_by_impl_year(
+        self,
+        old_df: pd.DataFrame,
+        new_df: pd.DataFrame,
+        key_cols: List[str]
+    ) -> pd.DataFrame:
+        """
+        ★★★ 이행연도 기반으로 기존 데이터에 없는 행만 필터링 ★★★
+        
+        인증배출량, 배출권이월량, 배출권차입량 데이터셋용
+        
+        - 키: 업체명 + 부문 + 이행연도
+        - 기존 데이터에 이미 있는 키는 제외
+        - 새 데이터 중 기존에 없는 것만 반환
+        """
+        # 이행연도가 있는 경우, 키에 이행연도 포함
+        full_key_cols = key_cols.copy()
+        if '이행연도' not in full_key_cols:
+            full_key_cols.append('이행연도')
+        
+        # 사용 가능한 키 컬럼만 필터링
+        available_key_cols = [c for c in full_key_cols if c in old_df.columns and c in new_df.columns]
+        
+        if not available_key_cols:
+            # 키 없으면 전체 반환 (안전 장치)
+            logger.warning("키 컬럼을 찾을 수 없어 전체 데이터 반환")
+            return new_df.copy()
+        
+        # 기존 데이터의 키 세트 생성
+        existing_keys = set()
+        for _, row in old_df.iterrows():
+            key = tuple(str(row.get(c, '')).strip() for c in available_key_cols)
+            existing_keys.add(key)
+        
+        logger.debug(f"기존 데이터 키 수: {len(existing_keys)}")
+        
+        # 새 데이터에서 기존에 없는 행만 필터링
+        new_rows = []
+        for _, row in new_df.iterrows():
+            key = tuple(str(row.get(c, '')).strip() for c in available_key_cols)
+            if key not in existing_keys:
+                new_rows.append(row)
+        
+        if new_rows:
+            result_df = pd.DataFrame(new_rows)
+            logger.info(f"새로 추가할 행: {len(result_df)}개 (키: {available_key_cols})")
+            return result_df
+        else:
+            return pd.DataFrame(columns=new_df.columns)
+    
+    def _filter_new_rows_by_key(
+        self,
+        old_df: pd.DataFrame,
+        new_df: pd.DataFrame,
+        key_cols: List[str]
+    ) -> pd.DataFrame:
+        """
+        키 기반으로 기존 데이터에 없는 행만 필터링 (일반 데이터셋용)
+        """
+        available_key_cols = [c for c in key_cols if c in old_df.columns and c in new_df.columns]
+        
+        if not available_key_cols:
+            # 키 없으면 공통 컬럼 중 처음 2개 사용
+            common = [c for c in new_df.columns if c in old_df.columns and not c.startswith('_')]
+            available_key_cols = common[:2] if common else []
+        
+        if not available_key_cols:
+            logger.warning("키 컬럼을 찾을 수 없어 전체 데이터 반환")
+            return new_df.copy()
+        
+        # 기존 데이터의 키 세트
+        existing_keys = set()
+        for _, row in old_df.iterrows():
+            key = tuple(str(row.get(c, '')).strip() for c in available_key_cols)
+            existing_keys.add(key)
+        
+        # 새 데이터에서 기존에 없는 행만 필터링
+        new_rows = []
+        for _, row in new_df.iterrows():
+            key = tuple(str(row.get(c, '')).strip() for c in available_key_cols)
+            if key not in existing_keys:
+                new_rows.append(row)
+        
+        if new_rows:
+            result_df = pd.DataFrame(new_rows)
+            logger.info(f"새로 추가할 행: {len(result_df)}개 (키: {available_key_cols})")
+            return result_df
+        else:
+            return pd.DataFrame(columns=new_df.columns)
     
     # =========================================================
     # ORS 데이터 처리 (큐 시스템 사용)
