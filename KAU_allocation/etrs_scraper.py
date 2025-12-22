@@ -3,6 +3,11 @@ ETRS/ORS Web Scraper
 배출권등록부/상쇄등록부 시스템 웹 스크래퍼
 
 Playwright 기반 테이블 스크래핑 + Excel 다운로드
+
+★★★ 변경사항 (v1.1) ★★★
+1. 이행연도 selector 수정: select[id*="implYear"] → #pfYy
+2. 자동 수집 모드 지원: 현재 연도만 수집하는 옵션 추가
+3. 기존 데이터에 새 연도 데이터 append 로직 지원
 """
 
 import os
@@ -223,42 +228,70 @@ class AllocationScraper:
             logger.debug(f"계획기간 선택 실패: {e}")
     
     async def _select_implementation_year(self, page, year: int) -> None:
-        """Select implementation year (이행연도) from dropdown"""
+        """
+        Select implementation year (이행연도) from dropdown
+        
+        ★★★ 수정됨: 실제 ETRS HTML에 맞는 selector 사용 ★★★
+        - 인증배출량, 배출권이월량, 배출권차입량 페이지의 이행연도 드롭다운
+        - HTML: <select id="pfYy" name="condition.pfYy">
+        """
         try:
-            # 이행연도 select 찾기 (여러 패턴 시도)
+            # ★★★ 올바른 이행연도 selector (실제 ETRS HTML 기반) ★★★
             selectors = [
-                'select[id*="implYear"]',
-                'select[id*="year"]',
-                'select[name*="implYear"]',
-                'select[name*="year"]',
+                '#pfYy',                              # 직접 ID 선택
+                'select#pfYy',                        # select 태그와 ID 조합
+                'select[name="condition.pfYy"]',      # name 속성으로 선택
+                'select[name*="pfYy"]',               # name에 pfYy 포함
+                'select[id*="pfYy"]',                 # id에 pfYy 포함 (안전장치)
             ]
             
             for selector in selectors:
-                select = page.locator(selector).first
-                if await select.count() > 0:
-                    # 옵션 확인
-                    options = await select.locator('option').all_text_contents()
-                    logger.debug(f"이행연도 옵션: {options[:5]}...")
+                try:
+                    select = page.locator(selector).first
+                    count = await select.count()
                     
-                    # 연도로 선택 시도
-                    try:
-                        await select.select_option(value=str(year))
-                        logger.info(f"이행연도 선택: {year}년")
-                        await asyncio.sleep(1)
-                        return
-                    except:
-                        # value가 다른 형식일 수 있으므로 label로 시도
+                    if count > 0:
+                        # 옵션 확인
+                        options = await select.locator('option').all_text_contents()
+                        logger.debug(f"이행연도 옵션 ({selector}): {options}")
+                        
+                        # 연도로 선택 시도 (value 속성)
                         try:
-                            await select.select_option(label=str(year))
-                            logger.info(f"이행연도 선택 (label): {year}년")
+                            await select.select_option(value=str(year))
+                            logger.info(f"✓ 이행연도 선택 성공: {year}년 (selector: {selector}, value)")
                             await asyncio.sleep(1)
                             return
-                        except:
-                            pass
+                        except Exception as e1:
+                            logger.debug(f"value 선택 실패: {e1}")
+                        
+                        # label로 시도
+                        try:
+                            await select.select_option(label=str(year))
+                            logger.info(f"✓ 이행연도 선택 성공: {year}년 (selector: {selector}, label)")
+                            await asyncio.sleep(1)
+                            return
+                        except Exception as e2:
+                            logger.debug(f"label 선택 실패: {e2}")
+                        
+                        # 연도 문자열 포함 옵션 찾기 (예: "2024년", "2024")
+                        for option_text in options:
+                            if str(year) in option_text:
+                                try:
+                                    await select.select_option(label=option_text)
+                                    logger.info(f"✓ 이행연도 선택 성공: {year}년 (옵션: {option_text})")
+                                    await asyncio.sleep(1)
+                                    return
+                                except:
+                                    pass
+                                    
+                except Exception as e:
+                    logger.debug(f"selector '{selector}' 시도 실패: {e}")
+                    continue
             
-            logger.warning(f"이행연도 선택 실패: {year}")
+            logger.warning(f"⚠️ 이행연도 선택 실패: {year}년 - 모든 selector 시도 실패")
+            
         except Exception as e:
-            logger.debug(f"이행연도 선택 오류: {e}")
+            logger.error(f"❌ 이행연도 선택 오류: {e}")
     
     async def _select_sector(self, page, sector: str) -> None:
         """Select sector from dropdown"""
@@ -281,6 +314,8 @@ class AllocationScraper:
                 'button:has-text("검색")',
                 'input[value="검색"]',
                 '.btn30.btnNavy',
+                'button.btn30.btnNavy',
+                'a.btn30.btnNavy',
             ]
             
             for selector in search_selectors:
@@ -290,7 +325,7 @@ class AllocationScraper:
                     logger.info("검색 버튼 클릭")
                     return
             
-            logger.debug("검색 버튼을 찾을 수 없음")
+            logger.warning("검색 버튼을 찾지 못함")
         except Exception as e:
             logger.debug(f"검색 버튼 클릭 실패: {e}")
     
@@ -305,37 +340,42 @@ class AllocationScraper:
             # Find Excel download button
             excel_selectors = [
                 'a:has-text("엑셀다운로드")',
-                'a:has-text("Excel다운로드")',
+                'button:has-text("엑셀다운로드")',
                 'a[href*="Excel"]',
-                '.btn40.btnGreen',
+                '.btnGreen:has-text("엑셀")',
+                '#downloadExcelButton',
             ]
             
+            excel_btn = None
             for selector in excel_selectors:
                 btn = page.locator(selector).first
                 if await btn.count() > 0:
-                    logger.info("Excel 다운로드 버튼 발견")
-                    
-                    # Start download
-                    async with page.expect_download(timeout=60000) as download_info:
-                        await btn.click()
-                    
-                    download = await download_info.value
-                    
-                    # Save file
-                    filename = f"etrs_{dataset_name}_{plan_period}차_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    filepath = self.download_dir / filename
-                    await download.save_as(str(filepath))
-                    
-                    logger.info(f"💾 Excel 저장: {filepath}")
-                    
-                    # Read Excel
-                    df = pd.read_excel(filepath)
-                    df = clean_excel_data(df)
-                    
-                    return df
+                    excel_btn = btn
+                    break
             
-            logger.debug("Excel 다운로드 버튼 없음")
-            return None
+            if not excel_btn:
+                logger.debug("Excel 다운로드 버튼 없음")
+                return None
+            
+            # Start download
+            async with page.expect_download(timeout=90000) as download_info:
+                await excel_btn.click()
+            
+            download = await download_info.value
+            
+            # Save to temp file
+            temp_path = self.download_dir / f"{dataset_name}_{plan_period}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            await download.save_as(str(temp_path))
+            
+            logger.debug(f"Excel 저장: {temp_path}")
+            
+            # Read Excel
+            df = read_excel_auto(str(temp_path))
+            
+            if df is not None:
+                df = clean_excel_data(df)
+            
+            return df
             
         except Exception as e:
             logger.debug(f"Excel 다운로드 실패: {e}")
@@ -346,100 +386,82 @@ class AllocationScraper:
         page,
         dataset_name: str
     ) -> Optional[pd.DataFrame]:
-        """Scrape HTML table with pagination support"""
+        """Scrape HTML table with pagination handling"""
         all_data = []
-        headers = []
-        current_page = 1
-        max_pages = 200
-        seen_first_rows = set()
+        page_num = 1
+        max_pages = 100  # Safety limit
         
-        # Extract headers
-        try:
-            header_cells = await page.locator('table.boardList thead th').all_text_contents()
-            headers = [h.strip() for h in header_cells if h.strip()]
-            logger.info(f"헤더 추출: {headers[:5]}...")
-        except Exception as e:
-            logger.debug(f"헤더 추출 실패: {e}")
-        
-        while current_page <= max_pages:
-            # Extract current page data
+        while page_num <= max_pages:
             try:
-                rows = page.locator('table.boardList tbody tr')
-                row_count = await rows.count()
+                # Extract current page data
+                df_page = await self._extract_table_data(page)
                 
-                if row_count == 0:
-                    logger.info(f"페이지 {current_page}: 데이터 없음")
+                if df_page is None or len(df_page) == 0:
                     break
                 
-                page_data = []
-                for i in range(row_count):
-                    row = rows.nth(i)
-                    cells = await row.locator('td').all_text_contents()
-                    cells = [c.strip().replace('\n', ' ').replace('\t', '') for c in cells]
-                    
-                    if any(c for c in cells):
-                        page_data.append(cells)
+                all_data.append(df_page)
+                logger.debug(f"페이지 {page_num}: {len(df_page)}행")
                 
-                if not page_data:
+                # Try to go to next page
+                next_btn = page.locator('a.btnNextPage, a[title*="다음"], .btnNextPage').first
+                
+                if await next_btn.count() == 0:
                     break
                 
-                # Check for duplicate page
-                first_row_key = '|'.join(str(v) for v in page_data[0][:3])
-                if first_row_key in seen_first_rows:
-                    logger.info(f"페이지 {current_page}: 중복 데이터 감지, 종료")
+                # Check if next button is disabled
+                is_disabled = await next_btn.get_attribute('class')
+                if is_disabled and 'disabled' in is_disabled:
                     break
                 
-                seen_first_rows.add(first_row_key)
-                all_data.extend(page_data)
-                logger.info(f"페이지 {current_page}: {len(page_data)}행 추출 (누적: {len(all_data)}행)")
-                
-                # Click next page
-                next_clicked = await self._click_next_page(page, current_page)
-                if not next_clicked:
-                    logger.info("마지막 페이지")
-                    break
-                
-                current_page += 1
-                await asyncio.sleep(1)
+                await next_btn.click()
+                await asyncio.sleep(2)
+                page_num += 1
                 
             except Exception as e:
-                logger.debug(f"페이지 {current_page} 추출 실패: {e}")
+                logger.debug(f"페이지 {page_num} 처리 오류: {e}")
                 break
         
         if all_data:
-            # Create DataFrame
-            if headers and len(headers) >= len(all_data[0]):
-                df = pd.DataFrame(all_data, columns=headers[:len(all_data[0])])
-            else:
-                df = pd.DataFrame(all_data)
-            
-            df = clean_excel_data(df)
-            return df
+            combined = pd.concat(all_data, ignore_index=True)
+            # Remove duplicates
+            combined = combined.drop_duplicates()
+            return combined
         
         return None
     
-    async def _click_next_page(self, page, current_page: int) -> bool:
-        """Click next page button"""
+    async def _extract_table_data(self, page) -> Optional[pd.DataFrame]:
+        """Extract data from current table"""
         try:
-            next_page = current_page + 1
+            # Get headers
+            headers = await page.locator('table thead th, table.list thead th').all_text_contents()
+            headers = [h.strip() for h in headers if h.strip()]
             
-            # Try clicking page number
-            page_link = page.locator(f'.pagination a:has-text("{next_page}")').first
-            if await page_link.count() > 0:
-                await page_link.click()
-                await asyncio.sleep(1)
-                return True
+            # Get rows
+            rows = page.locator('table tbody tr, table.list tbody tr')
+            row_count = await rows.count()
             
-            # Try next button
-            next_btn = page.locator('.pagination a.btnNextPage, a[title="다음페이지"]').first
-            if await next_btn.count() > 0:
-                await next_btn.click()
-                await asyncio.sleep(1)
-                return True
+            data = []
+            for i in range(row_count):
+                row = rows.nth(i)
+                cells = await row.locator('td').all_text_contents()
+                cells = [c.strip() for c in cells]
+                if any(c for c in cells):  # Skip empty rows
+                    data.append(cells)
             
-            return False
-        except:
-            return False
+            if data:
+                # Match headers to data
+                if headers and len(headers) >= len(data[0]):
+                    df = pd.DataFrame(data, columns=headers[:len(data[0])])
+                else:
+                    df = pd.DataFrame(data)
+                
+                return clean_excel_data(df)
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"테이블 추출 오류: {e}")
+            return None
     
     # =========================================================
     # ORS 스크래핑 (상쇄등록부)
@@ -450,7 +472,7 @@ class AllocationScraper:
         Scrape ORS table data
         
         Args:
-            dataset_name: Dataset name (상쇄배출권발행량, etc.)
+            dataset_name: ORS dataset name
             
         Returns:
             DataFrame with scraped data
@@ -477,18 +499,14 @@ class AllocationScraper:
             df = await self._try_ors_excel_download(page, dataset_name)
             
             if df is not None and len(df) > 0:
-                # ★★★ 컬럼 정규화 적용 ★★★
-                df = normalize_year_columns(df)
                 logger.info(f"✅ ORS Excel 다운로드 성공: {len(df)}행")
                 return df
             
-            # Fallback: Scrape HTML table
+            # Fallback: HTML scraping
             logger.info("📋 ORS 테이블 스크래핑으로 폴백...")
             df = await self._scrape_ors_html_table(page, dataset_name)
             
             if df is not None and len(df) > 0:
-                # ★★★ 컬럼 정규화 적용 ★★★
-                df = normalize_year_columns(df)
                 logger.info(f"✅ ORS 테이블 스크래핑 성공: {len(df)}행")
                 return df
             
@@ -497,8 +515,7 @@ class AllocationScraper:
             
         except Exception as e:
             logger.error(f"❌ ORS 스크래핑 오류: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+            await self._save_debug(f"ors_{dataset_name}_error", page)
             return None
         finally:
             await page.close()
@@ -508,33 +525,38 @@ class AllocationScraper:
         page,
         dataset_name: str
     ) -> Optional[pd.DataFrame]:
-        """Try to download Excel from ORS"""
+        """Try to download ORS Excel file"""
         try:
             excel_selectors = [
-                'a:has-text("엑셀")',
-                'a:has-text("Excel")',
+                'a:has-text("엑셀다운로드")',
                 'button:has-text("엑셀")',
+                'a[href*="Excel"]',
                 '.btn_excel',
             ]
             
+            excel_btn = None
             for selector in excel_selectors:
                 btn = page.locator(selector).first
                 if await btn.count() > 0:
-                    logger.info("ORS Excel 버튼 발견")
-                    
-                    async with page.expect_download(timeout=60000) as download_info:
-                        await btn.click()
-                    
-                    download = await download_info.value
-                    filename = f"ors_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    filepath = self.download_dir / filename
-                    await download.save_as(str(filepath))
-                    
-                    df = pd.read_excel(filepath)
-                    df = clean_excel_data(df)
-                    return df
+                    excel_btn = btn
+                    break
             
-            return None
+            if not excel_btn:
+                return None
+            
+            async with page.expect_download(timeout=90000) as download_info:
+                await excel_btn.click()
+            
+            download = await download_info.value
+            temp_path = self.download_dir / f"ors_{dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            await download.save_as(str(temp_path))
+            
+            df = read_excel_auto(str(temp_path))
+            if df is not None:
+                df = clean_excel_data(df)
+            
+            return df
+            
         except Exception as e:
             logger.debug(f"ORS Excel 다운로드 실패: {e}")
             return None
@@ -546,9 +568,8 @@ class AllocationScraper:
     ) -> Optional[pd.DataFrame]:
         """Scrape ORS HTML table"""
         try:
-            # Extract headers
-            headers = []
-            header_cells = await page.locator('table thead th, table.list th').all_text_contents()
+            # Get headers
+            header_cells = await page.locator('table thead th, table.list thead th').all_text_contents()
             headers = [h.strip() for h in header_cells if h.strip()]
             
             # Extract data
@@ -584,7 +605,8 @@ class AllocationScraper:
     async def download_etrs_dataset(
         self,
         dataset_name: str,
-        periods: List[int] = None
+        periods: List[int] = None,
+        current_year_only: bool = False  # ★★★ 새 파라미터: 현재 연도만 수집 ★★★
     ) -> Dict[int, pd.DataFrame]:
         """
         Download ETRS dataset for all plan periods
@@ -592,6 +614,7 @@ class AllocationScraper:
         Args:
             dataset_name: Dataset name
             periods: List of periods (default: all)
+            current_year_only: If True, only collect current year data (for auto mode)
             
         Returns:
             Dictionary: period -> DataFrame
@@ -603,6 +626,9 @@ class AllocationScraper:
         dataset = ETRS_DATASETS.get(dataset_name, {})
         has_impl_year = dataset.get('has_implementation_year', False)
         
+        # ★★★ 현재 연도 계산 ★★★
+        current_year = datetime.now().year
+        
         for period in periods:
             logger.info(f"\n--- {dataset_name} {period}차 ---")
             
@@ -613,6 +639,15 @@ class AllocationScraper:
                 if not year_list:
                     logger.warning(f"{period}차 계획기간 연도 정보 없음")
                     continue
+                
+                # ★★★ current_year_only 모드: 현재 연도만 수집 ★★★
+                if current_year_only:
+                    if current_year in year_list:
+                        year_list = [current_year]
+                        logger.info(f"🎯 자동 수집 모드: {current_year}년만 수집")
+                    else:
+                        logger.info(f"⏭️ {period}차에 {current_year}년 없음, 스킵")
+                        continue
                 
                 period_dfs = []
                 for year in year_list:
@@ -650,10 +685,15 @@ class AllocationScraper:
     
     async def download_all_etrs(
         self,
-        periods: List[int] = None
+        periods: List[int] = None,
+        current_year_only: bool = False  # ★★★ 새 파라미터 ★★★
     ) -> Dict[str, Dict[int, pd.DataFrame]]:
         """
         Download all ETRS datasets
+        
+        Args:
+            periods: List of periods to download
+            current_year_only: If True, only collect current year data (for auto mode)
         
         Returns:
             Nested dict: dataset_name -> period -> DataFrame
@@ -668,7 +708,11 @@ class AllocationScraper:
             logger.info(f"📊 데이터셋: {dataset_name}")
             logger.info(f"{'='*50}")
             
-            results = await self.download_etrs_dataset(dataset_name, periods)
+            results = await self.download_etrs_dataset(
+                dataset_name, 
+                periods,
+                current_year_only=current_year_only
+            )
             if results:
                 all_results[dataset_name] = results
         
@@ -700,7 +744,8 @@ class AllocationScraper:
     async def download_all(
         self,
         etrs_periods: List[int] = None,
-        include_ors: bool = True
+        include_ors: bool = True,
+        current_year_only: bool = False  # ★★★ 새 파라미터 ★★★
     ) -> Dict[str, Any]:
         """
         Download all data from ETRS and ORS
@@ -708,6 +753,7 @@ class AllocationScraper:
         Args:
             etrs_periods: ETRS plan periods to download
             include_ors: Whether to include ORS data
+            current_year_only: If True, only collect current year data (for auto mode)
             
         Returns:
             Dictionary with 'etrs' and 'ors' keys
@@ -721,7 +767,10 @@ class AllocationScraper:
         logger.info("\n" + "="*60)
         logger.info("🏢 ETRS (배출권등록부) 데이터 수집")
         logger.info("="*60)
-        results['etrs'] = await self.download_all_etrs(etrs_periods)
+        results['etrs'] = await self.download_all_etrs(
+            etrs_periods, 
+            current_year_only=current_year_only
+        )
         
         # Download ORS
         if include_ors:
@@ -737,7 +786,8 @@ async def run_scraper(
     etrs_only: bool = False,
     ors_only: bool = False,
     periods: List[int] = None,
-    debug_mode: bool = False
+    debug_mode: bool = False,
+    current_year_only: bool = False  # ★★★ 새 파라미터 ★★★
 ) -> Dict[str, Any]:
     """
     Run the scraper
@@ -747,6 +797,7 @@ async def run_scraper(
         ors_only: Only download ORS data
         periods: ETRS plan periods
         debug_mode: Enable debug mode
+        current_year_only: If True, only collect current year data (for auto mode)
         
     Returns:
         Downloaded data
@@ -757,11 +808,18 @@ async def run_scraper(
         await scraper.initialize()
         
         if etrs_only:
-            return {'etrs': await scraper.download_all_etrs(periods), 'ors': {}}
+            return {
+                'etrs': await scraper.download_all_etrs(periods, current_year_only=current_year_only), 
+                'ors': {}
+            }
         elif ors_only:
             return {'etrs': {}, 'ors': await scraper.download_all_ors()}
         else:
-            return await scraper.download_all(periods, include_ors=True)
+            return await scraper.download_all(
+                periods, 
+                include_ors=True, 
+                current_year_only=current_year_only
+            )
     finally:
         await scraper.close()
 
