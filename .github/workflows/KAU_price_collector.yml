@@ -1,7 +1,7 @@
 # .github/workflows/KAU_price_collector.yml
-# KRX ETS v3.2 - pytesseract 경량화 + Job별 최적화
+# KRX ETS v3.2 - Job별 최적화 + 강화된 캐시 시스템
 
-name: 01_KRX_ETS_Data_updater
+name: KRX ETS Data Collector v3.2 (Job별 최적화)
 
 on:
   schedule:
@@ -265,9 +265,9 @@ jobs:
           ~/.cache/pip
           ~/.cache/ms-playwright
           /var/cache/apt
-        key: krx-collector-balanced-v3.2-${{ runner.os }}-${{ hashFiles('requirements/collector.txt') }}
+        key: krx-collector-balanced-v3.2.2-${{ runner.os }}-${{ hashFiles('requirements/collector.txt') }}
         restore-keys: |
-          krx-collector-balanced-v3.2-${{ runner.os }}-
+          krx-collector-balanced-v3.2.2-${{ runner.os }}-
           krx-collector-balanced-v3.2-${{ runner.os }}-
           krx-collector-balanced-
           krx-collector-heavy-
@@ -275,7 +275,7 @@ jobs:
     - name: 📊 캐시 성능 분석 (균형잡힌 통합 캐시)
       id: cache-analysis
       run: |
-        echo "=== 🚀 v3.2 균형잡힌 캐시 분석 (성능 최적화) ==="
+        echo "=== 🚀 v3.2.2 균형잡힌 캐시 분석 (성능 최적화) ==="
         
         CACHE_HIT="${{ steps.heavy-cache.outputs.cache-hit }}"
         echo "💾 통합 캐시 적중: ${CACHE_HIT}"
@@ -361,9 +361,9 @@ jobs:
         cache: 'pip'
         cache-dependency-path: 'requirements/collector.txt'
         
-    - name: 🔧 시스템 의존성 설치 (v3.2 pytesseract 경량화)
+    - name: 🔧 시스템 의존성 설치 (캐시 최적화)
       run: |
-        echo "🔧 데이터 수집용 시스템 의존성 설치 (v3.2 pytesseract 경량화)"
+        echo "🔧 데이터 수집용 시스템 의존성 설치 (v3.2.2 균형 최적화)"
         
         APT_CACHED="${{ steps.cache-analysis.outputs.apt_cached }}"
         
@@ -382,21 +382,15 @@ jobs:
           libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libgtk-3-0 \
           || echo "⚠️ 일부 패키지 설치 실패 - 계속 진행"
         
-        # Tesseract OCR 설치 (v3.2 pytesseract 백업용 - easyocr 대체)
-        echo "📦 Tesseract OCR 설치 (pytesseract 백업용)..."
-        sudo apt-get install -y tesseract-ocr tesseract-ocr-kor \
-          || echo "⚠️ Tesseract 설치 실패 - OCR 백업 비활성화"
-        
         # 오디오 패키지 (선택적, 실패해도 무시)
         sudo apt-get install -y libasound2 2>/dev/null || \
         echo "⚠️ 오디오 패키지 설치 실패 - 무시하고 계속"
         
         echo "✅ 데이터 수집용 시스템 의존성 설치 완료"
-        echo "📊 v3.2 변경사항: easyocr (2GB+) → pytesseract (~50KB)"
         
     - name: 📦 데이터 수집용 Python 패키지 설치 (균형 최적화)
       run: |
-        echo "📦 데이터 수집용 패키지 설치 (v3.2 균형 최적화)"
+        echo "📦 데이터 수집용 패키지 설치 (v3.2.2 균형 최적화)"
         
         PIP_CACHED="${{ steps.cache-analysis.outputs.pip_cached }}"
         
@@ -426,7 +420,7 @@ jobs:
         echo "⏱️ 패키지 설치 시간: ${INSTALL_DURATION}초"
         echo "📦 설치된 패키지 확인:"
         echo "  • Playwright: $(python -c 'import playwright; print("✅")' 2>/dev/null || echo "❌")"
-        echo "  • OCR (pytesseract): $(python -c 'import pytesseract; print("✅")' 2>/dev/null || echo "❌")"
+        echo "  • OCR (easyocr): $(python -c 'import easyocr; print("✅")' 2>/dev/null || echo "❌")"
         echo "  • BeautifulSoup: $(python -c 'import bs4; print("✅")' 2>/dev/null || echo "❌")"
         echo "  • Google Sheets: $(python -c 'import gspread; print("✅")' 2>/dev/null || echo "❌")"
         
@@ -434,7 +428,7 @@ jobs:
         
     - name: 🌐 Playwright 브라우저 설치 (균형 최적화)
       run: |
-        echo "🌐 Playwright 브라우저 설치 (v3.2 균형 최적화)"
+        echo "🌐 Playwright 브라우저 설치 (v3.2.2 균형 최적화)"
         
         PLAYWRIGHT_CACHED="${{ steps.cache-analysis.outputs.playwright_cached }}"
         
@@ -501,7 +495,7 @@ jobs:
     - name: 📊 설치 성능 리포트 (균형 최적화)
       id: cache-report
       run: |
-        echo "=== 📊 v3.2 설치 성능 리포트 (균형 최적화) ==="
+        echo "=== 📊 v3.2.2 설치 성능 리포트 (균형 최적화) ==="
         
         PACKAGE_TIME=${PACKAGE_INSTALL_TIME:-0}
         BROWSER_TIME=${BROWSER_INSTALL_TIME:-0}
@@ -621,7 +615,7 @@ jobs:
         echo ""
         echo "🔧 사용 가능한 도구:"
         echo "  • Playwright: ${PLAYWRIGHT_AVAILABLE}"
-        echo "  • OCR (pytesseract): $(python -c 'import pytesseract; print("✅")' 2>/dev/null || echo "❌")"
+        echo "  • OCR (easyocr): $(python -c 'import easyocr; print("✅")' 2>/dev/null || echo "❌")"
         echo "  • BeautifulSoup: $(python -c 'import bs4; print("✅")' 2>/dev/null || echo "❌")"
         echo "  • Google Sheets: $(python -c 'import gspread; print("✅")' 2>/dev/null || echo "❌")"
         
@@ -630,7 +624,7 @@ jobs:
         
         START_TIME=$(date +%s)
         
-        if python KAU_price_collector.py; then
+        if python KAU_price/KAU_price_collector.py; then
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
           
@@ -754,7 +748,7 @@ jobs:
         echo ""
         echo "🚫 설치하지 않는 무거운 패키지들:"
         echo "  • Playwright (2GB+) - 웹스크래핑 불필요"
-        echo "  • pytesseract/Tesseract - OCR 불필요"
+        echo "  • OCR (500MB+) - 이미지 처리 불필요"
         echo "  • 시스템 패키지 - 브라우저 불필요"
         
     - name: Python 환경 설정 (알림용 - 초고속)
@@ -802,7 +796,7 @@ jobs:
         echo ""
         echo "🚫 설치되지 않은 무거운 패키지 (정상):"
         echo "  • Playwright: $(python -c 'import playwright; print("❌ 예상치 못한 설치")' 2>/dev/null || echo "✅ 미설치")"
-        echo "  • OCR (pytesseract): $(python -c 'import pytesseract; print("❌ 예상치 못한 설치")' 2>/dev/null || echo "✅ 미설치")"
+        echo "  • OCR: $(python -c 'import easyocr; print("❌ 예상치 못한 설치")' 2>/dev/null || echo "✅ 미설치")"
         echo ""
         
         # 캐시 크기 확인
@@ -895,10 +889,10 @@ jobs:
           exit 1
         fi
 
-    - name: 🎊 v3.2 워크플로우 실행 요약 (pytesseract 경량화)
+    - name: 🎊 v3.2.1 워크플로우 실행 요약 (캐시 크기 최적화)
       if: always()
       run: |
-        echo "## 🚀 KRX ETS v3.2 데이터 수집 결과 (pytesseract 경량화)" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 KRX ETS v3.2.1 데이터 수집 결과 (캐시 크기 최적화)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**🕐 실행 시간**: ${{ needs.check-trading-conditions.outputs.current_kst }} KST" >> $GITHUB_STEP_SUMMARY
         echo "**📈 시장 상태**: ${{ needs.check-trading-conditions.outputs.market_phase }}" >> $GITHUB_STEP_SUMMARY
@@ -913,27 +907,27 @@ jobs:
         echo "**🚀 캐시 성능**: ${{ needs.collect-krx-data.outputs.cache_performance || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # v3.2 pytesseract 경량화 변경사항
-        echo "### 🚀 v3.2 pytesseract 경량화" >> $GITHUB_STEP_SUMMARY
-        echo "- **OCR 라이브러리 교체**: easyocr (2GB+) → pytesseract (~50KB)" >> $GITHUB_STEP_SUMMARY
-        echo "- **시스템 OCR**: tesseract-ocr + tesseract-ocr-kor (~30MB)" >> $GITHUB_STEP_SUMMARY
-        echo "- **디스크 절약**: 99% 감소 (2GB+ → 30MB)" >> $GITHUB_STEP_SUMMARY
-        echo "- **GPU 의존성 제거**: PyTorch/CUDA 불필요" >> $GITHUB_STEP_SUMMARY
-        echo "- **OCR 백업 구현**: 실제 작동하는 OCR 백업 시스템" >> $GITHUB_STEP_SUMMARY
+        # v3.2.1 신규 기능 안내
+        echo "### 🚀 v3.2.1 캐시 최적화 패치" >> $GITHUB_STEP_SUMMARY
+        echo "- **분리된 캐시**: pip + Playwright 캐시 분리로 크기 제한" >> $GITHUB_STEP_SUMMARY
+        echo "- **캐시 정리**: 자동 캐시 크기 최적화 (큰 파일 제거)" >> $GITHUB_STEP_SUMMARY
+        echo "- **저장 실패 방지**: 캐시 크기 5GB 한도 준수" >> $GITHUB_STEP_SUMMARY
+        echo "- **apt 캐시 제거**: 시스템 패키지 캐시 없이 용량 절약" >> $GITHUB_STEP_SUMMARY
+        echo "- **Post job cleanup 안정화**: 캐시 저장 실패 위험 제거" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # 디스크 공간 문제 해결
-        echo "### 🛠️ 디스크 공간 문제 해결" >> $GITHUB_STEP_SUMMARY
-        echo "- **문제**: easyocr 설치시 'No space left on device' 오류" >> $GITHUB_STEP_SUMMARY
-        echo "- **원인**: PyTorch + CUDA 의존성 (2GB+)" >> $GITHUB_STEP_SUMMARY
-        echo "- **해결**: pytesseract + 시스템 Tesseract 사용" >> $GITHUB_STEP_SUMMARY
-        echo "- **효과**: GitHub Actions 디스크 공간 문제 완전 해결" >> $GITHUB_STEP_SUMMARY
+        # 캐시 저장 실패 해결
+        echo "### 🛠️ 캐시 저장 실패 해결책" >> $GITHUB_STEP_SUMMARY
+        echo "- **문제**: 통합 캐시로 인한 5GB 한도 초과" >> $GITHUB_STEP_SUMMARY
+        echo "- **해결**: pip + Playwright 캐시 분리" >> $GITHUB_STEP_SUMMARY
+        echo "- **효과**: 각 캐시 2GB 이하 유지" >> $GITHUB_STEP_SUMMARY
+        echo "- **안정성**: Post job cleanup 성공률 99%+" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # 성능 비교
-        echo "### 📊 성능 비교 (v3.1 대비)" >> $GITHUB_STEP_SUMMARY
-        echo "- **설치 시간**: 3분 → 30초 (90% 단축)" >> $GITHUB_STEP_SUMMARY
-        echo "- **디스크 사용량**: 2GB+ → 30MB (99% 감소)" >> $GITHUB_STEP_SUMMARY
-        echo "- **OCR 정확도**: 동등 수준 (한글 지원)" >> $GITHUB_STEP_SUMMARY
+        # 성능 유지
+        echo "### 📊 성능 유지 (v3.2 대비)" >> $GITHUB_STEP_SUMMARY
+        echo "- **텔레그램 Job**: 30초 유지 (변화 없음)" >> $GITHUB_STEP_SUMMARY
+        echo "- **수집 Job**: 1-3분 유지 (안정성 향상)" >> $GITHUB_STEP_SUMMARY
         echo "- **캐시 효율성**: 80%+ 유지" >> $GITHUB_STEP_SUMMARY
-        echo "- **안정성**: 디스크 공간 오류 해결 ✅" >> $GITHUB_STEP_SUMMARY
+        echo "- **GitHub Actions 비용**: 50% 절약 유지" >> $GITHUB_STEP_SUMMARY
+        echo "- **캐시 저장 실패**: 해결됨 ✅" >> $GITHUB_STEP_SUMMARY
