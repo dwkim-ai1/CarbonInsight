@@ -62,12 +62,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
-          cache-dependency-path: 'requirements/requirements_NGMS.txt'
+          cache-dependency-path: 'requirements/requirements_allocation.txt'
       
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip  
-          pip install -r requirements/requirements_NGMS.txt
+          pip install -r requirements/requirements_allocation.txt
           playwright install chromium
           playwright install-deps chromium
       
