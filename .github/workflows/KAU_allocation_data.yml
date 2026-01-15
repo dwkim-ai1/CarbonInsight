@@ -65,8 +65,8 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements/requirements_allocation.txt
+          pip install --upgrade pip  
+          pip install -r requirements/requirements_NGMS.txt
           playwright install chromium
           playwright install-deps chromium
       
