@@ -632,16 +632,19 @@ jobs:
           echo "message=v3.2 수집 성공 (${DURATION}초)" >> $GITHUB_OUTPUT
           echo "extraction_methods=playwright_v3.2_optimized" >> $GITHUB_OUTPUT
           
-          # 최적화 통계 (환경변수로 전달받음)
-          OPTIMIZATION_STATS=$(echo $OPTIMIZATION_STATS_JSON 2>/dev/null || echo '{"added":0,"skipped":0,"efficiency":0}')
+          # 최적화 통계 (수집 스크립트가 생성한 실제 결과 사용)
+          OPTIMIZATION_STATS=$(cat /tmp/optimization_stats.json 2>/dev/null || echo '{"added":0,"skipped":0,"efficiency":0}')
           echo "optimization_stats=${OPTIMIZATION_STATS}" >> $GITHUB_OUTPUT
           
-          # KRX 시트 업데이트 상태
-          if [ "${IS_FINAL_SESSION}" = "true" ]; then
-            echo "krx_sheet_updated=true" >> $GITHUB_OUTPUT
+          # KRX 시트 업데이트 상태 (수집 스크립트의 실제 결과 사용)
+          KRX_SHEET_UPDATED=$(cat /tmp/krx_sheet_updated.txt 2>/dev/null || echo "false")
+          echo "krx_sheet_updated=${KRX_SHEET_UPDATED}" >> $GITHUB_OUTPUT
+          if [ "${KRX_SHEET_UPDATED}" = "true" ]; then
             echo "✅ KRX 시트 최종 요약 업데이트 완료"
+          elif [ "${IS_FINAL_SESSION}" = "true" ]; then
+            echo "⚠️ KRX 시트 최종 요약 업데이트 실패"
           else
-            echo "krx_sheet_updated=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ KRX 시트 최종 요약 대상 세션 아님"
           fi
           
           echo "✅ v3.2 데이터 수집 성공!"

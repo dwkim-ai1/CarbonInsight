@@ -43,6 +43,17 @@ import gspread
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def _write_github_action_output(name: str, value: str) -> None:
+    """Write a GitHub Actions step output when running in Actions."""
+    output_path = os.getenv('GITHUB_OUTPUT')
+    if not output_path:
+        return
+    try:
+        with open(output_path, 'a', encoding='utf-8') as f:
+            f.write(f'{name}={value}\n')
+    except Exception as e:
+        logger.warning(f"GitHub Actions output write failed ({name}): {e}")
+
 # PlaywrightKRXCollector 클래스는 기존과 동일하게 유지
 class PlaywrightKRXCollector:
     def __init__(self):
@@ -86,7 +97,7 @@ class PlaywrightKRXCollector:
                     'timeout': 60000, 
                     'wait_timeout': 45000,
                     'high_accuracy': True,
-                    'headless': False
+                    'headless': os.getenv('HEADLESS', 'true').lower() != 'false'
                 })
                 logger.info(f"🔥 {trading_phase} 모드 - 최고 정확도")
             elif trading_phase == 'real_time_trading_intensive':
@@ -719,14 +730,24 @@ async def main():
             if is_final_session:
                 logger.info("🎯 12:30 최종 세션 - KRX 시트 요약 업데이트")
                 krx_updated = sheets_manager.update_krx_final_summary(real_data)
+            krx_updated_value = 'true' if krx_updated else 'false'
+            _write_github_action_output('krx_sheet_updated', krx_updated_value)
+            try:
+                Path('/tmp/krx_sheet_updated.txt').write_text(krx_updated_value, encoding='utf-8')
+            except Exception as e:
+                logger.warning(f"KRX 시트 업데이트 상태 파일 저장 실패: {e}")
             
             if success:
                 total_volume = sum(item['volume'] for item in real_data)
                 active_items = len([item for item in real_data if item['volume'] > 0])
                 
                 # 최적화 통계를 환경변수로 전달 (GitHub Actions용)
-                optimization_json = json.dumps(optimization_stats)
-                print(f"::set-output name=optimization_stats::{optimization_json}")
+                optimization_json = json.dumps(optimization_stats, ensure_ascii=False)
+                _write_github_action_output('optimization_stats', optimization_json)
+                try:
+                    Path('/tmp/optimization_stats.json').write_text(optimization_json, encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"최적화 통계 파일 저장 실패: {e}")
                 
                 print(f"✅ 최적화된 데이터 수집 및 저장 성공!")
                 print(f"📊 총 종목: {len(real_data)}개")
