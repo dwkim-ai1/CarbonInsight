@@ -34,6 +34,8 @@ jobs:
           YEARS_BACK: ${{ inputs.years_back || '10' }}
           TEST_MODE: ${{ inputs.test_mode || 'false' }}
           DEBUG_MODE: ${{ inputs.debug_mode || 'false' }}
+          LLM_STRUCTURE_MODE: ${{ vars.LLM_STRUCTURE_MODE || 'true' }}
+          LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '120' }}
           GOOGLE_SHEETS_READ_REQUESTS_PER_MINUTE: ${{ vars.GOOGLE_SHEETS_READ_REQUESTS_PER_MINUTE || '45' }}
           GOOGLE_SHEETS_WRITE_REQUESTS_PER_MINUTE: ${{ vars.GOOGLE_SHEETS_WRITE_REQUESTS_PER_MINUTE || '30' }}
       - uses: actions/upload-artifact@v4
