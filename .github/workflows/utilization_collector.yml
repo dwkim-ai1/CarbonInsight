@@ -12,11 +12,14 @@ on:
       test_mode: {description: '저장 없는 dry-run', default: false, type: boolean}
       debug_mode: {description: '상세 로그와 실패 HTML', default: false, type: boolean}
       force_reprocess: {description: '기수집 데이터 재처리', default: false, type: boolean}
+      llm_per_report_mode: {description: '보고서마다 LLM 값 매핑', default: false, type: boolean}
+      company_offset: {description: '선택 대상 내 시작 기업 index(0-base)', default: '0', type: string}
+      company_limit: {description: '이번 실행 기업 수(0=전체)', default: '0', type: string}
       send_telegram: {description: '텔레그램 강제 전송', default: false, type: boolean}
 jobs:
   collect:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,10 +35,15 @@ jobs:
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           TARGET_SHARD: ${{ inputs.target_shard || 'all' }}
           YEARS_BACK: ${{ inputs.years_back || '10' }}
+          COMPANY_OFFSET: ${{ inputs.company_offset || '0' }}
+          COMPANY_LIMIT: ${{ inputs.company_limit || '0' }}
           TEST_MODE: ${{ inputs.test_mode || 'false' }}
           DEBUG_MODE: ${{ inputs.debug_mode || 'false' }}
           FORCE_REPROCESS: ${{ inputs.force_reprocess || 'false' }}
           LLM_STRUCTURE_MODE: ${{ vars.LLM_STRUCTURE_MODE || 'true' }}
+          LLM_PER_REPORT_MODE: ${{ inputs.llm_per_report_mode || 'false' }}
+          LLM_PER_REPORT_MAX_CALLS: ${{ vars.LLM_PER_REPORT_MAX_CALLS || '10000' }}
+          LLM_PER_REPORT_MAX_CALLS_PER_COMPANY: ${{ vars.LLM_PER_REPORT_MAX_CALLS_PER_COMPANY || '60' }}
           LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '240' }}
           LLM_MAX_CALLS_PER_COMPANY: ${{ vars.LLM_MAX_CALLS_PER_COMPANY || '1' }}
           LLM_VALUE_FALLBACK_MODE: ${{ vars.LLM_VALUE_FALLBACK_MODE || 'false' }}

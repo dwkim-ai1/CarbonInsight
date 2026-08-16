@@ -3,7 +3,7 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, row_quarter_label, rows_to_structured_updates
+from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, row_quarter_label, rows_to_structured_updates, selected_company_work, target_business_years
 
 
 class FakeQuota:
@@ -93,6 +93,19 @@ def test_row_period_maps_to_matching_quarter_not_report_quarter_only():
     assert row_quarter_label({"사업연도": "당기"}, "1Q26") == "1Q26"
     assert row_quarter_label({"사업연도": "전기"}, "1Q26") == "1Q25"
     assert row_quarter_label({"사업연도": "2024년 3분기"}, "1Q26") == "3Q24"
+
+
+def test_target_business_years_is_exact_count_including_current_year():
+    assert target_business_years(2026, 10) == list(range(2017, 2027))
+    assert target_business_years(2026, 1) == [2026]
+
+
+def test_selected_company_work_supports_offset_and_limit():
+    shards = {1: [{"name": "a"}, {"name": "b"}], 2: [{"name": "c"}]}
+
+    work = selected_company_work(shards, [1, 2], offset=1, limit=1)
+
+    assert work == [(1, {"name": "b"})]
 
 
 def test_selector_required_skips_unmatched_parser_rows():

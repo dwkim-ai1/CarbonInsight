@@ -60,6 +60,17 @@ Actions의 **DART utilization time-series collector**에서 Run workflow를 선�
 framework를 다시 생성합니다. 기본값에서는 기존 `_framework` JSON을 재사용하여 LLM 호출을
 기업당 최초 1회 수준으로 제한합니다.
 
+초기 백필처럼 정밀 매핑이 필요하면 `llm_per_report_mode=true`로 실행합니다. 이 모드는
+정기보고서 1건마다 `gemma4:31b-cloud`를 호출해 기존 framework row에 맞는 값만 큐에
+넣습니다. 새 row를 만들지 않으므로 먼저 framework가 필요하며, `_framework`가 없거나
+기존 구조를 버리고 다시 잡으려면 `force_reprocess=true`를 함께 사용합니다. 기본 호출
+상한은 전체 `10000`, 기업당 `60`이며 GitHub Actions Variables의
+`LLM_PER_REPORT_MAX_CALLS`, `LLM_PER_REPORT_MAX_CALLS_PER_COMPANY`로 조정할 수 있습니다.
+`years_back=10`은 현재 사업연도를 포함한 최근 10개 사업연도만 조회합니다.
+보고서별 LLM 모드는 오래 걸릴 수 있으므로 `target_shard=1`, `company_offset=0`,
+`company_limit=2`처럼 작은 기업 묶음부터 실행한 뒤 offset을 늘려 이어가는 방식을
+권장합니다.
+
 로컬 검증(실제 자격 증명 필요):
 
 ```bash

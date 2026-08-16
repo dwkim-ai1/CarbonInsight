@@ -48,6 +48,14 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_nonnegative_int(name: str, default: int = 0) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        LOG.warning("⚠️ %s 값이 정수가 아니어서 기본값 %d를 사용합니다.", name, default)
+        return default
+
+
 @dataclass
 class SheetsQuota:
     read_per_minute: int
@@ -198,6 +206,11 @@ def report_sort_key(report) -> tuple[int, int, str, str]:
         parts = quarter_parts(report_quarter_label(report, year))
         quarter = parts[0] if parts else 0
     return (year, quarter, str(report.get("rcept_dt", "")), str(report.get("rcept_no", "")))
+
+
+def target_business_years(now_year: int, years_back: int) -> list[int]:
+    years_back = max(1, int(years_back))
+    return list(range(now_year - years_back + 1, now_year + 1))
 
 
 def quarter_parts(label: str) -> tuple[int, int] | None:
@@ -368,6 +381,12 @@ def distribute(records: list[dict], columns: dict[str, str], sheet_ids: list[str
             except ValueError: shard = index // 20 + 1
         (shards[shard] if shard in shards else overflow).append(record)
     return shards, overflow
+
+
+def selected_company_work(shards: dict[int, list[dict]], selected: list[int] | range, offset: int = 0, limit: int = 0) -> list[tuple[int, dict]]:
+    work = [(shard, company) for shard in selected for company in shards[shard]]
+    end = offset + limit if limit else None
+    return work[offset:end]
 
 
 class SheetStore:
@@ -863,33 +882,49 @@ def main() -> int:
         LOG.error("❌ 시트 인증/초기화 완전 실패: %s", exc); return 1
     target = os.getenv("TARGET_SHARD", "all")
     selected = range(1, 11) if target == "all" else [int(target)]
-    years_back = int(os.getenv("YEARS_BACK", "10")); now_year = datetime.now(KST).year
+    years_back = env_int("YEARS_BACK", 10); now_year = datetime.now(KST).year
+    business_years = target_business_years(now_year, years_back)
     llm_max_calls = env_int("LLM_MAX_CALLS", 240)
     llm_max_calls_per_company = env_int("LLM_MAX_CALLS_PER_COMPANY", 1)
+    llm_per_report_max_calls = env_int("LLM_PER_REPORT_MAX_CALLS", 10000)
+    llm_per_report_max_calls_per_company = env_int("LLM_PER_REPORT_MAX_CALLS_PER_COMPANY", 60)
     llm_exception_max_calls = env_int("LLM_EXCEPTION_MAX_CALLS", 60)
     llm_exception_max_calls_per_company = env_int("LLM_EXCEPTION_MAX_CALLS_PER_COMPANY", 1)
     structure_mode = os.getenv("LLM_STRUCTURE_MODE", "true").lower() in {"1","true","yes"}
+    llm_per_report_mode = os.getenv("LLM_PER_REPORT_MODE", "false").lower() in {"1","true","yes"}
+    if llm_per_report_mode and not structure_mode:
+        LOG.warning("⚠️ LLM_PER_REPORT_MODE는 framework 구조가 필요하므로 LLM_STRUCTURE_MODE를 활성화합니다.")
+        structure_mode = True
     value_fallback_mode = os.getenv("LLM_VALUE_FALLBACK_MODE", "false").lower() in {"1","true","yes"}
     exception_fallback_mode = os.getenv("LLM_EXCEPTION_FALLBACK_MODE", "true").lower() in {"1","true","yes"}
     structured_requires_selectors = os.getenv("STRUCTURED_WRITES_REQUIRE_SELECTORS", "true").lower() in {"1","true","yes"}
+    if llm_per_report_mode and not structured_requires_selectors:
+        LOG.warning("⚠️ LLM_PER_REPORT_MODE에서는 framework 밖 row 생성을 막기 위해 STRUCTURED_WRITES_REQUIRE_SELECTORS를 활성화합니다.")
+        structured_requires_selectors = True
     append_raw_rows = os.getenv("APPEND_RAW_ROWS", "false").lower() in {"1","true","yes"}
     force_reprocess = env_bool("FORCE_REPROCESS")
-    LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
-             llm_max_calls, llm_max_calls_per_company, llm_exception_max_calls,
-             llm_exception_max_calls_per_company, structure_mode, value_fallback_mode,
+    LOG.info("📆 대상 사업연도: %s", ",".join(str(year) for year in business_years))
+    LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 보고서별=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 보고서별=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
+             llm_max_calls, llm_max_calls_per_company, llm_per_report_max_calls,
+             llm_per_report_max_calls_per_company, llm_exception_max_calls,
+             llm_exception_max_calls_per_company, structure_mode, llm_per_report_mode, value_fallback_mode,
              exception_fallback_mode, structured_requires_selectors, append_raw_rows)
-    successes = regular_llm_calls = exception_llm_calls = 0
+    successes = regular_llm_calls = per_report_llm_calls = exception_llm_calls = 0
     llm_company_counts: dict[str, int] = {}
+    llm_per_report_company_counts: dict[str, int] = {}
     llm_exception_company_counts: dict[str, int] = {}
     try:
         import OpenDartReader
         dart = OpenDartReader(os.environ["opendart_api"])
         parser = UtilizationParser()
-        total = sum(len(shards[n]) for n in selected)
-        position = 0
-        for shard in selected:
-            for company in shards[shard]:
-                position += 1; name = str(company.get(columns["기업명"], "")).strip()
+        company_offset = env_nonnegative_int("COMPANY_OFFSET", 0)
+        company_limit = env_nonnegative_int("COMPANY_LIMIT", 0)
+        company_work = selected_company_work(shards, selected, company_offset, company_limit)
+        if company_offset or company_limit:
+            LOG.info("🧩 기업 chunk: offset=%d, limit=%s, selected=%d", company_offset, company_limit or "all", len(company_work))
+        total = len(company_work)
+        for position, (shard, company) in enumerate(company_work, start=1):
+                name = str(company.get(columns["기업명"], "")).strip()
                 try:
                     corp, stock = resolve_company_codes(dart, company, columns)
                 except Exception as exc:
@@ -903,6 +938,7 @@ def main() -> int:
                 company_updates: list[dict] = []
                 legacy_rows: list[dict] = []
                 history_rows: list[list] = []
+                llm_structure_snapshot = None
                 if structure_mode and not force_reprocess:
                     saved_selectors = store.load_framework(framework_store, ws.title)
                     if saved_selectors:
@@ -910,8 +946,9 @@ def main() -> int:
                         if selectors != saved_selectors:
                             store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
                         framework_attempted = True
+                        llm_structure_snapshot = store.sheet_structure(ws)
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "framework_reused", f"{len(selectors)} selectors from JSON", ws.title))
-                for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
+                for report in reports(dart, corp, business_years):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     quarter = report_quarter_label(report, year)
                     try:
@@ -928,7 +965,36 @@ def main() -> int:
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
                             store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                            llm_structure_snapshot = store.sheet_structure(ws)
                             history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}; saved JSON", ws.title))
+                        if llm_per_report_mode:
+                            if not selectors:
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                         "llm_per_report_skipped",
+                                                                         "no framework selectors; skipped parser writes in per-report mode", ws.title))
+                                continue
+                            can_per_report_llm = can_use_llm(per_report_llm_calls, llm_per_report_max_calls,
+                                                             llm_per_report_company_counts, llm_key,
+                                                             llm_per_report_max_calls_per_company)
+                            if not can_per_report_llm:
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                         "llm_per_report_skipped",
+                                                                         "no OLLAMA_API_KEY or per-report budget exhausted", ws.title))
+                                continue
+                            llm_per_report_company_counts[llm_key] = llm_per_report_company_counts.get(llm_key, 0) + 1
+                            per_report_llm_calls += 1
+                            structure = call_structure(html, llm_structure_snapshot or store.sheet_structure(ws), quarter)
+                            if structure.updates:
+                                company_updates.extend(structure.updates)
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                         f"llm_per_report_{structure.status}",
+                                                                         f"{len(structure.updates)} cells queued via {MODEL}", ws.title))
+                                successes += 1
+                            else:
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                         f"llm_per_report_{structure.status}",
+                                                                         f"0 cells via {MODEL}", ws.title))
+                            continue
                         updates = []
                         if rows:
                             updates = rows_to_structured_updates(rows, quarter, selectors, structured_requires_selectors and structure_mode)
@@ -984,7 +1050,7 @@ def main() -> int:
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
                 if company_updates:
                     try:
-                        applied = store.apply_structured_updates(ws, company_updates, allow_new_rows=not (structured_requires_selectors and structure_mode))
+                        applied = store.apply_structured_updates(ws, company_updates, allow_new_rows=not ((structured_requires_selectors and structure_mode) or llm_per_report_mode))
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_write", f"{applied} cells from {len(company_updates)} queued updates", ws.title))
                         LOG.info("✅ %s batch structured write: %d cells", name, applied)
                     except Exception as exc:
@@ -1002,8 +1068,9 @@ def main() -> int:
                     store.record_history_rows(ledger, history_rows)
                 except Exception as exc:
                     LOG.warning("⚠️ 장부 batch write 실패 %s: %s", name, exc)
-        LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d (일반=%d, 예외=%d)",
-                 successes, regular_llm_calls + exception_llm_calls, regular_llm_calls, exception_llm_calls)
+        LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d (일반=%d, 보고서별=%d, 예외=%d)",
+                 successes, regular_llm_calls + per_report_llm_calls + exception_llm_calls,
+                 regular_llm_calls, per_report_llm_calls, exception_llm_calls)
         return 0 if successes or env_bool("TEST_MODE") else 1
     except Exception as exc:
         LOG.error("❌ OpenDART 완전 실패: %s", exc); return 1
