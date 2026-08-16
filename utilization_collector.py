@@ -19,6 +19,7 @@ from utilization_parser import UtilizationParser
 LOG = logging.getLogger("utilization")
 KST = timezone(timedelta(hours=9))
 REQUIRED = ["기업명","종목코드","corp_code","사업연도","사업부문","품목","사업소","생산능력","생산실적","가동률(%)","단위","산출식","보고서명","접수번호(rcept_no)","DART URL","수집일시","원본표(JSON)"]
+LEDGER_HEADERS = ["timestamp","기업명","종목코드","corp_code","사업연도","접수번호","상태","메시지","출력시트"]
 ALIASES = {
     "기업명": ("기업명","회사명","법인명","corp_name","company"),
     "종목코드": ("종목코드","상장코드","stock_code","stock code","ticker","티커","종목번호"),
@@ -27,8 +28,7 @@ ALIASES = {
     "sheet_id": ("Gspread_ID","gspread_id","gspread id","sheet_id","spreadsheet_id"),
 }
 INVALID_SHEET_TITLE_CHARS = re.compile(r"[\\/?*\[\]:]")
-HISTORY_SHEET_TITLE = "_처리이력"
-LEGACY_OUTPUT_SHEET_TITLE = "가동률"
+LEDGER_SHEET_TITLE = "가동률"
 
 
 def env_bool(name: str) -> bool: return os.getenv(name, "false").lower() in {"1","true","yes"}
@@ -175,6 +175,7 @@ class SheetStore:
         self.gc, self.ids, self.quota, self.test_mode = gc, sheet_ids, quota, test_mode
         self.headers = list(REQUIRED)
         self.next_rows: dict[int, int] = {}
+        self.ledger_next_rows: dict[int, int] = {}
         LOG.info("✅ 출력 스키마 준비: 헤더=%s", self.headers)
 
     def _find_worksheet(self, worksheets, title: str):
@@ -183,13 +184,13 @@ class SheetStore:
     def _template_worksheet(self, worksheets):
         for ws in worksheets:
             title = ws.title.strip()
-            if title.startswith("_") or title == LEGACY_OUTPUT_SHEET_TITLE:
+            if title.startswith("_") or title == LEDGER_SHEET_TITLE:
                 continue
             if re.fullmatch(r"\d{6}", title):
                 return ws
         for ws in worksheets:
             title = ws.title.strip()
-            if title and not title.startswith("_") and title != LEGACY_OUTPUT_SHEET_TITLE:
+            if title and not title.startswith("_") and title != LEDGER_SHEET_TITLE:
                 return ws
         return None
 
@@ -213,6 +214,28 @@ class SheetStore:
         else:
             self.next_rows[key] = max(len(values) + 1, header_row + 1)
 
+    def _ensure_ledger(self, ledger):
+        if ledger is None:
+            return
+        key = ledger.id
+        if key in self.ledger_next_rows:
+            return
+        self.quota.read(); values = ledger.get_all_values()
+        header_row = None
+        for index, row_values in enumerate(values, start=1):
+            if row_values[:len(LEDGER_HEADERS)] == LEDGER_HEADERS:
+                header_row = index
+                break
+        if header_row is None:
+            next_row = len(values) + 1 if values else 1
+            if self.test_mode:
+                LOG.info("DRY-RUN %s!A%d에 장부 헤더 작성 예정", ledger.title, next_row)
+            else:
+                self.quota.write(); ledger.update(f"A{next_row}", [LEDGER_HEADERS])
+            self.ledger_next_rows[key] = next_row + 1
+        else:
+            self.ledger_next_rows[key] = max(len(values) + 1, header_row + 1)
+
     def setup(self, shard: int, company: str, stock: str):
         self.quota.read(); book = self.gc.open_by_key(self.ids[shard - 1])
         title = safe_sheet_title(company, stock)
@@ -231,16 +254,16 @@ class SheetStore:
                 self.quota.write(); ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
                 LOG.info("📄 회사별 빈 시트 생성: %s", title)
         self._ensure_data_table(ws)
-        try:
-            self.quota.read(); history = book.worksheet(HISTORY_SHEET_TITLE)
-        except gspread.WorksheetNotFound:
+        ledger = self._find_worksheet(worksheets, LEDGER_SHEET_TITLE)
+        if ledger is None:
             if self.test_mode:
-                history = None
-                LOG.info("DRY-RUN %s 시트 생성 예정", HISTORY_SHEET_TITLE)
+                ledger = None
+                LOG.info("DRY-RUN %s 장부 시트 생성 예정", LEDGER_SHEET_TITLE)
             else:
-                self.quota.write(); history = book.add_worksheet(HISTORY_SHEET_TITLE, rows=2000, cols=6)
-                self.quota.write(); history.update("A1", [["timestamp","기업명","사업연도","접수번호","상태","메시지"]])
-        return ws, history
+                self.quota.write(); ledger = book.add_worksheet(LEDGER_SHEET_TITLE, rows=2000, cols=max(9, len(LEDGER_HEADERS)))
+                LOG.info("📒 장부 시트 생성: %s", LEDGER_SHEET_TITLE)
+        self._ensure_ledger(ledger)
+        return ws, ledger
 
     def append(self, ws, row):
         values = [row.get(header, "") for header in self.headers]
@@ -253,6 +276,18 @@ class SheetStore:
         else:
             self.quota.write(); ws.update(f"A{row_index}", [values], value_input_option="USER_ENTERED")
         self.next_rows[ws.id] = row_index + 1
+
+    def record_history(self, ledger, company: str, stock: str, corp: str, year: int, rcept: str, status: str, message: str, output_sheet: str):
+        values = [datetime.now(KST).isoformat(), company, stock, corp, year, rcept, status, message[:500], output_sheet]
+        if ledger is None or self.test_mode:
+            LOG.info("DRY-RUN 장부 기록 %s", dict(zip(LEDGER_HEADERS, values)))
+            return
+        row_index = self.ledger_next_rows.get(ledger.id)
+        if row_index is None:
+            self._ensure_ledger(ledger)
+            row_index = self.ledger_next_rows[ledger.id]
+        self.quota.write(); ledger.update(f"A{row_index}", [values], value_input_option="USER_ENTERED")
+        self.ledger_next_rows[ledger.id] = row_index + 1
 
 
 def reports(dart, corp_code: str, years: list[int]):
@@ -307,7 +342,7 @@ def main() -> int:
                     LOG.warning("⚠️ 기업 코드 매핑 실패 %s: %s", name, exc)
                     continue
                 LOG.info("[%d/%d] %s 처리 중…", position, total, name)
-                ws, history = store.setup(shard, name, stock)
+                ws, ledger = store.setup(shard, name, stock)
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     try:
@@ -324,9 +359,12 @@ def main() -> int:
                         for row in rows:
                             row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
                             store.append(ws, row)
+                        status = "success" if rows else "no_rows"
+                        store.record_history(ledger, name, stock, corp, year, rcept, status, f"{len(rows)} rows", ws.title)
                         successes += bool(rows)
                     except Exception as exc:
                         LOG.warning("⚠️ 부분 실패 %s/%s: %s", name, rcept, exc)
+                        store.record_history(ledger, name, stock, corp, year, rcept, "failure", str(exc), ws.title)
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
         LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d", successes, llm_calls)
         return 0 if successes or env_bool("TEST_MODE") else 1
