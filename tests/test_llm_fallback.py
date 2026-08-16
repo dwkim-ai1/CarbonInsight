@@ -1,5 +1,5 @@
 from unittest.mock import Mock
-from utilization_llm_fallback import call_fallback, validate_framework_response, validate_response, validate_structure_response
+from utilization_llm_fallback import call_fallback, call_structure, validate_framework_response, validate_response, validate_structure_response
 
 HTML = "<table><tr><td>2024</td><td>85.3</td><td>1,000</td></tr></table>"
 STRUCTURE = {
@@ -56,6 +56,18 @@ def test_structure_response_resets_unknown_row_for_new_structure_row():
     assert result.status == "success"
     assert result.updates[0]["target_row"] is None
     assert result.updates[0]["section"] == "생산실적"
+
+
+def test_call_structure_uses_backfill_prompt_when_new_rows_allowed():
+    client = Mock()
+    client.chat.return_value = {"message": {"content": '[{"section":"가동률","item":"MDF","quarter":"1Q26","value":"85.3","confidence":"high"}]'}}
+    result = call_structure(HTML, {"quarters": [{"col": 6, "label": "1Q26"}], "rows": []}, "1Q26",
+                            client=client, sleep=lambda _: None, allow_new_rows=True)
+
+    prompt = client.chat.call_args.kwargs["messages"][1]["content"]
+    assert "새 구조 행을 만들 수 있게" in prompt
+    assert result.status == "success"
+    assert result.updates[0]["target_row"] is None
 
 
 def test_framework_response_creates_reusable_selectors_without_values():

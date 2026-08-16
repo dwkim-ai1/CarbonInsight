@@ -42,8 +42,11 @@ jobs:
           FORCE_REPROCESS: ${{ inputs.force_reprocess || 'false' }}
           LLM_STRUCTURE_MODE: ${{ vars.LLM_STRUCTURE_MODE || 'true' }}
           LLM_PER_REPORT_MODE: ${{ inputs.llm_per_report_mode || 'false' }}
+          LLM_PER_REPORT_ALLOW_NEW_ROWS: ${{ vars.LLM_PER_REPORT_ALLOW_NEW_ROWS || 'true' }}
           LLM_PER_REPORT_MAX_CALLS: ${{ vars.LLM_PER_REPORT_MAX_CALLS || '10000' }}
           LLM_PER_REPORT_MAX_CALLS_PER_COMPANY: ${{ vars.LLM_PER_REPORT_MAX_CALLS_PER_COMPANY || '60' }}
+          LLM_FRAMEWORK_MAX_CALLS: ${{ vars.LLM_FRAMEWORK_MAX_CALLS || '1000' }}
+          LLM_FRAMEWORK_MAX_CALLS_PER_COMPANY: ${{ vars.LLM_FRAMEWORK_MAX_CALLS_PER_COMPANY || '5' }}
           LLM_MAX_CALLS: ${{ vars.LLM_MAX_CALLS || '240' }}
           LLM_MAX_CALLS_PER_COMPANY: ${{ vars.LLM_MAX_CALLS_PER_COMPANY || '1' }}
           LLM_VALUE_FALLBACK_MODE: ${{ vars.LLM_VALUE_FALLBACK_MODE || 'false' }}

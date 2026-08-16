@@ -32,6 +32,25 @@ STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조
 <SHEET_STRUCTURE>{sheet_structure}</SHEET_STRUCTURE>
 DART HTML:
 <TABLE_HTML>{html}</TABLE_HTML>'''
+BACKFILL_STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조를 비교해서 대상 분기 셀에 쓸 업데이트만 JSON 배열로 반환하라.
+
+규칙:
+- 설명 없이 JSON 배열만 반환한다.
+- 값은 DART 원문에 있는 숫자/문자열만 사용한다. 계산하거나 추정하지 않는다.
+- 기존 시트 row와 맞으면 target_row를 넣는다.
+- 맞는 행이 없으면 target_row는 null로 두고 section/division/item/site/unit/source_label을 채워 새 구조 행을 만들 수 있게 한다.
+- section은 생산능력, 생산실적, 가동률, 가동가능시간, 실제가동시간, 평균가동률 등 원문/시트의 상위 항목을 쓴다.
+- quarter는 원문 기간이 명확하면 해당 분기(예: 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
+- confidence는 high, medium, low 중 하나다.
+
+스키마:
+[{"target_row":null,"section":"생산능력","division":null,"item":null,"site":null,"unit":null,"quarter":"{quarter}","value":null,"source_label":null,"confidence":"low"}]
+
+대상 분기: {quarter}
+현재 시트 구조 JSON:
+<SHEET_STRUCTURE>{sheet_structure}</SHEET_STRUCTURE>
+DART HTML:
+<TABLE_HTML>{html}</TABLE_HTML>'''
 FRAMEWORK_SYSTEM_PROMPT = "너는 DART 생산능력/생산실적/가동률 표와 회사별 Google Sheet를 비교해서 반복 사용 가능한 selector 프레임워크를 만드는 설계자다. 숫자 값은 추출하지 말고 행 구조와 매칭 규칙만 반환하라."
 FRAMEWORK_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조를 비교해서 이후 parser가 값을 채울 때 사용할 selector 프레임워크만 JSON 배열로 반환하라.
 
@@ -273,12 +292,13 @@ def call_fallback(html: str, client=None, retries: int = 2, sleep=time.sleep) ->
     return FallbackResult([], "llm_error")
 
 
-def call_structure(html: str, sheet_structure: dict, quarter: str, client=None, retries: int = 2, sleep=time.sleep) -> StructureResult:
+def call_structure(html: str, sheet_structure: dict, quarter: str, client=None, retries: int = 2, sleep=time.sleep, allow_new_rows: bool = False) -> StructureResult:
     if client is None:
         client = _client()
         if client is None: return StructureResult([], "llm_disabled")
     structure_json = json.dumps(sheet_structure, ensure_ascii=False, separators=(",", ":"))[:7000]
-    prompt = (STRUCTURE_USER_PROMPT
+    prompt_template = BACKFILL_STRUCTURE_USER_PROMPT if allow_new_rows else STRUCTURE_USER_PROMPT
+    prompt = (prompt_template
               .replace("{quarter}", quarter)
               .replace("{sheet_structure}", structure_json)
               .replace("{html}", str(html)[:12000]))
