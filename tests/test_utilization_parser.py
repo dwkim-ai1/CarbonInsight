@@ -15,3 +15,17 @@ def test_textual_rate_only_after_tables_fail():
 
 def test_no_sample_data_on_failure():
     assert UtilizationParser().parse("<table><tr><td>자료없음</td></tr></table>") == []
+
+def test_diagnostics_flags_changed_table_structure_for_llm():
+    html = "<table><tr><th>구분</th><th>1Q26</th></tr><tr><td>평균가동률</td><td>87%</td></tr></table>"
+    result = UtilizationParser().parse_with_diagnostics(html, 2026)
+    assert result.rows == []
+    assert result.status == "table_structure_changed"
+    assert result.needs_llm
+
+def test_diagnostics_flags_parseable_header_without_numbers_for_llm():
+    html = "<table><tr><th>품목</th><th>가동률</th></tr><tr><td>MDF</td><td>해당사항 없음</td></tr></table>"
+    result = UtilizationParser().parse_with_diagnostics(html, 2026)
+    assert result.rows == []
+    assert result.status == "no_numeric_rows"
+    assert result.needs_llm

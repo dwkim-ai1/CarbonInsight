@@ -13,7 +13,7 @@ from pathlib import Path
 
 import gspread
 
-from utilization_llm_fallback import MODEL, call_fallback, call_framework
+from utilization_llm_fallback import MODEL, call_fallback, call_framework, call_structure
 from utilization_parser import UtilizationParser
 
 LOG = logging.getLogger("utilization")
@@ -232,6 +232,10 @@ def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[d
                 "confidence": "high",
             })
     return updates
+
+
+def can_use_llm(call_count: int, max_calls: int, company_counts: dict[str, int], company_key: str, max_per_company: int) -> bool:
+    return bool(os.getenv("OLLAMA_API_KEY") and call_count < max_calls and company_counts.get(company_key, 0) < max_per_company)
 
 
 def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
@@ -544,11 +548,17 @@ def main() -> int:
     years_back = int(os.getenv("YEARS_BACK", "10")); now_year = datetime.now(KST).year
     llm_max_calls = env_int("LLM_MAX_CALLS", 240)
     llm_max_calls_per_company = env_int("LLM_MAX_CALLS_PER_COMPANY", 1)
+    llm_exception_max_calls = env_int("LLM_EXCEPTION_MAX_CALLS", 60)
+    llm_exception_max_calls_per_company = env_int("LLM_EXCEPTION_MAX_CALLS_PER_COMPANY", 1)
     structure_mode = os.getenv("LLM_STRUCTURE_MODE", "true").lower() in {"1","true","yes"}
     value_fallback_mode = os.getenv("LLM_VALUE_FALLBACK_MODE", "false").lower() in {"1","true","yes"}
-    LOG.info("🤖 LLM 호출 상한: 전체=%d, 기업당=%d, 프레임워크=%s, 값 fallback=%s", llm_max_calls, llm_max_calls_per_company, structure_mode, value_fallback_mode)
-    successes = llm_calls = 0
+    exception_fallback_mode = os.getenv("LLM_EXCEPTION_FALLBACK_MODE", "true").lower() in {"1","true","yes"}
+    LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 값 fallback=%s, 예외 fallback=%s",
+             llm_max_calls, llm_max_calls_per_company, llm_exception_max_calls,
+             llm_exception_max_calls_per_company, structure_mode, value_fallback_mode, exception_fallback_mode)
+    successes = regular_llm_calls = exception_llm_calls = 0
     llm_company_counts: dict[str, int] = {}
+    llm_exception_company_counts: dict[str, int] = {}
     try:
         import OpenDartReader
         dart = OpenDartReader(os.environ["opendart_api"])
@@ -573,16 +583,20 @@ def main() -> int:
                     quarter = report_quarter_label(report, year)
                     try:
                         html = dart.document(rcept)
-                        rows = parser.parse(html, year)
-                        can_llm = (os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls
-                                   and llm_company_counts.get(llm_key, 0) < llm_max_calls_per_company)
+                        parse_result = parser.parse_with_diagnostics(html, year)
+                        rows = parse_result.rows
+                        if parse_result.status != "success":
+                            LOG.warning("⚠️ parser signal %s/%s: %s (%s)", name, rcept, parse_result.status, parse_result.message)
+                        can_llm = can_use_llm(regular_llm_calls, llm_max_calls, llm_company_counts, llm_key, llm_max_calls_per_company)
                         if structure_mode and not framework_attempted and can_llm:
                             framework_attempted = True
-                            llm_calls += 1
+                            regular_llm_calls += 1
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
                             store.record_history(ledger, name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title)
+                        applied = 0
+                        mapping_miss = False
                         if rows:
                             updates = rows_to_structured_updates(rows, quarter, selectors)
                             applied = store.apply_structured_updates(ws, updates)
@@ -590,11 +604,30 @@ def main() -> int:
                                 store.record_history(ledger, name, stock, corp, year, rcept, "structured_parser", f"{applied} cells from deterministic parser", ws.title)
                                 successes += 1
                                 continue
-                        can_llm = (os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls
-                                   and llm_company_counts.get(llm_key, 0) < llm_max_calls_per_company)
+                            mapping_miss = bool(updates)
+                        can_exception_llm = can_use_llm(exception_llm_calls, llm_exception_max_calls, llm_exception_company_counts,
+                                                        llm_key, llm_exception_max_calls_per_company)
+                        if exception_fallback_mode and (parse_result.needs_llm or mapping_miss) and can_exception_llm:
+                            llm_exception_company_counts[llm_key] = llm_exception_company_counts.get(llm_key, 0) + 1
+                            exception_llm_calls += 1
+                            reason = parse_result.status if parse_result.needs_llm else "parser_mapping_miss"
+                            structure = call_structure(html, store.sheet_structure(ws), quarter)
+                            applied = store.apply_structured_updates(ws, structure.updates)
+                            store.record_history(ledger, name, stock, corp, year, rcept,
+                                                 f"llm_exception_{structure.status}",
+                                                 f"{reason}; {applied} cells via {MODEL}", ws.title)
+                            if applied:
+                                successes += 1
+                                continue
+                        elif exception_fallback_mode and (parse_result.needs_llm or mapping_miss):
+                            reason = parse_result.status if parse_result.needs_llm else "parser_mapping_miss"
+                            store.record_history(ledger, name, stock, corp, year, rcept,
+                                                 "llm_exception_skipped",
+                                                 f"{reason}; no OLLAMA_API_KEY or exception budget exhausted", ws.title)
+                        can_llm = can_use_llm(regular_llm_calls, llm_max_calls, llm_company_counts, llm_key, llm_max_calls_per_company)
                         if value_fallback_mode and not rows and can_llm:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
-                            llm_calls += 1; fallback = call_fallback(html)
+                            regular_llm_calls += 1; fallback = call_fallback(html)
                             rows = fallback.rows
                             for row in rows:
                                 row["가동률(%)"] = row.pop("가동률", None)
@@ -605,13 +638,14 @@ def main() -> int:
                             row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"사업연도":row.get("사업연도") or year,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
                             store.append(ws, row)
                         status = "success" if rows else "no_rows"
-                        store.record_history(ledger, name, stock, corp, year, rcept, status, f"{len(rows)} rows", ws.title)
+                        store.record_history(ledger, name, stock, corp, year, rcept, status, f"{len(rows)} rows; parser={parse_result.status}", ws.title)
                         successes += bool(rows)
                     except Exception as exc:
                         LOG.warning("⚠️ 부분 실패 %s/%s: %s", name, rcept, exc)
                         store.record_history(ledger, name, stock, corp, year, rcept, "failure", str(exc), ws.title)
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
-        LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d", successes, llm_calls)
+        LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d (일반=%d, 예외=%d)",
+                 successes, regular_llm_calls + exception_llm_calls, regular_llm_calls, exception_llm_calls)
         return 0 if successes or env_bool("TEST_MODE") else 1
     except Exception as exc:
         LOG.error("❌ OpenDART 완전 실패: %s", exc); return 1
