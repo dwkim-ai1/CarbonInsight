@@ -13,7 +13,9 @@ def main():
     text = (f"{icon} DART 가동률 수집 {'완료' if status == 'success' else '실패'}\n━━━━━━━━━━━━━━━━━━\n"
             f"⏰ {datetime.now(timezone(timedelta(hours=9))):%Y-%m-%d %H:%M} KST\n📊 대상: {total}개 기업\n"
             f"🆕 신규 데이터: {new_rows}행\n❌ 실패: {failed}개\n🤖 LLM 호출: {os.getenv('LLM_CALLS','0')}회\n🔗 로그: {os.getenv('GITHUB_RUN_URL','')}")
-    response = requests.post(f"https://api.telegram.org/{os.environ['CARBON_TOKEN']}/sendMessage",
+    token = os.environ["CARBON_TOKEN"].strip()
+    bot_path = token if token.startswith("bot") else f"bot{token}"
+    response = requests.post(f"https://api.telegram.org/{bot_path}/sendMessage",
                              json={"chat_id": os.environ["ESG_TESTER"], "text": text}, timeout=15)
     response.raise_for_status(); return 0
 
