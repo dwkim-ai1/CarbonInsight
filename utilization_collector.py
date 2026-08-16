@@ -439,9 +439,17 @@ class SheetStore:
         return best_row if best_score >= 5 else None
 
     def _structure_labels(self, update: dict) -> list[str]:
-        return [str(update.get("section", "") or ""), str(update.get("division", "") or ""),
-                str(update.get("item", "") or ""), str(update.get("site", "") or ""),
-                str(update.get("unit", "") or "")]
+        section = str(update.get("section", "") or "")
+        division = str(update.get("division", "") or "")
+        item = str(update.get("item", "") or "")
+        site = str(update.get("site", "") or "")
+        unit = str(update.get("unit", "") or "")
+        aliases = update.get("source_aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not any([item, site, unit]) and (section or division):
+            item = str(update.get("source_label") or next((alias for alias in aliases if alias), "") or division or section)
+        return [section, division, item, site, unit]
 
     def _insert_structure_rows(self, ws, structure: dict, labels_list: list[list[str]], insert_at: int | None = None) -> list[int]:
         if not labels_list:

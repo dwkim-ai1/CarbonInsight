@@ -49,3 +49,14 @@ def test_structured_updates_use_single_batch_update_for_cells():
     assert [call[0] for call in ws.calls] == ["insert_row", "batch_update"]
     batch = ws.calls[1][1][0]
     assert batch == [{"range": "F2", "values": [["87"]]}, {"range": "F3", "values": [["91"]]}]
+
+
+def test_section_only_update_inserts_data_row_not_header_row():
+    ws = FakeWorksheet()
+    store = SheetStore(None, ["dummy"], FakeQuota())
+    store.apply_structured_updates(ws, [
+        {"section": "가동률", "quarter": "1Q26", "value": "87", "source_label": "평균가동률"},
+    ])
+
+    assert ws.calls[0][0] == "insert_row"
+    assert ws.calls[0][1][0] == ["가동률", "", "평균가동률", "", ""]
