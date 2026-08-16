@@ -18,10 +18,56 @@ from utilization_parser import UtilizationParser
 LOG = logging.getLogger("utilization")
 KST = timezone(timedelta(hours=9))
 REQUIRED = ["기업명","종목코드","corp_code","사업연도","사업부문","품목","사업소","생산능력","생산실적","가동률(%)","단위","산출식","보고서명","접수번호(rcept_no)","DART URL","수집일시","원본표(JSON)"]
-ALIASES = {"기업명": ("기업명","회사명","법인명"), "종목코드": ("종목코드","stock_code","종목번호"), "corp_code": ("corp_code","고유번호","법인코드"), "bucket": ("그룹","묶음","bucket")}
+ALIASES = {
+    "기업명": ("기업명","회사명","법인명","corp_name","company"),
+    "종목코드": ("종목코드","상장코드","stock_code","stock code","ticker","티커","종목번호"),
+    "corp_code": ("corp_code","고유번호","법인코드","dart_corp_code","DART고유번호"),
+    "bucket": ("그룹","묶음","bucket","shard"),
+    "sheet_id": ("Gspread_ID","gspread_id","gspread id","sheet_id","spreadsheet_id"),
+}
 
 
 def env_bool(name: str) -> bool: return os.getenv(name, "false").lower() in {"1","true","yes"}
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        LOG.warning("⚠️ %s 값이 정수가 아니어서 기본값 %d를 사용합니다.", name, default)
+        return default
+
+
+@dataclass
+class SheetsQuota:
+    read_per_minute: int
+    write_per_minute: int
+    last_read: float = 0.0
+    last_write: float = 0.0
+
+    @classmethod
+    def from_env(cls) -> "SheetsQuota":
+        quota = cls(
+            env_int("GOOGLE_SHEETS_READ_REQUESTS_PER_MINUTE", 45),
+            env_int("GOOGLE_SHEETS_WRITE_REQUESTS_PER_MINUTE", 30),
+        )
+        LOG.info("📉 Google Sheets quota throttle: read=%d/min, write=%d/min", quota.read_per_minute, quota.write_per_minute)
+        return quota
+
+    def read(self):
+        self._wait("read")
+
+    def write(self):
+        self._wait("write")
+
+    def _wait(self, kind: str):
+        per_minute = self.read_per_minute if kind == "read" else self.write_per_minute
+        delay = 60.0 / per_minute
+        attr = "last_read" if kind == "read" else "last_write"
+        elapsed = time.monotonic() - getattr(self, attr)
+        if elapsed < delay:
+            time.sleep(delay - elapsed)
+        setattr(self, attr, time.monotonic())
 
 
 def credentials():
@@ -52,51 +98,102 @@ def load_sheet_ids() -> list[str]:
 
 def detect_columns(headers: list[str]) -> dict[str, str]:
     found = {}
+    lowered = {str(header).strip().lower(): header for header in headers}
     for canonical, candidates in ALIASES.items():
-        match = next((h for h in headers if h.strip().lower() in {c.lower() for c in candidates}), None)
+        match = next((lowered.get(candidate.lower()) for candidate in candidates if candidate.lower() in lowered), None)
         if match: found[canonical] = match
-    missing = {"기업명","종목코드","corp_code"} - found.keys()
-    if missing: raise ValueError(f"기업 목록 헤더 매핑 실패: {sorted(missing)}; 실제 헤더={headers}")
+    missing = []
+    if "기업명" not in found: missing.append("기업명/회사명")
+    if "corp_code" not in found and "종목코드" not in found: missing.append("corp_code 또는 종목코드/상장코드")
+    if missing: raise ValueError(f"기업 목록 헤더 매핑 실패: {missing}; 실제 헤더={headers}")
     return found
 
 
-def distribute(records: list[dict], columns: dict[str, str]) -> tuple[dict[int, list[dict]], list[dict]]:
+def normalize_number(value, width: int) -> str:
+    text = str(value or "").strip().replace("'", "")
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text.zfill(width) if text.isdigit() else text
+
+
+def stock_code(record: dict, columns: dict[str, str]) -> str:
+    column = columns.get("종목코드")
+    return normalize_number(record.get(column, ""), 6) if column else ""
+
+
+def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
+    name = str(record.get(columns["기업명"], "")).strip()
+    stock = stock_code(record, columns)
+    corp_column = columns.get("corp_code")
+    if corp_column:
+        corp = normalize_number(record.get(corp_column, ""), 8)
+        if corp:
+            return corp, stock
+    lookup = stock or name
+    corp = dart.find_corp_code(lookup) if lookup else ""
+    if not corp and name and lookup != name:
+        corp = dart.find_corp_code(name)
+    if not corp:
+        raise ValueError(f"DART corp_code 조회 실패: 회사명={name}, lookup={lookup}")
+    return str(corp).zfill(8), stock
+
+
+def distribute(records: list[dict], columns: dict[str, str], sheet_ids: list[str]) -> tuple[dict[int, list[dict]], list[dict]]:
     shards = {i: [] for i in range(1, 11)}
     overflow = []
+    sheet_column = columns.get("sheet_id")
+    sheet_to_shard = {sheet_id: index for index, sheet_id in enumerate(sheet_ids, start=1)}
     for index, record in enumerate(records):
-        raw = record.get(columns.get("bucket", ""), "")
-        try: shard = int(raw) if raw != "" else index // 20 + 1
-        except ValueError: shard = index // 20 + 1
+        shard = None
+        if sheet_column:
+            sheet_id = str(record.get(sheet_column, "")).strip()
+            if sheet_id:
+                shard = sheet_to_shard.get(sheet_id)
+                if shard is None:
+                    overflow.append(record)
+                    continue
+        if shard is None:
+            raw = record.get(columns.get("bucket", ""), "")
+            try: shard = int(raw) if raw != "" else index // 20 + 1
+            except ValueError: shard = index // 20 + 1
         (shards[shard] if shard in shards else overflow).append(record)
     return shards, overflow
 
 
 class SheetStore:
-    def __init__(self, gc, sheet_ids: list[str], test_mode=False):
-        self.gc, self.ids, self.test_mode = gc, sheet_ids, test_mode
-        standard = gc.open_by_key(sheet_ids[8])
+    def __init__(self, gc, sheet_ids: list[str], quota: SheetsQuota, test_mode=False):
+        self.gc, self.ids, self.quota, self.test_mode = gc, sheet_ids, quota, test_mode
+        self.quota.read(); standard = gc.open_by_key(sheet_ids[8])
         first = standard.get_worksheet(0)
-        existing = first.row_values(1)
+        self.quota.read(); existing = first.row_values(1)
+        self.quota.read(); worksheets = standard.worksheets()
         self.headers = existing + [h for h in REQUIRED if h not in existing]
-        self.mode = "B" if len(standard.worksheets()) == 1 and "기업명" in self.headers else "A"
+        self.mode = "B" if len(worksheets) == 1 and "기업명" in self.headers else "A"
         LOG.info("✅ 표준 스키마 감지: 방식 %s, 헤더=%s", self.mode, self.headers)
 
     def setup(self, shard: int, company: str):
-        book = self.gc.open_by_key(self.ids[shard - 1])
+        self.quota.read(); book = self.gc.open_by_key(self.ids[shard - 1])
         title = "가동률" if self.mode == "B" else company[:90]
-        try: ws = book.worksheet(title)
-        except gspread.WorksheetNotFound: ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
-        if ws.row_values(1) != self.headers and not self.test_mode: ws.update("A1", [self.headers])
-        try: history = book.worksheet("_처리이력")
+        try:
+            self.quota.read(); ws = book.worksheet(title)
         except gspread.WorksheetNotFound:
-            history = book.add_worksheet("_처리이력", rows=2000, cols=6)
-            if not self.test_mode: history.update("A1", [["timestamp","기업명","사업연도","접수번호","상태","메시지"]])
+            self.quota.write(); ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
+        self.quota.read(); current_headers = ws.row_values(1)
+        if current_headers != self.headers and not self.test_mode:
+            self.quota.write(); ws.update("A1", [self.headers])
+        try:
+            self.quota.read(); history = book.worksheet("_처리이력")
+        except gspread.WorksheetNotFound:
+            self.quota.write(); history = book.add_worksheet("_처리이력", rows=2000, cols=6)
+            if not self.test_mode:
+                self.quota.write(); history.update("A1", [["timestamp","기업명","사업연도","접수번호","상태","메시지"]])
         return ws, history
 
     def append(self, ws, row):
         values = [row.get(header, "") for header in self.headers]
         if self.test_mode: LOG.info("DRY-RUN %s", dict(zip(self.headers, values)))
-        else: ws.append_row(values, value_input_option="USER_ENTERED")
+        else:
+            self.quota.write(); ws.append_row(values, value_input_option="USER_ENTERED")
 
 
 def reports(dart, corp_code: str, years: list[int]):
@@ -115,17 +212,21 @@ def reports(dart, corp_code: str, years: list[int]):
 
 def main() -> int:
     logging.basicConfig(level=logging.DEBUG if env_bool("DEBUG_MODE") else logging.INFO, format="%(asctime)s %(message)s")
+    quota = SheetsQuota.from_env()
     try:
         gc = credentials()
-        list_book = gc.open_by_key(os.environ["gspread_list"])
-        records = list_book.get_worksheet(0).get_all_records()
-        headers = list_book.get_worksheet(0).row_values(1)
+        ids = load_sheet_ids()
+        quota.read(); list_book = gc.open_by_key(os.environ["gspread_list"])
+        first_sheet = list_book.get_worksheet(0)
+        quota.read(); records = first_sheet.get_all_records()
+        quota.read(); headers = first_sheet.row_values(1)
         columns = detect_columns(headers)
-        shards, overflow = distribute(records, columns)
+        shards, overflow = distribute(records, columns, ids)
+        if overflow:
+            LOG.warning("⚠️ shard 배정 제외: %d건. Gspread_ID가 gspread_ids와 일치하는지 확인하세요.", len(overflow))
         for number, companies in shards.items():
             LOG.info("📊 shard %d: %s", number, ", ".join(str(c.get(columns["기업명"], "")) for c in companies))
-        ids = load_sheet_ids()
-        store = SheetStore(gc, ids, env_bool("TEST_MODE"))
+        store = SheetStore(gc, ids, quota, env_bool("TEST_MODE"))
     except Exception as exc:
         LOG.error("❌ 시트 인증/초기화 완전 실패: %s", exc); return 1
     target = os.getenv("TARGET_SHARD", "all")
@@ -140,7 +241,12 @@ def main() -> int:
         position = 0
         for shard in selected:
             for company in shards[shard]:
-                position += 1; name = str(company[columns["기업명"]]); corp = str(company[columns["corp_code"]]).zfill(8)
+                position += 1; name = str(company.get(columns["기업명"], "")).strip()
+                try:
+                    corp, stock = resolve_company_codes(dart, company, columns)
+                except Exception as exc:
+                    LOG.warning("⚠️ 기업 코드 매핑 실패 %s: %s", name, exc)
+                    continue
                 LOG.info("[%d/%d] %s 처리 중…", position, total, name)
                 ws, history = store.setup(shard, name)
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
@@ -157,7 +263,7 @@ def main() -> int:
                                                                  "raw":fallback.raw, "html":str(html)[:6000]}, ensure_ascii=False)
                             if fallback.status != "success": LOG.warning("⚠️ %s: %s", name, fallback.status)
                         for row in rows:
-                            row.update({"기업명":name,"종목코드":company[columns["종목코드"]],"corp_code":corp,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
+                            row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
                             store.append(ws, row)
                         successes += bool(rows)
                     except Exception as exc:
