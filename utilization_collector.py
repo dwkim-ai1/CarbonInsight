@@ -13,7 +13,7 @@ from pathlib import Path
 
 import gspread
 
-from utilization_llm_fallback import MODEL, call_fallback
+from utilization_llm_fallback import MODEL, call_fallback, call_structure
 from utilization_parser import UtilizationParser
 
 LOG = logging.getLogger("utilization")
@@ -29,6 +29,9 @@ ALIASES = {
 }
 INVALID_SHEET_TITLE_CHARS = re.compile(r"[\\/?*\[\]:]")
 LEDGER_SHEET_TITLE = "가동률"
+QUARTER_HEADER_START_COLUMN = 6
+DEFAULT_STRUCTURE_START_YEAR = 2016
+QUARTER_PATTERN = re.compile(r"^[1-4]Q\d{2}$")
 
 
 def env_bool(name: str) -> bool: return os.getenv(name, "false").lower() in {"1","true","yes"}
@@ -131,6 +134,48 @@ def safe_sheet_title(company: str, stock: str) -> str:
     return (candidate or "company")[:100]
 
 
+def normalize_label(value: object) -> str:
+    return re.sub(r"[\s()\[\]{}_%㎥㎡,./\\-]+", "", str(value or "")).lower()
+
+
+def label_match(query: object, candidate: object) -> bool:
+    q, c = normalize_label(query), normalize_label(candidate)
+    return bool(q and c and (q == c or q in c or c in q))
+
+
+def column_letter(index: int) -> str:
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def default_quarter_labels(start_year: int = DEFAULT_STRUCTURE_START_YEAR, end_year: int | None = None) -> list[str]:
+    end_year = end_year or datetime.now(KST).year
+    return [f"{quarter}Q{str(year)[-2:]}" for year in range(start_year, end_year + 1) for quarter in range(1, 5)]
+
+
+def report_quarter_label(report, business_year: int) -> str:
+    text = str(report.get("report_nm", ""))
+    compact = text.replace(" ", "")
+    month = None
+    month_match = re.search(r"20\d{2}[.\-/년]*(03|06|09|12)", compact)
+    if month_match:
+        month = int(month_match.group(1))
+    if month:
+        quarter = {3: 1, 6: 2, 9: 3, 12: 4}[month]
+    elif "반기" in compact:
+        quarter = 2
+    elif "3분기" in compact or "제3분기" in compact:
+        quarter = 3
+    elif "1분기" in compact or "제1분기" in compact or "분기보고서" in compact:
+        quarter = 1
+    else:
+        quarter = 4
+    return f"{quarter}Q{str(int(business_year))[-2:]}"
+
+
 def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
     name = str(record.get(columns["기업명"], "")).strip()
     stock = stock_code(record, columns)
@@ -174,25 +219,13 @@ class SheetStore:
     def __init__(self, gc, sheet_ids: list[str], quota: SheetsQuota, test_mode=False):
         self.gc, self.ids, self.quota, self.test_mode = gc, sheet_ids, quota, test_mode
         self.headers = list(REQUIRED)
+        self.quarter_labels = default_quarter_labels()
         self.next_rows: dict[int, int] = {}
         self.ledger_next_rows: dict[int, int] = {}
         LOG.info("✅ 출력 스키마 준비: 헤더=%s", self.headers)
 
     def _find_worksheet(self, worksheets, title: str):
         return next((ws for ws in worksheets if ws.title == title), None)
-
-    def _template_worksheet(self, worksheets):
-        for ws in worksheets:
-            title = ws.title.strip()
-            if title.startswith("_") or title == LEDGER_SHEET_TITLE:
-                continue
-            if re.fullmatch(r"\d{6}", title):
-                return ws
-        for ws in worksheets:
-            title = ws.title.strip()
-            if title and not title.startswith("_") and title != LEDGER_SHEET_TITLE:
-                return ws
-        return None
 
     def _ensure_data_table(self, ws):
         key = ws.id
@@ -213,6 +246,30 @@ class SheetStore:
             self.next_rows[key] = next_row + 1
         else:
             self.next_rows[key] = max(len(values) + 1, header_row + 1)
+
+    def _ensure_quarter_headers(self, ws):
+        self.quota.read(); headers = ws.row_values(1)
+        if any(QUARTER_PATTERN.fullmatch(str(value or "")) for value in headers[QUARTER_HEADER_START_COLUMN - 1:]):
+            return
+        if self.test_mode:
+            LOG.info("DRY-RUN %s!F1에 기본 분기 헤더 작성 예정", ws.title)
+        else:
+            self.quota.write(); ws.update(f"{column_letter(QUARTER_HEADER_START_COLUMN)}1", [self.quarter_labels])
+
+    def _ensure_quarter_column(self, ws, quarter: str) -> int:
+        self.quota.read(); headers = ws.row_values(1)
+        for index, value in enumerate(headers, start=1):
+            if str(value).strip() == quarter:
+                return index
+        if quarter in self.quarter_labels:
+            column = QUARTER_HEADER_START_COLUMN + self.quarter_labels.index(quarter)
+        else:
+            column = max(len(headers) + 1, QUARTER_HEADER_START_COLUMN)
+        if self.test_mode:
+            LOG.info("DRY-RUN %s!%s1에 분기 헤더 %s 작성 예정", ws.title, column_letter(column), quarter)
+        else:
+            self.quota.write(); ws.update(f"{column_letter(column)}1", [[quarter]])
+        return column
 
     def _ensure_ledger(self, ledger):
         if ledger is None:
@@ -242,18 +299,14 @@ class SheetStore:
         self.quota.read(); worksheets = book.worksheets()
         ws = self._find_worksheet(worksheets, title)
         if ws is None:
-            template = self._template_worksheet(worksheets)
             if self.test_mode:
-                ws = template or worksheets[0]
+                ws = worksheets[0]
                 LOG.info("DRY-RUN 회사별 시트 생성 예정: %s", title)
-            elif template is not None:
-                self.quota.write(); book.batch_update({"requests":[{"duplicateSheet":{"sourceSheetId":template.id,"insertSheetIndex":len(worksheets),"newSheetName":title}}]})
-                self.quota.read(); ws = book.worksheet(title)
-                LOG.info("📄 회사별 시트 생성: %s -> %s", template.title, title)
             else:
-                self.quota.write(); ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
+                cols = max(QUARTER_HEADER_START_COLUMN + len(self.quarter_labels), len(self.headers), 30)
+                self.quota.write(); ws = book.add_worksheet(title, rows=200, cols=cols)
                 LOG.info("📄 회사별 빈 시트 생성: %s", title)
-        self._ensure_data_table(ws)
+        self._ensure_quarter_headers(ws)
         ledger = self._find_worksheet(worksheets, LEDGER_SHEET_TITLE)
         if ledger is None:
             if self.test_mode:
@@ -264,6 +317,97 @@ class SheetStore:
                 LOG.info("📒 장부 시트 생성: %s", LEDGER_SHEET_TITLE)
         self._ensure_ledger(ledger)
         return ws, ledger
+
+    def sheet_structure(self, ws) -> dict:
+        self._ensure_quarter_headers(ws)
+        self.quota.read(); values = ws.get_all_values()
+        first_row = values[0] if values else []
+        quarters = []
+        for col, label in enumerate(first_row, start=1):
+            text = str(label or "").strip()
+            if col >= QUARTER_HEADER_START_COLUMN and text:
+                quarters.append({"col": col, "label": text})
+        rows = []
+        section = division = ""
+        for index, row in enumerate(values[1:], start=2):
+            padded = list(row) + [""] * 5
+            if padded[:len(self.headers)] == self.headers:
+                break
+            a, b, c, d, e = [str(value or "").strip() for value in padded[:5]]
+            if a:
+                section = a
+                if not any([b, c, d, e]):
+                    division = ""
+                    continue
+            if b and not any([c, d, e]):
+                division = b
+                continue
+            if c or e or (b and section):
+                rows.append({"row": index, "section": section, "division": division if c or e else "", "item": c or b, "site": d, "unit": e})
+        return {"title": ws.title, "quarters": quarters, "rows": rows[:160]}
+
+    def _match_structure_row(self, structure: dict, update: dict) -> int | None:
+        target = update.get("target_row")
+        if target:
+            known = {row["row"] for row in structure.get("rows", [])}
+            if target in known:
+                return target
+        best_score, best_row = 0, None
+        for row in structure.get("rows", []):
+            score = 0
+            if update.get("section"):
+                if label_match(update["section"], row.get("section")):
+                    score += 4
+                elif label_match(update["section"], row.get("division")):
+                    score += 3
+                else:
+                    score -= 2
+            if update.get("division") and label_match(update["division"], row.get("division")):
+                score += 3
+            if update.get("item") and label_match(update["item"], row.get("item")):
+                score += 5
+            elif update.get("source_label") and label_match(update["source_label"], row.get("item")):
+                score += 3
+            if update.get("site") and label_match(update["site"], row.get("site")):
+                score += 2
+            if update.get("unit") and label_match(update["unit"], row.get("unit")):
+                score += 1
+            if score > best_score:
+                best_score, best_row = score, row.get("row")
+        return best_row if best_score >= 5 else None
+
+    def _insert_structure_row(self, ws, structure: dict, update: dict) -> int:
+        rows = structure.get("rows", [])
+        insert_at = max((row.get("row", 1) for row in rows), default=1) + 1
+        labels = [update.get("section", ""), update.get("division", ""), update.get("item", ""), update.get("site", ""), update.get("unit", "")]
+        if self.test_mode:
+            LOG.info("DRY-RUN %s!A%d에 구조 행 생성 예정: %s", ws.title, insert_at, labels)
+        else:
+            self.quota.write(); ws.insert_row(labels, index=insert_at, value_input_option="USER_ENTERED")
+        structure.setdefault("rows", []).append({"row": insert_at, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
+        return insert_at
+
+    def apply_structured_updates(self, ws, updates: list[dict]) -> int:
+        if not updates:
+            return 0
+        structure = self.sheet_structure(ws)
+        applied = 0
+        for update in updates:
+            quarter = str(update.get("quarter") or "").strip()
+            value = update.get("value")
+            if not quarter or value in (None, ""):
+                continue
+            column = self._ensure_quarter_column(ws, quarter)
+            row = self._match_structure_row(structure, update)
+            if row is None:
+                row = self._insert_structure_row(ws, structure, update)
+            cell = f"{column_letter(column)}{row}"
+            if self.test_mode:
+                LOG.info("DRY-RUN %s!%s = %s", ws.title, cell, value)
+            else:
+                self.quota.write(); ws.update(cell, [[value]], value_input_option="USER_ENTERED")
+            applied += 1
+        return applied
 
     def append(self, ws, row):
         values = [row.get(header, "") for header in self.headers]
@@ -326,6 +470,8 @@ def main() -> int:
     target = os.getenv("TARGET_SHARD", "all")
     selected = range(1, 11) if target == "all" else [int(target)]
     years_back = int(os.getenv("YEARS_BACK", "10")); now_year = datetime.now(KST).year
+    llm_max_calls = env_int("LLM_MAX_CALLS", 120)
+    structure_mode = os.getenv("LLM_STRUCTURE_MODE", "true").lower() in {"1","true","yes"}
     successes = llm_calls = 0
     try:
         import OpenDartReader
@@ -345,10 +491,21 @@ def main() -> int:
                 ws, ledger = store.setup(shard, name, stock)
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
+                    quarter = report_quarter_label(report, year)
                     try:
                         html = dart.document(rcept)
+                        if structure_mode and os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls:
+                            llm_calls += 1
+                            structure = store.sheet_structure(ws)
+                            structured = call_structure(html, structure, quarter)
+                            applied = store.apply_structured_updates(ws, structured.updates)
+                            if applied:
+                                store.record_history(ledger, name, stock, corp, year, rcept, f"structured_{structured.status}", f"{applied} cells via {MODEL}", ws.title)
+                                successes += 1
+                                continue
+                            LOG.warning("⚠️ LLM 구조화 매핑 없음 %s/%s: %s", name, rcept, structured.status)
                         rows = parser.parse(html, year)
-                        if not rows and os.getenv("OLLAMA_API_KEY") and llm_calls < 5 * position:
+                        if not rows and os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls:
                             llm_calls += 1; fallback = call_fallback(html)
                             rows = fallback.rows
                             for row in rows:
@@ -357,7 +514,7 @@ def main() -> int:
                                                                  "raw":fallback.raw, "html":str(html)[:6000]}, ensure_ascii=False)
                             if fallback.status != "success": LOG.warning("⚠️ %s: %s", name, fallback.status)
                         for row in rows:
-                            row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
+                            row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"사업연도":row.get("사업연도") or year,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
                             store.append(ws, row)
                         status = "success" if rows else "no_rows"
                         store.record_history(ledger, name, stock, corp, year, rcept, status, f"{len(rows)} rows", ws.title)
