@@ -18,6 +18,11 @@ Google Sheets 10개의 ID를 순서대로 담은 JSON 배열 문자열입니다.
 배열 순서는 shard 1부터 shard 10까지 대응합니다. 9번째 ID는 런타임 표준 스키마를
 판정하는 기준 문서로도 사용됩니다.
 
+기업 목록 문서(`gspread_list`)의 첫 워크시트는 `회사명`, `상장코드`, `Gspread_ID` 헤더를
+지원합니다. `corp_code`가 있으면 그대로 사용하고, 없으면 `상장코드` 또는 회사명으로
+OpenDartReader의 DART 고유번호 조회를 수행합니다. `Gspread_ID` 값이 `gspread_ids` 배열의
+ID와 일치하면 해당 순번의 shard로 배정하고, 없으면 행 순서 기준으로 20개씩 배정합니다.
+
 대상 문서는 개인 계정 `dwkim.digital@gmail.com`뿐 아니라
 `GOOGLE_SHEETS_CREDS` JSON의 `client_email`에도 **편집자**로 공유해야 합니다. 빠뜨리면
 `gspread.exceptions.SpreadsheetNotFound` 또는 Google API `403 PERMISSION_DENIED`가
@@ -27,6 +32,17 @@ Google Sheets 10개의 ID를 순서대로 담은 JSON 배열 문자열입니다.
 Create key** 순서로 이동하고, 표시된 키를 복사하여 같은 이름의 GitHub Secret으로
 등록합니다. 화면에서는 (1) 좌측 Settings, (2) Keys 탭, (3) Create key 버튼, (4) 한 번만
 표시되는 키 복사 순서입니다. 키가 없으면 경고만 남기고 결정론 모드로 계속됩니다.
+
+## Google Sheets quota
+
+Google Sheets API의 서비스 계정은 사용자 단위 분당 quota를 공유하므로, 수집기는 기본적으로
+읽기 `45/min`, 쓰기 `30/min`으로 API 호출 간격을 제한합니다. GitHub Actions Variables에
+다음 값을 설정하면 조정할 수 있습니다.
+
+```text
+GOOGLE_SHEETS_READ_REQUESTS_PER_MINUTE=45
+GOOGLE_SHEETS_WRITE_REQUESTS_PER_MINUTE=30
+```
 
 ## 실행
 
