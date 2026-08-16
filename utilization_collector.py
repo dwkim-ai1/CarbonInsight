@@ -7,9 +7,12 @@ import os
 import re
 import sys
 import time
+import io
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import gspread
 
@@ -350,12 +353,54 @@ def can_use_llm(call_count: int, max_calls: int, company_counts: dict[str, int],
     return bool(os.getenv("OLLAMA_API_KEY") and call_count < max_calls and company_counts.get(company_key, 0) < max_per_company)
 
 
-def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
+class CorpCodeResolver:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.by_stock: dict[str, str] | None = None
+        self.by_name: dict[str, str] | None = None
+
+    def _load(self):
+        if self.by_stock is not None and self.by_name is not None:
+            return
+        import requests
+        url = "https://opendart.fss.or.kr/api/corpCode.xml"
+        LOG.info("🏢 DART corpCode.xml 다운로드 중…")
+        response = requests.get(url, params={"crtfc_key": self.api_key}, timeout=45)
+        response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            xml_name = next((name for name in archive.namelist() if name.lower().endswith(".xml")), archive.namelist()[0])
+            root = ET.fromstring(archive.read(xml_name))
+        by_stock, by_name = {}, {}
+        for item in root.findall(".//list"):
+            corp_code = (item.findtext("corp_code") or "").strip()
+            stock = normalize_number(item.findtext("stock_code") or "", 6)
+            name = normalize_label(item.findtext("corp_name") or "")
+            if corp_code and stock and stock != "000000":
+                by_stock[stock] = corp_code.zfill(8)
+            if corp_code and name:
+                by_name[name] = corp_code.zfill(8)
+        self.by_stock, self.by_name = by_stock, by_name
+        LOG.info("🏢 DART corpCode.xml 로드 완료: stock=%d, name=%d", len(by_stock), len(by_name))
+
+    def find(self, stock: str, name: str) -> str:
+        self._load()
+        stock_key = normalize_number(stock, 6)
+        if stock_key and self.by_stock and stock_key in self.by_stock:
+            return self.by_stock[stock_key]
+        name_key = normalize_label(name)
+        return self.by_name.get(name_key, "") if self.by_name else ""
+
+
+def resolve_company_codes(dart, record: dict, columns: dict[str, str], corp_resolver: CorpCodeResolver | None = None) -> tuple[str, str]:
     name = str(record.get(columns["기업명"], "")).strip()
     stock = stock_code(record, columns)
     corp_column = columns.get("corp_code")
     if corp_column:
         corp = normalize_number(record.get(corp_column, ""), 8)
+        if corp:
+            return corp, stock
+    if corp_resolver:
+        corp = corp_resolver.find(stock, name)
         if corp:
             return corp, stock
     lookup = stock or name
@@ -921,7 +966,9 @@ def main() -> int:
     llm_exception_company_counts: dict[str, int] = {}
     try:
         import OpenDartReader
-        dart = OpenDartReader(os.environ["opendart_api"])
+        dart_api_key = os.environ["opendart_api"]
+        dart = OpenDartReader(dart_api_key)
+        corp_resolver = CorpCodeResolver(dart_api_key)
         parser = UtilizationParser()
         company_offset = env_nonnegative_int("COMPANY_OFFSET", 0)
         company_limit = env_nonnegative_int("COMPANY_LIMIT", 0)
@@ -931,8 +978,9 @@ def main() -> int:
         total = len(company_work)
         for position, (shard, company) in enumerate(company_work, start=1):
                 name = str(company.get(columns["기업명"], "")).strip()
+                LOG.info("[%d/%d] %s 코드 매핑 중…", position, total, name)
                 try:
-                    corp, stock = resolve_company_codes(dart, company, columns)
+                    corp, stock = resolve_company_codes(dart, company, columns, corp_resolver)
                 except Exception as exc:
                     LOG.warning("⚠️ 기업 코드 매핑 실패 %s: %s", name, exc)
                     continue

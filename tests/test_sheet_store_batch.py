@@ -3,7 +3,7 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, row_quarter_label, rows_to_structured_updates, selected_company_work, target_business_years
+from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, target_business_years
 
 
 class FakeQuota:
@@ -106,6 +106,23 @@ def test_selected_company_work_supports_offset_and_limit():
     work = selected_company_work(shards, [1, 2], offset=1, limit=1)
 
     assert work == [(1, {"name": "b"})]
+
+
+def test_resolve_company_codes_uses_stock_resolver_before_dart_lookup():
+    class FakeResolver:
+        def find(self, stock, name):
+            assert stock == "015760"
+            assert name == "한국전력공사"
+            return "00159193"
+
+    class FakeDart:
+        def find_corp_code(self, lookup):
+            raise AssertionError("resolver should avoid OpenDartReader lookup")
+
+    record = {"회사명": "한국전력공사", "상장코드": "015760"}
+    columns = {"기업명": "회사명", "종목코드": "상장코드"}
+
+    assert resolve_company_codes(FakeDart(), record, columns, FakeResolver()) == ("00159193", "015760")
 
 
 def test_selector_required_skips_unmatched_parser_rows():
