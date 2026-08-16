@@ -438,76 +438,188 @@ class SheetStore:
                 best_score, best_row = score, row.get("row")
         return best_row if best_score >= 5 else None
 
-    def _insert_structure_row(self, ws, structure: dict, update: dict) -> int:
+    def _structure_labels(self, update: dict) -> list[str]:
+        return [str(update.get("section", "") or ""), str(update.get("division", "") or ""),
+                str(update.get("item", "") or ""), str(update.get("site", "") or ""),
+                str(update.get("unit", "") or "")]
+
+    def _insert_structure_rows(self, ws, structure: dict, labels_list: list[list[str]], insert_at: int | None = None) -> list[int]:
+        if not labels_list:
+            return []
         rows = structure.get("rows", [])
-        insert_at = max((row.get("row", 1) for row in rows), default=1) + 1
-        labels = [update.get("section", ""), update.get("division", ""), update.get("item", ""), update.get("site", ""), update.get("unit", "")]
+        insert_at = insert_at or max((row.get("row", 1) for row in rows), default=1) + 1
         if self.test_mode:
-            LOG.info("DRY-RUN %s!A%d에 구조 행 생성 예정: %s", ws.title, insert_at, labels)
+            LOG.info("DRY-RUN %s!A%d부터 구조 행 %d개 생성 예정", ws.title, insert_at, len(labels_list))
         else:
-            self.quota.write(); ws.insert_row(labels, index=insert_at, value_input_option="USER_ENTERED")
-        structure.setdefault("rows", []).append({"row": insert_at, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
-        return insert_at
+            self.quota.write()
+            if len(labels_list) == 1:
+                ws.insert_row(labels_list[0], index=insert_at, value_input_option="USER_ENTERED")
+            else:
+                ws.insert_rows(labels_list, row=insert_at, value_input_option="USER_ENTERED")
+        inserted_rows = []
+        for offset, labels in enumerate(labels_list):
+            row_number = insert_at + offset
+            inserted_rows.append(row_number)
+            structure.setdefault("rows", []).append({"row": row_number, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
+        return inserted_rows
+
+    def _insert_structure_row(self, ws, structure: dict, update: dict) -> int:
+        return self._insert_structure_rows(ws, structure, [self._structure_labels(update)])[0]
 
     def apply_framework(self, ws, selectors: list[dict]) -> list[dict]:
         if not selectors:
             return []
         structure = self.sheet_structure(ws)
         bound = []
+        labels_to_insert = []
+        planned: dict[tuple[str, ...], int] = {}
+        insert_at = max((row.get("row", 1) for row in structure.get("rows", [])), default=1) + 1
         for selector in selectors:
             row = self._match_structure_row(structure, selector)
             if row is None:
-                row = self._insert_structure_row(ws, structure, selector)
+                labels = self._structure_labels(selector)
+                key = tuple(labels)
+                row = planned.get(key)
+                if row is None:
+                    row = insert_at + len(labels_to_insert)
+                    planned[key] = row
+                    labels_to_insert.append(labels)
+                    structure.setdefault("rows", []).append({"row": row, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
             prepared = dict(selector)
             prepared["target_row"] = row
             bound.append(prepared)
+        if labels_to_insert:
+            if self.test_mode:
+                LOG.info("DRY-RUN %s!A%d부터 selector 구조 행 %d개 생성 예정", ws.title, insert_at, len(labels_to_insert))
+            else:
+                self.quota.write()
+                if len(labels_to_insert) == 1:
+                    ws.insert_row(labels_to_insert[0], index=insert_at, value_input_option="USER_ENTERED")
+                else:
+                    ws.insert_rows(labels_to_insert, row=insert_at, value_input_option="USER_ENTERED")
         return bound
+
+    def _ensure_quarter_columns(self, ws, structure: dict, quarters: list[str]) -> dict[str, int]:
+        quarter_columns = {str(item.get("label") or "").strip(): int(item["col"])
+                           for item in structure.get("quarters", []) if str(item.get("label") or "").strip() and str(item.get("col", "")).isdigit()}
+        planned_updates = []
+        used_columns = set(quarter_columns.values())
+        for quarter in quarters:
+            if quarter in quarter_columns:
+                continue
+            if quarter in self.quarter_labels:
+                column = QUARTER_HEADER_START_COLUMN + self.quarter_labels.index(quarter)
+            else:
+                column = max(used_columns or {QUARTER_HEADER_START_COLUMN - 1}) + 1
+            while column in used_columns:
+                column += 1
+            quarter_columns[quarter] = column
+            used_columns.add(column)
+            planned_updates.append({"range": f"{column_letter(column)}1", "values": [[quarter]]})
+            structure.setdefault("quarters", []).append({"col": column, "label": quarter})
+        if planned_updates:
+            if self.test_mode:
+                LOG.info("DRY-RUN %s 분기 헤더 %d개 batch 작성 예정", ws.title, len(planned_updates))
+            else:
+                self.quota.write(); ws.batch_update(planned_updates, value_input_option="USER_ENTERED")
+        return quarter_columns
+
+    def _batch_update_cells(self, ws, cells: dict[str, object]) -> int:
+        if not cells:
+            return 0
+        requests = [{"range": cell, "values": [[value]]} for cell, value in cells.items()]
+        if self.test_mode:
+            LOG.info("DRY-RUN %s 셀 %d개 batch update 예정", ws.title, len(requests))
+            return len(requests)
+        for index in range(0, len(requests), 500):
+            self.quota.write(); ws.batch_update(requests[index:index + 500], value_input_option="USER_ENTERED")
+        return len(requests)
 
     def apply_structured_updates(self, ws, updates: list[dict]) -> int:
         if not updates:
             return 0
         structure = self.sheet_structure(ws)
-        applied = 0
+        quarters = []
+        for update in updates:
+            quarter = str(update.get("quarter") or "").strip()
+            if quarter and quarter not in quarters:
+                quarters.append(quarter)
+        quarter_columns = self._ensure_quarter_columns(ws, structure, quarters)
+        labels_to_insert = []
+        planned: dict[tuple[str, ...], int] = {}
+        insert_at = max((row.get("row", 1) for row in structure.get("rows", [])), default=1) + 1
+        cells: dict[str, object] = {}
         for update in updates:
             quarter = str(update.get("quarter") or "").strip()
             value = update.get("value")
             if not quarter or value in (None, ""):
                 continue
-            column = self._ensure_quarter_column(ws, quarter)
+            column = quarter_columns[quarter]
             row = self._match_structure_row(structure, update)
             if row is None:
-                row = self._insert_structure_row(ws, structure, update)
+                labels = self._structure_labels(update)
+                key = tuple(labels)
+                row = planned.get(key)
+                if row is None:
+                    row = insert_at + len(labels_to_insert)
+                    planned[key] = row
+                    labels_to_insert.append(labels)
+                    structure.setdefault("rows", []).append({"row": row, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
             cell = f"{column_letter(column)}{row}"
+            cells[cell] = value
+        if labels_to_insert:
             if self.test_mode:
-                LOG.info("DRY-RUN %s!%s = %s", ws.title, cell, value)
+                LOG.info("DRY-RUN %s!A%d부터 parser 구조 행 %d개 생성 예정", ws.title, insert_at, len(labels_to_insert))
             else:
-                self.quota.write(); ws.update(cell, [[value]], value_input_option="USER_ENTERED")
-            applied += 1
-        return applied
+                self.quota.write()
+                if len(labels_to_insert) == 1:
+                    ws.insert_row(labels_to_insert[0], index=insert_at, value_input_option="USER_ENTERED")
+                else:
+                    ws.insert_rows(labels_to_insert, row=insert_at, value_input_option="USER_ENTERED")
+        return self._batch_update_cells(ws, cells)
 
     def append(self, ws, row):
-        values = [row.get(header, "") for header in self.headers]
+        self.append_rows(ws, [row])
+
+    def append_rows(self, ws, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        values = [[row.get(header, "") for header in self.headers] for row in rows]
         row_index = self.next_rows.get(ws.id)
         if row_index is None:
             self._ensure_data_table(ws)
             row_index = self.next_rows[ws.id]
+        end_row = row_index + len(values) - 1
+        end_col = column_letter(len(self.headers))
         if self.test_mode:
-            LOG.info("DRY-RUN %s!A%d %s", ws.title, row_index, dict(zip(self.headers, values)))
+            LOG.info("DRY-RUN %s!A%d:%s%d raw row %d개 batch append 예정", ws.title, row_index, end_col, end_row, len(values))
         else:
-            self.quota.write(); ws.update(f"A{row_index}", [values], value_input_option="USER_ENTERED")
-        self.next_rows[ws.id] = row_index + 1
+            self.quota.write(); ws.update(f"A{row_index}:{end_col}{end_row}", values, value_input_option="USER_ENTERED")
+        self.next_rows[ws.id] = end_row + 1
+        return len(values)
+
+    def history_values(self, company: str, stock: str, corp: str, year: int | str, rcept: str, status: str, message: str, output_sheet: str) -> list:
+        return [datetime.now(KST).isoformat(), company, stock, corp, year, rcept, status, str(message)[:500], output_sheet]
 
     def record_history(self, ledger, company: str, stock: str, corp: str, year: int, rcept: str, status: str, message: str, output_sheet: str):
-        values = [datetime.now(KST).isoformat(), company, stock, corp, year, rcept, status, message[:500], output_sheet]
+        self.record_history_rows(ledger, [self.history_values(company, stock, corp, year, rcept, status, message, output_sheet)])
+
+    def record_history_rows(self, ledger, rows: list[list]) -> int:
+        if not rows:
+            return 0
         if ledger is None or self.test_mode:
-            LOG.info("DRY-RUN 장부 기록 %s", dict(zip(LEDGER_HEADERS, values)))
-            return
+            for values in rows:
+                LOG.info("DRY-RUN 장부 기록 %s", dict(zip(LEDGER_HEADERS, values)))
+            return len(rows)
         row_index = self.ledger_next_rows.get(ledger.id)
         if row_index is None:
             self._ensure_ledger(ledger)
             row_index = self.ledger_next_rows[ledger.id]
-        self.quota.write(); ledger.update(f"A{row_index}", [values], value_input_option="USER_ENTERED")
-        self.ledger_next_rows[ledger.id] = row_index + 1
+        end_row = row_index + len(rows) - 1
+        end_col = column_letter(len(LEDGER_HEADERS))
+        self.quota.write(); ledger.update(f"A{row_index}:{end_col}{end_row}", rows, value_input_option="USER_ENTERED")
+        self.ledger_next_rows[ledger.id] = end_row + 1
+        return len(rows)
 
 
 def reports(dart, corp_code: str, years: list[int]):
@@ -578,6 +690,9 @@ def main() -> int:
                 llm_key = stock or corp
                 selectors: list[dict] = []
                 framework_attempted = False
+                company_updates: list[dict] = []
+                legacy_rows: list[dict] = []
+                history_rows: list[list] = []
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     quarter = report_quarter_label(report, year)
@@ -594,36 +709,34 @@ def main() -> int:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
-                            store.record_history(ledger, name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title)
-                        applied = 0
-                        mapping_miss = False
+                            history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title))
                         if rows:
                             updates = rows_to_structured_updates(rows, quarter, selectors)
-                            applied = store.apply_structured_updates(ws, updates)
-                            if applied:
-                                store.record_history(ledger, name, stock, corp, year, rcept, "structured_parser", f"{applied} cells from deterministic parser", ws.title)
+                            if updates:
+                                company_updates.extend(updates)
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept, "structured_parser_queued", f"{len(updates)} cells queued for company batch write", ws.title))
                                 successes += 1
                                 continue
-                            mapping_miss = bool(updates)
                         can_exception_llm = can_use_llm(exception_llm_calls, llm_exception_max_calls, llm_exception_company_counts,
                                                         llm_key, llm_exception_max_calls_per_company)
-                        if exception_fallback_mode and (parse_result.needs_llm or mapping_miss) and can_exception_llm:
+                        if exception_fallback_mode and parse_result.needs_llm and can_exception_llm:
                             llm_exception_company_counts[llm_key] = llm_exception_company_counts.get(llm_key, 0) + 1
                             exception_llm_calls += 1
-                            reason = parse_result.status if parse_result.needs_llm else "parser_mapping_miss"
                             structure = call_structure(html, store.sheet_structure(ws), quarter)
-                            applied = store.apply_structured_updates(ws, structure.updates)
-                            store.record_history(ledger, name, stock, corp, year, rcept,
-                                                 f"llm_exception_{structure.status}",
-                                                 f"{reason}; {applied} cells via {MODEL}", ws.title)
-                            if applied:
+                            if structure.updates:
+                                company_updates.extend(structure.updates)
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                         f"llm_exception_{structure.status}",
+                                                                         f"{parse_result.status}; {len(structure.updates)} cells queued via {MODEL}", ws.title))
                                 successes += 1
                                 continue
-                        elif exception_fallback_mode and (parse_result.needs_llm or mapping_miss):
-                            reason = parse_result.status if parse_result.needs_llm else "parser_mapping_miss"
-                            store.record_history(ledger, name, stock, corp, year, rcept,
-                                                 "llm_exception_skipped",
-                                                 f"{reason}; no OLLAMA_API_KEY or exception budget exhausted", ws.title)
+                            history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                     f"llm_exception_{structure.status}",
+                                                                     f"{parse_result.status}; 0 cells via {MODEL}", ws.title))
+                        elif exception_fallback_mode and parse_result.needs_llm:
+                            history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                     "llm_exception_skipped",
+                                                                     f"{parse_result.status}; no OLLAMA_API_KEY or exception budget exhausted", ws.title))
                         can_llm = can_use_llm(regular_llm_calls, llm_max_calls, llm_company_counts, llm_key, llm_max_calls_per_company)
                         if value_fallback_mode and not rows and can_llm:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
@@ -636,14 +749,34 @@ def main() -> int:
                             if fallback.status != "success": LOG.warning("⚠️ %s: %s", name, fallback.status)
                         for row in rows:
                             row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"사업연도":row.get("사업연도") or year,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
-                            store.append(ws, row)
+                            legacy_rows.append(row)
                         status = "success" if rows else "no_rows"
-                        store.record_history(ledger, name, stock, corp, year, rcept, status, f"{len(rows)} rows; parser={parse_result.status}", ws.title)
+                        history_rows.append(store.history_values(name, stock, corp, year, rcept, status, f"{len(rows)} rows queued; parser={parse_result.status}", ws.title))
                         successes += bool(rows)
                     except Exception as exc:
                         LOG.warning("⚠️ 부분 실패 %s/%s: %s", name, rcept, exc)
-                        store.record_history(ledger, name, stock, corp, year, rcept, "failure", str(exc), ws.title)
+                        history_rows.append(store.history_values(name, stock, corp, year, rcept, "failure", str(exc), ws.title))
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
+                if company_updates:
+                    try:
+                        applied = store.apply_structured_updates(ws, company_updates)
+                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_write", f"{applied} cells from {len(company_updates)} queued updates", ws.title))
+                        LOG.info("✅ %s batch structured write: %d cells", name, applied)
+                    except Exception as exc:
+                        LOG.warning("⚠️ 기업 구조 데이터 batch write 실패 %s: %s", name, exc)
+                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_failure", str(exc), ws.title))
+                if legacy_rows:
+                    try:
+                        appended = store.append_rows(ws, legacy_rows)
+                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_raw_append", f"{appended} rows", ws.title))
+                        LOG.info("✅ %s batch raw append: %d rows", name, appended)
+                    except Exception as exc:
+                        LOG.warning("⚠️ 기업 raw row batch append 실패 %s: %s", name, exc)
+                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_raw_failure", str(exc), ws.title))
+                try:
+                    store.record_history_rows(ledger, history_rows)
+                except Exception as exc:
+                    LOG.warning("⚠️ 장부 batch write 실패 %s: %s", name, exc)
         LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d (일반=%d, 예외=%d)",
                  successes, regular_llm_calls + exception_llm_calls, regular_llm_calls, exception_llm_calls)
         return 0 if successes or env_bool("TEST_MODE") else 1
