@@ -29,6 +29,27 @@ def credentials():
     return gspread.service_account_from_dict(json.loads(value))
 
 
+def load_sheet_ids() -> list[str]:
+    value = os.getenv("gspread_ids", "").strip()
+    if value:
+        try:
+            ids = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("gspread_ids must be a JSON array of 10 Google Sheet IDs") from exc
+        if not isinstance(ids, list):
+            raise ValueError("gspread_ids must be a JSON array of 10 Google Sheet IDs")
+        cleaned = [str(sheet_id).strip() for sheet_id in ids]
+    else:
+        legacy_names = [f"gspread_id_{i}" for i in range(1, 11)]
+        missing = [name for name in legacy_names if not os.getenv(name, "").strip()]
+        if missing:
+            raise ValueError("Set gspread_ids to a JSON array of 10 Google Sheet IDs")
+        cleaned = [os.environ[name].strip() for name in legacy_names]
+    if len(cleaned) != 10 or any(not sheet_id for sheet_id in cleaned):
+        raise ValueError("gspread_ids must contain exactly 10 non-empty Google Sheet IDs")
+    return cleaned
+
+
 def detect_columns(headers: list[str]) -> dict[str, str]:
     found = {}
     for canonical, candidates in ALIASES.items():
@@ -103,7 +124,7 @@ def main() -> int:
         shards, overflow = distribute(records, columns)
         for number, companies in shards.items():
             LOG.info("📊 shard %d: %s", number, ", ".join(str(c.get(columns["기업명"], "")) for c in companies))
-        ids = [os.environ[f"gspread_id_{i}"] for i in range(1, 11)]
+        ids = load_sheet_ids()
         store = SheetStore(gc, ids, env_bool("TEST_MODE"))
     except Exception as exc:
         LOG.error("❌ 시트 인증/초기화 완전 실패: %s", exc); return 1

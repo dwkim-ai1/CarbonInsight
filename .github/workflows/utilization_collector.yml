@@ -21,23 +21,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.11', cache: pip, cache-dependency-path: requirements/collector.txt}
-      - run: pip install -r requirements/collector.txt
+      - run: python -m pip install --no-cache-dir -r requirements/collector.txt
       - name: Collect utilization
         run: python utilization_collector.py 2>&1 | tee utilization.log
         env:
           opendart_api: ${{ secrets.opendart_api }}
           GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
           gspread_list: ${{ secrets.gspread_list }}
-          gspread_id_1: ${{ secrets.gspread_id_1 }}
-          gspread_id_2: ${{ secrets.gspread_id_2 }}
-          gspread_id_3: ${{ secrets.gspread_id_3 }}
-          gspread_id_4: ${{ secrets.gspread_id_4 }}
-          gspread_id_5: ${{ secrets.gspread_id_5 }}
-          gspread_id_6: ${{ secrets.gspread_id_6 }}
-          gspread_id_7: ${{ secrets.gspread_id_7 }}
-          gspread_id_8: ${{ secrets.gspread_id_8 }}
-          gspread_id_9: ${{ secrets.gspread_id_9 }}
-          gspread_id_10: ${{ secrets.gspread_id_10 }}
+          gspread_ids: ${{ secrets.gspread_ids }}
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           TARGET_SHARD: ${{ inputs.target_shard || 'all' }}
           YEARS_BACK: ${{ inputs.years_back || '10' }}
