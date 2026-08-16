@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ ALIASES = {
     "bucket": ("그룹","묶음","bucket","shard"),
     "sheet_id": ("Gspread_ID","gspread_id","gspread id","sheet_id","spreadsheet_id"),
 }
+INVALID_SHEET_TITLE_CHARS = re.compile(r"[\\/?*\[\]:]")
+HISTORY_SHEET_TITLE = "_처리이력"
+LEGACY_OUTPUT_SHEET_TITLE = "가동률"
 
 
 def env_bool(name: str) -> bool: return os.getenv(name, "false").lower() in {"1","true","yes"}
@@ -121,6 +125,12 @@ def stock_code(record: dict, columns: dict[str, str]) -> str:
     return normalize_number(record.get(column, ""), 6) if column else ""
 
 
+def safe_sheet_title(company: str, stock: str) -> str:
+    candidate = (stock or "").strip() or (company or "").strip() or "company"
+    candidate = INVALID_SHEET_TITLE_CHARS.sub("_", candidate).strip("' ").strip()
+    return (candidate or "company")[:100]
+
+
 def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
     name = str(record.get(columns["기업명"], "")).strip()
     stock = stock_code(record, columns)
@@ -163,37 +173,86 @@ def distribute(records: list[dict], columns: dict[str, str], sheet_ids: list[str
 class SheetStore:
     def __init__(self, gc, sheet_ids: list[str], quota: SheetsQuota, test_mode=False):
         self.gc, self.ids, self.quota, self.test_mode = gc, sheet_ids, quota, test_mode
-        self.quota.read(); standard = gc.open_by_key(sheet_ids[8])
-        first = standard.get_worksheet(0)
-        self.quota.read(); existing = first.row_values(1)
-        self.quota.read(); worksheets = standard.worksheets()
-        self.headers = existing + [h for h in REQUIRED if h not in existing]
-        self.mode = "B" if len(worksheets) == 1 and "기업명" in self.headers else "A"
-        LOG.info("✅ 표준 스키마 감지: 방식 %s, 헤더=%s", self.mode, self.headers)
+        self.headers = list(REQUIRED)
+        self.next_rows: dict[int, int] = {}
+        LOG.info("✅ 출력 스키마 준비: 헤더=%s", self.headers)
 
-    def setup(self, shard: int, company: str):
+    def _find_worksheet(self, worksheets, title: str):
+        return next((ws for ws in worksheets if ws.title == title), None)
+
+    def _template_worksheet(self, worksheets):
+        for ws in worksheets:
+            title = ws.title.strip()
+            if title.startswith("_") or title == LEGACY_OUTPUT_SHEET_TITLE:
+                continue
+            if re.fullmatch(r"\d{6}", title):
+                return ws
+        for ws in worksheets:
+            title = ws.title.strip()
+            if title and not title.startswith("_") and title != LEGACY_OUTPUT_SHEET_TITLE:
+                return ws
+        return None
+
+    def _ensure_data_table(self, ws):
+        key = ws.id
+        if key in self.next_rows:
+            return
+        self.quota.read(); values = ws.get_all_values()
+        header_row = None
+        for index, row_values in enumerate(values, start=1):
+            if row_values[:len(self.headers)] == self.headers:
+                header_row = index
+                break
+        if header_row is None:
+            next_row = len(values) + 1 if values else 1
+            if self.test_mode:
+                LOG.info("DRY-RUN %s!A%d에 출력 헤더 작성 예정", ws.title, next_row)
+            else:
+                self.quota.write(); ws.update(f"A{next_row}", [self.headers])
+            self.next_rows[key] = next_row + 1
+        else:
+            self.next_rows[key] = max(len(values) + 1, header_row + 1)
+
+    def setup(self, shard: int, company: str, stock: str):
         self.quota.read(); book = self.gc.open_by_key(self.ids[shard - 1])
-        title = "가동률" if self.mode == "B" else company[:90]
+        title = safe_sheet_title(company, stock)
+        self.quota.read(); worksheets = book.worksheets()
+        ws = self._find_worksheet(worksheets, title)
+        if ws is None:
+            template = self._template_worksheet(worksheets)
+            if self.test_mode:
+                ws = template or worksheets[0]
+                LOG.info("DRY-RUN 회사별 시트 생성 예정: %s", title)
+            elif template is not None:
+                self.quota.write(); book.batch_update({"requests":[{"duplicateSheet":{"sourceSheetId":template.id,"insertSheetIndex":len(worksheets),"newSheetName":title}}]})
+                self.quota.read(); ws = book.worksheet(title)
+                LOG.info("📄 회사별 시트 생성: %s -> %s", template.title, title)
+            else:
+                self.quota.write(); ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
+                LOG.info("📄 회사별 빈 시트 생성: %s", title)
+        self._ensure_data_table(ws)
         try:
-            self.quota.read(); ws = book.worksheet(title)
+            self.quota.read(); history = book.worksheet(HISTORY_SHEET_TITLE)
         except gspread.WorksheetNotFound:
-            self.quota.write(); ws = book.add_worksheet(title, rows=1000, cols=max(20, len(self.headers)))
-        self.quota.read(); current_headers = ws.row_values(1)
-        if current_headers != self.headers and not self.test_mode:
-            self.quota.write(); ws.update("A1", [self.headers])
-        try:
-            self.quota.read(); history = book.worksheet("_처리이력")
-        except gspread.WorksheetNotFound:
-            self.quota.write(); history = book.add_worksheet("_처리이력", rows=2000, cols=6)
-            if not self.test_mode:
+            if self.test_mode:
+                history = None
+                LOG.info("DRY-RUN %s 시트 생성 예정", HISTORY_SHEET_TITLE)
+            else:
+                self.quota.write(); history = book.add_worksheet(HISTORY_SHEET_TITLE, rows=2000, cols=6)
                 self.quota.write(); history.update("A1", [["timestamp","기업명","사업연도","접수번호","상태","메시지"]])
         return ws, history
 
     def append(self, ws, row):
         values = [row.get(header, "") for header in self.headers]
-        if self.test_mode: LOG.info("DRY-RUN %s", dict(zip(self.headers, values)))
+        row_index = self.next_rows.get(ws.id)
+        if row_index is None:
+            self._ensure_data_table(ws)
+            row_index = self.next_rows[ws.id]
+        if self.test_mode:
+            LOG.info("DRY-RUN %s!A%d %s", ws.title, row_index, dict(zip(self.headers, values)))
         else:
-            self.quota.write(); ws.append_row(values, value_input_option="USER_ENTERED")
+            self.quota.write(); ws.update(f"A{row_index}", [values], value_input_option="USER_ENTERED")
+        self.next_rows[ws.id] = row_index + 1
 
 
 def reports(dart, corp_code: str, years: list[int]):
@@ -248,7 +307,7 @@ def main() -> int:
                     LOG.warning("⚠️ 기업 코드 매핑 실패 %s: %s", name, exc)
                     continue
                 LOG.info("[%d/%d] %s 처리 중…", position, total, name)
-                ws, history = store.setup(shard, name)
+                ws, history = store.setup(shard, name, stock)
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     try:
