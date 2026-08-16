@@ -5,6 +5,12 @@ Sheets 10개에 저장합니다. 결정론 파서가 명시 가동률, 가동시
 검사하며, 모두 실패한 표만 Ollama Cloud 폴백에 전달합니다. 파싱 실패 시 샘플 데이터는
 절대 만들지 않습니다.
 
+기본 적재 방식은 기업별 row framework JSON을 먼저 만든 뒤, 각 정기보고서의 분기 값을
+해당 framework selector에 매칭되는 행에만 업데이트하는 방식입니다. framework JSON은 각
+결과 문서의 `_framework` 워크시트에 회사별로 저장되며 다음 실행부터 재사용합니다.
+값 업데이트 단계에서는 기본적으로 새 행을 만들지 않고, framework 밖의 파서 결과는
+장부에 skip으로 남깁니다.
+
 ## 사전 준비
 
 GitHub Secrets에 `opendart_api`, `GOOGLE_SHEETS_CREDS`, `gspread_list`,
@@ -49,6 +55,10 @@ GOOGLE_SHEETS_WRITE_REQUESTS_PER_MINUTE=30
 Actions의 **DART utilization time-series collector**에서 Run workflow를 선택합니다.
 초기 검증은 `target_shard=1`, `years_back=1`, `test_mode=true`를 권장합니다. 예약 실행은
 4월 1일·5월 20일·9월 1일·11월 20일 09:00 KST입니다.
+
+`force_reprocess=true`로 실행하면 저장된 framework JSON을 무시하고 첫 정기보고서에서
+framework를 다시 생성합니다. 기본값에서는 기존 `_framework` JSON을 재사용하여 LLM 호출을
+기업당 최초 1회 수준으로 제한합니다.
 
 로컬 검증(실제 자격 증명 필요):
 

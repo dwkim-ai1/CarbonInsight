@@ -18,10 +18,10 @@ STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조
 규칙:
 - 설명 없이 JSON 배열만 반환한다.
 - 값은 DART 원문에 있는 숫자/문자열만 사용한다. 계산하거나 추정하지 않는다.
-- 기존 시트 row와 맞으면 target_row를 넣는다.
-- 맞는 행이 없으면 target_row는 null로 두고 section/division/item/site/unit을 채워 새 구조 행을 만들 수 있게 한다.
+- 기존 시트 row와 맞는 값만 반환하고 target_row를 넣는다.
+- 맞는 행이 없으면 반환하지 않는다. 이 단계에서는 새 구조 행을 만들지 않는다.
 - section은 생산능력, 생산실적, 가동률, 가동가능시간, 실제가동시간, 평균가동률 등 원문/시트의 상위 항목을 쓴다.
-- quarter는 반드시 대상 분기를 사용한다.
+- quarter는 원문 기간이 명확하면 해당 분기(예: 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
 - confidence는 high, medium, low 중 하나다.
 
 스키마:

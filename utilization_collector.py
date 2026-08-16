@@ -29,6 +29,9 @@ ALIASES = {
 }
 INVALID_SHEET_TITLE_CHARS = re.compile(r"[\\/?*\[\]:]")
 LEDGER_SHEET_TITLE = "가동률"
+FRAMEWORK_SHEET_TITLE = "_framework"
+FRAMEWORK_SCHEMA_VERSION = "utilization-framework-v1"
+FRAMEWORK_HEADERS = ["output_sheet","기업명","종목코드","corp_code","updated_at","schema_version","framework_json"]
 QUARTER_HEADER_START_COLUMN = 6
 DEFAULT_STRUCTURE_START_YEAR = 2016
 QUARTER_PATTERN = re.compile(r"^[1-4]Q\d{2}$")
@@ -174,6 +177,27 @@ def report_quarter_label(report, business_year: int) -> str:
     else:
         quarter = 4
     return f"{quarter}Q{str(int(business_year))[-2:]}"
+
+
+def report_business_year(report, default: int | None = None) -> int | None:
+    try:
+        return int(report.get("bsns_year", default))
+    except (TypeError, ValueError):
+        return default
+
+
+def is_periodic_report(report) -> bool:
+    compact = str(report.get("report_nm", "")).replace(" ", "")
+    return any(name in compact for name in ("사업보고서", "반기보고서", "분기보고서"))
+
+
+def report_sort_key(report) -> tuple[int, int, str, str]:
+    year = report_business_year(report, 0) or 0
+    quarter = 0
+    if year:
+        parts = quarter_parts(report_quarter_label(report, year))
+        quarter = parts[0] if parts else 0
+    return (year, quarter, str(report.get("rcept_dt", "")), str(report.get("rcept_no", "")))
 
 
 def quarter_parts(label: str) -> tuple[int, int] | None:
@@ -353,6 +377,8 @@ class SheetStore:
         self.quarter_labels = default_quarter_labels()
         self.next_rows: dict[int, int] = {}
         self.ledger_next_rows: dict[int, int] = {}
+        self.framework_ready: set[int] = set()
+        self.framework_rows: dict[int, dict[str, tuple[int, list[str]]]] = {}
         LOG.info("✅ 출력 스키마 준비: 헤더=%s", self.headers)
 
     def _find_worksheet(self, worksheets, title: str):
@@ -424,6 +450,93 @@ class SheetStore:
         else:
             self.ledger_next_rows[key] = max(len(values) + 1, header_row + 1)
 
+    def _ensure_framework_store(self, book, worksheets):
+        framework = self._find_worksheet(worksheets, FRAMEWORK_SHEET_TITLE)
+        if framework is None:
+            if self.test_mode:
+                LOG.info("DRY-RUN %s framework JSON 시트 생성 예정", FRAMEWORK_SHEET_TITLE)
+                return None
+            self.quota.write(); framework = book.add_worksheet(FRAMEWORK_SHEET_TITLE, rows=500, cols=len(FRAMEWORK_HEADERS))
+            LOG.info("🧾 framework JSON 시트 생성: %s", FRAMEWORK_SHEET_TITLE)
+        key = framework.id
+        if key not in self.framework_ready:
+            self.quota.read(); headers = framework.row_values(1)
+            if headers[:len(FRAMEWORK_HEADERS)] != FRAMEWORK_HEADERS:
+                if self.test_mode:
+                    LOG.info("DRY-RUN %s!A1 framework 헤더 작성 예정", framework.title)
+                else:
+                    self.quota.write(); framework.update("A1", [FRAMEWORK_HEADERS])
+            self.framework_ready.add(key)
+        return framework
+
+    def _framework_row_data(self, framework) -> dict[str, tuple[int, list[str]]]:
+        if framework is None:
+            return {}
+        key = framework.id
+        if key not in self.framework_rows:
+            self.quota.read(); values = framework.get_all_values()
+            rows = {}
+            if values:
+                headers = [str(value or "").strip() for value in values[0]]
+                try:
+                    output_col = headers.index("output_sheet")
+                except ValueError:
+                    output_col = 0
+                for index, row_values in enumerate(values[1:], start=2):
+                    padded = list(row_values) + [""] * len(FRAMEWORK_HEADERS)
+                    output_sheet = str(padded[output_col] or "").strip()
+                    if output_sheet:
+                        rows[output_sheet] = (index, padded[:len(FRAMEWORK_HEADERS)])
+            self.framework_rows[key] = rows
+        return self.framework_rows[key]
+
+    def load_framework(self, framework, output_sheet: str) -> list[dict]:
+        rows = self._framework_row_data(framework)
+        row_info = rows.get(output_sheet)
+        if not row_info:
+            return []
+        values = list(row_info[1]) + [""] * len(FRAMEWORK_HEADERS)
+        raw = str(values[FRAMEWORK_HEADERS.index("framework_json")] or "").strip()
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+            selectors = payload.get("selectors", payload.get("framework", [])) if isinstance(payload, dict) else payload
+        except (ValueError, json.JSONDecodeError) as exc:
+            LOG.warning("⚠️ %s framework JSON 로드 실패: %s", output_sheet, exc)
+            return []
+        if not isinstance(selectors, list):
+            LOG.warning("⚠️ %s framework JSON 형식 오류: selectors가 배열이 아닙니다.", output_sheet)
+            return []
+        cleaned = [selector for selector in selectors if isinstance(selector, dict)]
+        if cleaned:
+            LOG.info("🧾 %s framework JSON 재사용: %d selectors", output_sheet, len(cleaned))
+        return cleaned
+
+    def save_framework(self, framework, company: str, stock: str, corp: str, output_sheet: str, selectors: list[dict]) -> int:
+        if framework is None or not selectors:
+            return 0
+        rows = self._framework_row_data(framework)
+        row_info = rows.get(output_sheet)
+        row_index = row_info[0] if row_info else max((item[0] for item in rows.values()), default=1) + 1
+        payload = {"schema_version": FRAMEWORK_SCHEMA_VERSION, "selectors": selectors}
+        values = [
+            output_sheet,
+            company,
+            stock,
+            corp,
+            datetime.now(KST).isoformat(),
+            FRAMEWORK_SCHEMA_VERSION,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        ]
+        end_col = column_letter(len(FRAMEWORK_HEADERS))
+        if self.test_mode:
+            LOG.info("DRY-RUN %s!A%d:%s%d framework JSON 저장 예정", framework.title, row_index, end_col, row_index)
+        else:
+            self.quota.write(); framework.update(f"A{row_index}:{end_col}{row_index}", [values], value_input_option="USER_ENTERED")
+        rows[output_sheet] = (row_index, values)
+        return row_index
+
     def setup(self, shard: int, company: str, stock: str):
         self.quota.read(); book = self.gc.open_by_key(self.ids[shard - 1])
         title = safe_sheet_title(company, stock)
@@ -447,7 +560,8 @@ class SheetStore:
                 self.quota.write(); ledger = book.add_worksheet(LEDGER_SHEET_TITLE, rows=2000, cols=max(9, len(LEDGER_HEADERS)))
                 LOG.info("📒 장부 시트 생성: %s", LEDGER_SHEET_TITLE)
         self._ensure_ledger(ledger)
-        return ws, ledger
+        framework = self._ensure_framework_store(book, worksheets)
+        return ws, ledger, framework
 
     def sheet_structure(self, ws) -> dict:
         self._ensure_quarter_headers(ws)
@@ -612,7 +726,7 @@ class SheetStore:
             self.quota.write(); ws.batch_update(requests[index:index + 500], value_input_option="USER_ENTERED")
         return len(requests)
 
-    def apply_structured_updates(self, ws, updates: list[dict]) -> int:
+    def apply_structured_updates(self, ws, updates: list[dict], allow_new_rows: bool = True) -> int:
         if not updates:
             return 0
         structure = self.sheet_structure(ws)
@@ -634,6 +748,9 @@ class SheetStore:
             column = quarter_columns[quarter]
             row = self._match_structure_row(structure, update)
             if row is None:
+                if not allow_new_rows:
+                    LOG.warning("⚠️ %s framework 밖 update skip: %s/%s", ws.title, update.get("section"), update.get("source_label") or update.get("item"))
+                    continue
                 labels = self._structure_labels(update)
                 key = tuple(labels)
                 row = planned.get(key)
@@ -700,17 +817,29 @@ class SheetStore:
 
 
 def reports(dart, corp_code: str, years: list[int]):
-    """Fetch spaced annual filings: each normally contains three fiscal years."""
-    for year in years[::3]:
+    """Fetch regular quarterly, half-year, and annual filings for the requested fiscal years."""
+    target_years = sorted({int(year) for year in years})
+    seen: set[str] = set()
+    collected = []
+    for year in target_years:
         for attempt in range(3):
             try:
                 frame = dart.list(corp_code, start=f"{year}0101", end=f"{year+1}0630", kind="A")
-                if frame is not None and len(frame): yield frame.iloc[0]
+                if frame is not None and len(frame):
+                    for _, report in frame.iterrows():
+                        rcept = str(report.get("rcept_no", "")).strip()
+                        business_year = report_business_year(report)
+                        if not rcept or rcept in seen or business_year not in target_years or not is_periodic_report(report):
+                            continue
+                        seen.add(rcept)
+                        collected.append(report)
                 break
             except Exception as exc:
                 if attempt == 2: LOG.warning("⚠️ 보고서 조회 실패: %s/%s %s", corp_code, year, exc)
                 else: time.sleep(2 ** attempt)
         time.sleep(.2)
+    for report in sorted(collected, key=report_sort_key):
+        yield report
 
 
 def main() -> int:
@@ -744,6 +873,7 @@ def main() -> int:
     exception_fallback_mode = os.getenv("LLM_EXCEPTION_FALLBACK_MODE", "true").lower() in {"1","true","yes"}
     structured_requires_selectors = os.getenv("STRUCTURED_WRITES_REQUIRE_SELECTORS", "true").lower() in {"1","true","yes"}
     append_raw_rows = os.getenv("APPEND_RAW_ROWS", "false").lower() in {"1","true","yes"}
+    force_reprocess = env_bool("FORCE_REPROCESS")
     LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
              llm_max_calls, llm_max_calls_per_company, llm_exception_max_calls,
              llm_exception_max_calls_per_company, structure_mode, value_fallback_mode,
@@ -766,13 +896,21 @@ def main() -> int:
                     LOG.warning("⚠️ 기업 코드 매핑 실패 %s: %s", name, exc)
                     continue
                 LOG.info("[%d/%d] %s 처리 중…", position, total, name)
-                ws, ledger = store.setup(shard, name, stock)
+                ws, ledger, framework_store = store.setup(shard, name, stock)
                 llm_key = stock or corp
                 selectors: list[dict] = []
                 framework_attempted = False
                 company_updates: list[dict] = []
                 legacy_rows: list[dict] = []
                 history_rows: list[list] = []
+                if structure_mode and not force_reprocess:
+                    saved_selectors = store.load_framework(framework_store, ws.title)
+                    if saved_selectors:
+                        selectors = store.apply_framework(ws, saved_selectors)
+                        if selectors != saved_selectors:
+                            store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                        framework_attempted = True
+                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "framework_reused", f"{len(selectors)} selectors from JSON", ws.title))
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     quarter = report_quarter_label(report, year)
@@ -789,7 +927,8 @@ def main() -> int:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
-                            history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title))
+                            store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                            history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}; saved JSON", ws.title))
                         updates = []
                         if rows:
                             updates = rows_to_structured_updates(rows, quarter, selectors, structured_requires_selectors and structure_mode)
@@ -845,7 +984,7 @@ def main() -> int:
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
                 if company_updates:
                     try:
-                        applied = store.apply_structured_updates(ws, company_updates)
+                        applied = store.apply_structured_updates(ws, company_updates, allow_new_rows=not (structured_requires_selectors and structure_mode))
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_write", f"{applied} cells from {len(company_updates)} queued updates", ws.title))
                         LOG.info("✅ %s batch structured write: %d cells", name, applied)
                     except Exception as exc:
