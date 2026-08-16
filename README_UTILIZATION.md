@@ -8,7 +8,16 @@ Sheets 10개에 저장합니다. 결정론 파서가 명시 가동률, 가동시
 ## 사전 준비
 
 GitHub Secrets에 `opendart_api`, `GOOGLE_SHEETS_CREDS`, `gspread_list`,
-`gspread_id_1` … `gspread_id_10`, `CARBON_TOKEN`, `ESG_TESTER`를 등록합니다.
+`gspread_ids`, `CARBON_TOKEN`, `ESG_TESTER`를 등록합니다. `gspread_ids`는 결과
+Google Sheets 10개의 ID를 순서대로 담은 JSON 배열 문자열입니다.
+
+```json
+["id1","id2","id3","id4","id5","id6","id7","id8","id9","id10"]
+```
+
+배열 순서는 shard 1부터 shard 10까지 대응합니다. 9번째 ID는 런타임 표준 스키마를
+판정하는 기준 문서로도 사용됩니다.
+
 대상 문서는 개인 계정 `dwkim.digital@gmail.com`뿐 아니라
 `GOOGLE_SHEETS_CREDS` JSON의 `client_email`에도 **편집자**로 공유해야 합니다. 빠뜨리면
 `gspread.exceptions.SpreadsheetNotFound` 또는 Google API `403 PERMISSION_DENIED`가
