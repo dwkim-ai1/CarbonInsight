@@ -58,3 +58,5 @@ wheel==0.42.0             # 빌드 도구
 # DART 가동률 시계열 수집
 OpenDartReader==0.2.3
 ollama>=0.3.0
+pytest>=8.0.0
+# • 실패 안전 설치로 부분 실패해도 계속 진행
