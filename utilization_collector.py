@@ -188,10 +188,16 @@ def report_quarter_label(report, business_year: int) -> str:
 
 
 def report_business_year(report, default: int | None = None) -> int | None:
-    try:
-        return int(report.get("bsns_year", default))
-    except (TypeError, ValueError):
-        return default
+    value = report.get("bsns_year")
+    if value not in (None, ""):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    match = re.search(r"(20\d{2})\s*(?:[.\-/년]\s*(?:0?[369]|12))?", str(report.get("report_nm", "")))
+    if match:
+        return int(match.group(1))
+    return default
 
 
 def is_periodic_report(report) -> bool:
@@ -847,7 +853,7 @@ def reports(dart, corp_code: str, years: list[int]):
                 if frame is not None and len(frame):
                     for _, report in frame.iterrows():
                         rcept = str(report.get("rcept_no", "")).strip()
-                        business_year = report_business_year(report)
+                        business_year = report_business_year(report, year)
                         if not rcept or rcept in seen or business_year not in target_years or not is_periodic_report(report):
                             continue
                         seen.add(rcept)
@@ -949,7 +955,7 @@ def main() -> int:
                         llm_structure_snapshot = store.sheet_structure(ws)
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "framework_reused", f"{len(selectors)} selectors from JSON", ws.title))
                 for report in reports(dart, corp, business_years):
-                    rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
+                    rcept = str(report.get("rcept_no", "")); year = report_business_year(report, now_year) or now_year
                     quarter = report_quarter_label(report, year)
                     try:
                         html = dart.document(rcept)

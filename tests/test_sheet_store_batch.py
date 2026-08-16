@@ -138,11 +138,11 @@ def test_reports_collects_all_periodic_filings_in_requested_years():
         def list(self, corp_code, start, end, kind):
             assert kind == "A"
             return FakeFrame([
-                {"rcept_no": "3", "bsns_year": "2025", "report_nm": "분기보고서 (2025.09)", "rcept_dt": "20251114"},
-                {"rcept_no": "1", "bsns_year": "2025", "report_nm": "분기보고서 (2025.03)", "rcept_dt": "20250515"},
-                {"rcept_no": "2", "bsns_year": "2025", "report_nm": "반기보고서 (2025.06)", "rcept_dt": "20250814"},
-                {"rcept_no": "4", "bsns_year": "2025", "report_nm": "사업보고서 (2025.12)", "rcept_dt": "20260331"},
-                {"rcept_no": "x", "bsns_year": "2024", "report_nm": "분기보고서 (2024.09)", "rcept_dt": "20241114"},
+                {"rcept_no": "3", "report_nm": "분기보고서 (2025.09)", "rcept_dt": "20251114"},
+                {"rcept_no": "1", "report_nm": "분기보고서 (2025.03)", "rcept_dt": "20250515"},
+                {"rcept_no": "2", "report_nm": "반기보고서 (2025.06)", "rcept_dt": "20250814"},
+                {"rcept_no": "4", "report_nm": "사업보고서 (2025.12)", "rcept_dt": "20260331"},
+                {"rcept_no": "x", "report_nm": "분기보고서 (2024.09)", "rcept_dt": "20241114"},
             ])
 
     result = list(reports(FakeDart(), "00123456", [2025]))
