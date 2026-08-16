@@ -3,7 +3,7 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import SheetStore
+from utilization_collector import SheetStore, row_quarter_label, rows_to_structured_updates
 
 
 class FakeQuota:
@@ -60,3 +60,23 @@ def test_section_only_update_inserts_data_row_not_header_row():
 
     assert ws.calls[0][0] == "insert_row"
     assert ws.calls[0][1][0] == ["가동률", "", "평균가동률", "", ""]
+
+
+def test_row_period_maps_to_matching_quarter_not_report_quarter_only():
+    assert row_quarter_label({"사업연도": "당기"}, "1Q26") == "1Q26"
+    assert row_quarter_label({"사업연도": "전기"}, "1Q26") == "1Q25"
+    assert row_quarter_label({"사업연도": "2024년 3분기"}, "1Q26") == "3Q24"
+
+
+def test_selector_required_skips_unmatched_parser_rows():
+    rows = [{"품목": "PB", "가동률(%)": "91.2", "사업연도": "전기"}]
+    selectors = [{"target_row": 2, "section": "가동률", "item": "MDF"}]
+    assert rows_to_structured_updates(rows, "1Q26", selectors, require_selector_match=True) == []
+
+
+def test_selector_required_keeps_matched_rows_and_period():
+    rows = [{"품목": "MDF", "가동률(%)": "91.2", "사업연도": "전기"}]
+    selectors = [{"target_row": 2, "section": "가동률", "item": "MDF"}]
+    updates = rows_to_structured_updates(rows, "1Q26", selectors, require_selector_match=True)
+    assert updates[0]["target_row"] == 2
+    assert updates[0]["quarter"] == "1Q25"

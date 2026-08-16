@@ -176,6 +176,53 @@ def report_quarter_label(report, business_year: int) -> str:
     return f"{quarter}Q{str(int(business_year))[-2:]}"
 
 
+def quarter_parts(label: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"([1-4])Q(\d{2})", str(label or "").strip())
+    return (int(match.group(1)), 2000 + int(match.group(2))) if match else None
+
+
+def period_year(label: object, fallback_year: int) -> int | None:
+    text = str(label or "")
+    match = re.search(r"(19|20)\d{2}", text)
+    if match:
+        return int(match.group())
+    if "전전기" in text:
+        return fallback_year - 2
+    if "전기" in text:
+        return fallback_year - 1
+    if "당기" in text:
+        return fallback_year
+    return None
+
+
+def period_quarter(label: object, fallback_quarter: int) -> int:
+    compact = str(label or "").replace(" ", "")
+    match = re.search(r"([1-4])Q", compact, flags=re.I)
+    if match:
+        return int(match.group(1))
+    month_match = re.search(r"(03|06|09|12)(?:월|\.|\-|/|$)", compact)
+    if month_match:
+        return {3: 1, 6: 2, 9: 3, 12: 4}[int(month_match.group(1))]
+    if "반기" in compact:
+        return 2
+    if "3분기" in compact or "제3분기" in compact:
+        return 3
+    if "1분기" in compact or "제1분기" in compact:
+        return 1
+    return fallback_quarter
+
+
+def row_quarter_label(row: dict, fallback_quarter: str) -> str:
+    parts = quarter_parts(fallback_quarter)
+    if not parts:
+        return fallback_quarter
+    fallback_q, fallback_year = parts
+    period_label = row.get("사업연도") or row.get("기간") or ""
+    year = period_year(period_label, fallback_year)
+    quarter = period_quarter(period_label, fallback_q)
+    return f"{quarter}Q{str(year)[-2:]}" if year else fallback_quarter
+
+
 def selector_score(selector: dict, row: dict, section: str) -> int:
     score = 0
     if label_match(section, selector.get("section")):
@@ -197,16 +244,34 @@ def selector_score(selector: dict, row: dict, section: str) -> int:
     return score
 
 
+def selector_specific_match(selector: dict, row: dict) -> bool:
+    aliases = selector.get("source_aliases", [])
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    row_fields = (row.get("사업부문"), row.get("품목"), row.get("사업소"))
+    if any(alias and any(label_match(alias, field) for field in row_fields) for alias in aliases):
+        return True
+    if selector.get("item"):
+        return any(label_match(selector.get("item"), field) for field in (row.get("품목"), row.get("사업소")))
+    if selector.get("site"):
+        return label_match(selector.get("site"), row.get("사업소"))
+    if selector.get("division"):
+        return any(label_match(selector.get("division"), field) for field in row_fields)
+    return False
+
+
 def select_target_row(selectors: list[dict], row: dict, section: str) -> int | None:
     best_score, best_row = 0, None
     for selector in selectors:
+        if not label_match(section, selector.get("section")) or not selector_specific_match(selector, row):
+            continue
         score = selector_score(selector, row, section)
         if score > best_score:
             best_score, best_row = score, selector.get("target_row")
     return best_row if best_score >= 5 else None
 
 
-def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[dict] | None = None) -> list[dict]:
+def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[dict] | None = None, require_selector_match: bool = False) -> list[dict]:
     updates = []
     selectors = selectors or []
     fields = [
@@ -215,20 +280,24 @@ def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[d
         ("가동률", "가동률(%)", "(%)"),
     ]
     for row in rows:
+        row_quarter = row_quarter_label(row, quarter)
         for section, field, unit_override in fields:
             value = row.get(field)
             if value in (None, "", "-"):
                 continue
+            target_row = select_target_row(selectors, row, section)
+            if require_selector_match and target_row is None:
+                continue
             updates.append({
-                "target_row": select_target_row(selectors, row, section),
+                "target_row": target_row,
                 "section": section,
                 "division": row.get("사업부문") or "",
                 "item": row.get("품목") or "",
                 "site": row.get("사업소") or "",
                 "unit": unit_override or row.get("단위") or "",
-                "quarter": quarter,
+                "quarter": row_quarter,
                 "value": value,
-                "source_label": row.get("품목") or row.get("사업소") or section,
+                "source_label": row.get("품목") or row.get("사업소") or row.get("사업연도") or section,
                 "confidence": "high",
             })
     return updates
@@ -673,9 +742,12 @@ def main() -> int:
     structure_mode = os.getenv("LLM_STRUCTURE_MODE", "true").lower() in {"1","true","yes"}
     value_fallback_mode = os.getenv("LLM_VALUE_FALLBACK_MODE", "false").lower() in {"1","true","yes"}
     exception_fallback_mode = os.getenv("LLM_EXCEPTION_FALLBACK_MODE", "true").lower() in {"1","true","yes"}
-    LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 값 fallback=%s, 예외 fallback=%s",
+    structured_requires_selectors = os.getenv("STRUCTURED_WRITES_REQUIRE_SELECTORS", "true").lower() in {"1","true","yes"}
+    append_raw_rows = os.getenv("APPEND_RAW_ROWS", "false").lower() in {"1","true","yes"}
+    LOG.info("🤖 LLM 호출 상한: 일반=%d/%d per company, 예외=%d/%d per company, 프레임워크=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
              llm_max_calls, llm_max_calls_per_company, llm_exception_max_calls,
-             llm_exception_max_calls_per_company, structure_mode, value_fallback_mode, exception_fallback_mode)
+             llm_exception_max_calls_per_company, structure_mode, value_fallback_mode,
+             exception_fallback_mode, structured_requires_selectors, append_raw_rows)
     successes = regular_llm_calls = exception_llm_calls = 0
     llm_company_counts: dict[str, int] = {}
     llm_exception_company_counts: dict[str, int] = {}
@@ -718,16 +790,20 @@ def main() -> int:
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
                             history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title))
+                        updates = []
                         if rows:
-                            updates = rows_to_structured_updates(rows, quarter, selectors)
+                            updates = rows_to_structured_updates(rows, quarter, selectors, structured_requires_selectors and structure_mode)
                             if updates:
                                 company_updates.extend(updates)
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept, "structured_parser_queued", f"{len(updates)} cells queued for company batch write", ws.title))
                                 successes += 1
                                 continue
+                            if structured_requires_selectors and structure_mode:
+                                history_rows.append(store.history_values(name, stock, corp, year, rcept, "structured_parser_unmatched", f"{len(rows)} parsed rows skipped outside LLM selectors", ws.title))
                         can_exception_llm = can_use_llm(exception_llm_calls, llm_exception_max_calls, llm_exception_company_counts,
                                                         llm_key, llm_exception_max_calls_per_company)
-                        if exception_fallback_mode and parse_result.needs_llm and can_exception_llm:
+                        selector_miss = bool(rows) and structured_requires_selectors and structure_mode and not updates
+                        if exception_fallback_mode and (parse_result.needs_llm or selector_miss) and can_exception_llm:
                             llm_exception_company_counts[llm_key] = llm_exception_company_counts.get(llm_key, 0) + 1
                             exception_llm_calls += 1
                             structure = call_structure(html, store.sheet_structure(ws), quarter)
@@ -735,16 +811,16 @@ def main() -> int:
                                 company_updates.extend(structure.updates)
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                          f"llm_exception_{structure.status}",
-                                                                         f"{parse_result.status}; {len(structure.updates)} cells queued via {MODEL}", ws.title))
+                                                                        f"{parse_result.status}; {len(structure.updates)} cells queued via {MODEL}", ws.title))
                                 successes += 1
                                 continue
                             history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                      f"llm_exception_{structure.status}",
                                                                      f"{parse_result.status}; 0 cells via {MODEL}", ws.title))
-                        elif exception_fallback_mode and parse_result.needs_llm:
+                        elif exception_fallback_mode and (parse_result.needs_llm or selector_miss):
                             history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                      "llm_exception_skipped",
-                                                                     f"{parse_result.status}; no OLLAMA_API_KEY or exception budget exhausted", ws.title))
+                                                                     f"{parse_result.status if parse_result.needs_llm else 'selector_miss'}; no OLLAMA_API_KEY or exception budget exhausted", ws.title))
                         can_llm = can_use_llm(regular_llm_calls, llm_max_calls, llm_company_counts, llm_key, llm_max_calls_per_company)
                         if value_fallback_mode and not rows and can_llm:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
@@ -757,10 +833,12 @@ def main() -> int:
                             if fallback.status != "success": LOG.warning("⚠️ %s: %s", name, fallback.status)
                         for row in rows:
                             row.update({"기업명":name,"종목코드":stock,"corp_code":corp,"사업연도":row.get("사업연도") or year,"보고서명":report.get("report_nm", ""),"접수번호(rcept_no)":rcept,"DART URL":f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept}","수집일시":datetime.now(KST).isoformat()})
-                            legacy_rows.append(row)
-                        status = "success" if rows else "no_rows"
-                        history_rows.append(store.history_values(name, stock, corp, year, rcept, status, f"{len(rows)} rows queued; parser={parse_result.status}", ws.title))
-                        successes += bool(rows)
+                            if append_raw_rows:
+                                legacy_rows.append(row)
+                        status = "raw_rows_queued" if rows and append_raw_rows else "parsed_unwritten" if rows else "no_rows"
+                        raw_message = "queued" if append_raw_rows else "not_appended"
+                        history_rows.append(store.history_values(name, stock, corp, year, rcept, status, f"{len(rows)} rows {raw_message}; parser={parse_result.status}", ws.title))
+                        successes += bool(rows and append_raw_rows)
                     except Exception as exc:
                         LOG.warning("⚠️ 부분 실패 %s/%s: %s", name, rcept, exc)
                         history_rows.append(store.history_values(name, stock, corp, year, rcept, "failure", str(exc), ws.title))

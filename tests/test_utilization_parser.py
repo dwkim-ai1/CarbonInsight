@@ -29,3 +29,11 @@ def test_diagnostics_flags_parseable_header_without_numbers_for_llm():
     assert result.rows == []
     assert result.status == "no_numeric_rows"
     assert result.needs_llm
+
+def test_skips_out_of_range_utilization_values():
+    html = "<table><tr><th>품목</th><th>가동률</th></tr><tr><td>MDF</td><td>607</td></tr></table>"
+    assert UtilizationParser().parse(html, 2026) == []
+
+def test_skips_ambiguous_multilevel_header_rows():
+    html = "<table><tr><th>사업부문</th><th>품목</th><th>생산능력</th><th>평균가동률</th></tr><tr><td>발전</td><td>전기</td><td>26050</td><td>607</td><td>4700</td><td>120</td><td>73.1</td></tr></table>"
+    assert UtilizationParser().parse(html, 2026) == []

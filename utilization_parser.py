@@ -216,6 +216,8 @@ class UtilizationParser:
         raw = json.dumps(matrix, ensure_ascii=False)
         parsed: list[UtilizationRow] = []
         for values in matrix[1:]:
+            if len(values) > len(headers) + 2:
+                continue
             get = lambda name: values[indexes[name]] if name in indexes and indexes[name] < len(values) else None
             utilization = get("utilization")
             formula = None
@@ -224,11 +226,12 @@ class UtilizationParser:
                 if numerator is not None and denominator:
                     utilization = f"{numerator / denominator * 100:.2f}".rstrip("0").rstrip(".")
                     formula = "가동시간/가동가능시간 * 100"
-            if _number(utilization or "") is None:
+            utilization_number = _number(utilization or "")
+            if utilization_number is None or not 0 <= utilization_number <= 200:
                 continue
             parsed.append(UtilizationRow(get("business_year") or (str(business_year) if business_year else None),
                                          get("division"), get("item"), get("site"), get("capacity"),
-                                         get("production"), str(_number(utilization or "")), get("unit"), formula, raw))
+                                         get("production"), str(utilization_number), get("unit"), formula, raw))
         return parsed
 
 
