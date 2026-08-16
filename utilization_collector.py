@@ -40,7 +40,11 @@ def load_sheet_ids() -> list[str]:
             raise ValueError("gspread_ids must be a JSON array of 10 Google Sheet IDs")
         cleaned = [str(sheet_id).strip() for sheet_id in ids]
     else:
-        cleaned = [os.environ[f"gspread_id_{i}"].strip() for i in range(1, 11)]
+        legacy_names = [f"gspread_id_{i}" for i in range(1, 11)]
+        missing = [name for name in legacy_names if not os.getenv(name, "").strip()]
+        if missing:
+            raise ValueError("Set gspread_ids to a JSON array of 10 Google Sheet IDs")
+        cleaned = [os.environ[name].strip() for name in legacy_names]
     if len(cleaned) != 10 or any(not sheet_id for sheet_id in cleaned):
         raise ValueError("gspread_ids must contain exactly 10 non-empty Google Sheet IDs")
     return cleaned
