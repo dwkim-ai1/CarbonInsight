@@ -56,7 +56,7 @@ wheel==0.42.0             # 빌드 도구
 # • "No space left on device" 오류 완전 해결
 # • GitHub Actions ubuntu-22.04에서 완전 테스트됨
 # DART 가동률 시계열 수집
-OpenDartReader==0.2.3
+OpenDartReader==0.2.2
 ollama>=0.3.0
 pytest>=8.0.0
 # • 실패 안전 설치로 부분 실패해도 계속 진행
