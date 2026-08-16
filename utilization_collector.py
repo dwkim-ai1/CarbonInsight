@@ -13,7 +13,7 @@ from pathlib import Path
 
 import gspread
 
-from utilization_llm_fallback import MODEL, call_fallback, call_structure
+from utilization_llm_fallback import MODEL, call_fallback, call_framework
 from utilization_parser import UtilizationParser
 
 LOG = logging.getLogger("utilization")
@@ -174,6 +174,64 @@ def report_quarter_label(report, business_year: int) -> str:
     else:
         quarter = 4
     return f"{quarter}Q{str(int(business_year))[-2:]}"
+
+
+def selector_score(selector: dict, row: dict, section: str) -> int:
+    score = 0
+    if label_match(section, selector.get("section")):
+        score += 5
+    elif selector.get("section"):
+        score -= 2
+    if row.get("사업부문") and label_match(row.get("사업부문"), selector.get("division")):
+        score += 3
+    if row.get("품목") and label_match(row.get("품목"), selector.get("item")):
+        score += 5
+    if row.get("사업소") and label_match(row.get("사업소"), selector.get("site")):
+        score += 3
+    if row.get("단위") and label_match(row.get("단위"), selector.get("unit")):
+        score += 1
+    for alias in selector.get("source_aliases", []):
+        if any(label_match(alias, row.get(field)) for field in ("사업부문", "품목", "사업소")):
+            score += 4
+            break
+    return score
+
+
+def select_target_row(selectors: list[dict], row: dict, section: str) -> int | None:
+    best_score, best_row = 0, None
+    for selector in selectors:
+        score = selector_score(selector, row, section)
+        if score > best_score:
+            best_score, best_row = score, selector.get("target_row")
+    return best_row if best_score >= 5 else None
+
+
+def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[dict] | None = None) -> list[dict]:
+    updates = []
+    selectors = selectors or []
+    fields = [
+        ("생산능력", "생산능력", None),
+        ("생산실적", "생산실적", None),
+        ("가동률", "가동률(%)", "(%)"),
+    ]
+    for row in rows:
+        for section, field, unit_override in fields:
+            value = row.get(field)
+            if value in (None, "", "-"):
+                continue
+            updates.append({
+                "target_row": select_target_row(selectors, row, section),
+                "section": section,
+                "division": row.get("사업부문") or "",
+                "item": row.get("품목") or "",
+                "site": row.get("사업소") or "",
+                "unit": unit_override or row.get("단위") or "",
+                "quarter": quarter,
+                "value": value,
+                "source_label": row.get("품목") or row.get("사업소") or section,
+                "confidence": "high",
+            })
+    return updates
 
 
 def resolve_company_codes(dart, record: dict, columns: dict[str, str]) -> tuple[str, str]:
@@ -387,6 +445,20 @@ class SheetStore:
         structure.setdefault("rows", []).append({"row": insert_at, "section": labels[0], "division": labels[1], "item": labels[2], "site": labels[3], "unit": labels[4]})
         return insert_at
 
+    def apply_framework(self, ws, selectors: list[dict]) -> list[dict]:
+        if not selectors:
+            return []
+        structure = self.sheet_structure(ws)
+        bound = []
+        for selector in selectors:
+            row = self._match_structure_row(structure, selector)
+            if row is None:
+                row = self._insert_structure_row(ws, structure, selector)
+            prepared = dict(selector)
+            prepared["target_row"] = row
+            bound.append(prepared)
+        return bound
+
     def apply_structured_updates(self, ws, updates: list[dict]) -> int:
         if not updates:
             return 0
@@ -470,9 +542,13 @@ def main() -> int:
     target = os.getenv("TARGET_SHARD", "all")
     selected = range(1, 11) if target == "all" else [int(target)]
     years_back = int(os.getenv("YEARS_BACK", "10")); now_year = datetime.now(KST).year
-    llm_max_calls = env_int("LLM_MAX_CALLS", 120)
+    llm_max_calls = env_int("LLM_MAX_CALLS", 240)
+    llm_max_calls_per_company = env_int("LLM_MAX_CALLS_PER_COMPANY", 1)
     structure_mode = os.getenv("LLM_STRUCTURE_MODE", "true").lower() in {"1","true","yes"}
+    value_fallback_mode = os.getenv("LLM_VALUE_FALLBACK_MODE", "false").lower() in {"1","true","yes"}
+    LOG.info("🤖 LLM 호출 상한: 전체=%d, 기업당=%d, 프레임워크=%s, 값 fallback=%s", llm_max_calls, llm_max_calls_per_company, structure_mode, value_fallback_mode)
     successes = llm_calls = 0
+    llm_company_counts: dict[str, int] = {}
     try:
         import OpenDartReader
         dart = OpenDartReader(os.environ["opendart_api"])
@@ -489,23 +565,35 @@ def main() -> int:
                     continue
                 LOG.info("[%d/%d] %s 처리 중…", position, total, name)
                 ws, ledger = store.setup(shard, name, stock)
+                llm_key = stock or corp
+                selectors: list[dict] = []
+                framework_attempted = False
                 for report in reports(dart, corp, list(range(now_year - years_back, now_year + 1))):
                     rcept = str(report.get("rcept_no", "")); year = int(report.get("bsns_year", now_year))
                     quarter = report_quarter_label(report, year)
                     try:
                         html = dart.document(rcept)
-                        if structure_mode and os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls:
+                        rows = parser.parse(html, year)
+                        can_llm = (os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls
+                                   and llm_company_counts.get(llm_key, 0) < llm_max_calls_per_company)
+                        if structure_mode and not framework_attempted and can_llm:
+                            framework_attempted = True
                             llm_calls += 1
-                            structure = store.sheet_structure(ws)
-                            structured = call_structure(html, structure, quarter)
-                            applied = store.apply_structured_updates(ws, structured.updates)
+                            llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
+                            framework = call_framework(html, store.sheet_structure(ws))
+                            selectors = store.apply_framework(ws, framework.selectors)
+                            store.record_history(ledger, name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}", ws.title)
+                        if rows:
+                            updates = rows_to_structured_updates(rows, quarter, selectors)
+                            applied = store.apply_structured_updates(ws, updates)
                             if applied:
-                                store.record_history(ledger, name, stock, corp, year, rcept, f"structured_{structured.status}", f"{applied} cells via {MODEL}", ws.title)
+                                store.record_history(ledger, name, stock, corp, year, rcept, "structured_parser", f"{applied} cells from deterministic parser", ws.title)
                                 successes += 1
                                 continue
-                            LOG.warning("⚠️ LLM 구조화 매핑 없음 %s/%s: %s", name, rcept, structured.status)
-                        rows = parser.parse(html, year)
-                        if not rows and os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls:
+                        can_llm = (os.getenv("OLLAMA_API_KEY") and llm_calls < llm_max_calls
+                                   and llm_company_counts.get(llm_key, 0) < llm_max_calls_per_company)
+                        if value_fallback_mode and not rows and can_llm:
+                            llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
                             llm_calls += 1; fallback = call_fallback(html)
                             rows = fallback.rows
                             for row in rows:

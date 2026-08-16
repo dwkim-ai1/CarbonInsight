@@ -1,5 +1,5 @@
 from unittest.mock import Mock
-from utilization_llm_fallback import call_fallback, validate_response, validate_structure_response
+from utilization_llm_fallback import call_fallback, validate_framework_response, validate_response, validate_structure_response
 
 HTML = "<table><tr><td>2024</td><td>85.3</td><td>1,000</td></tr></table>"
 STRUCTURE = {
@@ -56,6 +56,31 @@ def test_structure_response_resets_unknown_row_for_new_structure_row():
     assert result.status == "success"
     assert result.updates[0]["target_row"] is None
     assert result.updates[0]["section"] == "생산실적"
+
+
+def test_framework_response_creates_reusable_selectors_without_values():
+    raw = '[{"target_row":18,"section":"가동률","division":"소재산업","item":"MDF","source_aliases":["MDF"],"value":"85.3","confidence":"high"}]'
+    result = validate_framework_response(raw, STRUCTURE)
+    assert result.status == "success"
+    assert result.selectors == [{
+        "target_row": 18,
+        "section": "가동률",
+        "division": "소재산업",
+        "item": "MDF",
+        "site": "",
+        "unit": "(%)",
+        "source_aliases": ["MDF"],
+        "confidence": "high",
+    }]
+    assert "value" not in result.selectors[0]
+
+
+def test_framework_response_resets_unknown_row_for_new_selector():
+    raw = '[{"target_row":999,"section":"생산실적","item":"MDF","source_aliases":["MDF"],"confidence":"high"}]'
+    result = validate_framework_response(raw, STRUCTURE)
+    assert result.status == "success"
+    assert result.selectors[0]["target_row"] is None
+    assert result.selectors[0]["section"] == "생산실적"
 
 
 def test_timeout_retries_then_skips():
