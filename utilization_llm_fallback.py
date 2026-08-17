@@ -47,6 +47,8 @@ BACKFILL_STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시�
 - 값은 DART 원문에 있는 숫자/문자열만 사용한다. 계산하거나 추정하지 않는다.
 - 기존 시트 row와 맞으면 target_row를 넣는다.
 - 맞는 행이 없으면 target_row는 null로 두고 section/division/item/site/unit/source_label을 채워 새 구조 행을 만들 수 있게 한다.
+- 현재 시트 구조는 여러 보고서에서 누적되는 registry다. 공시의 사업부문/품목/사업소가 기존 row와 확실히 같은 대상일 때만 target_row를 사용한다.
+- 과거 보고서에만 있던 사업부문, 새 자회사/공장/발전소, 의미가 바뀐 명칭은 기존 row에 억지로 합치지 말고 target_row=null인 새 구조로 반환한다.
 - section/division/item/site/unit은 Google Sheet A~E열의 위계다. 공시 표의 병합 셀과 직전 제목을 보존해서 채운다.
 - section(A열): 최상위 사업부문/자회사/제조부문/공시 제목. 예: 화력발전부문, 한국남동발전(주), 소주제조, 맥주제조, 발전.
 - division(B열): 다음 위계. 예: 발전/전기, 소주, 맥주, 생산능력, 생산실적, 평균가동률.
@@ -75,6 +77,8 @@ FRAMEWORK_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조
 - 숫자 value는 절대 반환하지 않는다.
 - 기존 시트 row와 맞으면 target_row를 넣는다.
 - 맞는 행이 없으면 target_row는 null로 두고 section/division/item/site/unit을 채워 새 구조 행을 만들 수 있게 한다.
+- 프레임워크는 최신 보고서만의 고정 템플릿이 아니라 여러 연도 보고서에서 누적되는 registry다.
+- 과거 보고서에만 있던 사업부문, 새 자회사/공장/발전소, 의미가 바뀐 명칭은 기존 row에 억지로 합치지 말고 target_row=null인 selector로 반환한다.
 - source_aliases에는 DART 표에서 같은 행을 찾는 데 쓸 원문 라벨 후보를 넣는다.
 - confidence는 high, medium, low 중 하나다.
 

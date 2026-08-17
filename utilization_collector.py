@@ -35,7 +35,7 @@ ALIASES = {
 INVALID_SHEET_TITLE_CHARS = re.compile(r"[\\/?*\[\]:]")
 LEDGER_SHEET_TITLE = "가동률"
 FRAMEWORK_SHEET_TITLE = "_framework"
-FRAMEWORK_SCHEMA_VERSION = "utilization-framework-v1"
+FRAMEWORK_SCHEMA_VERSION = "utilization-framework-v2"
 FRAMEWORK_HEADERS = ["output_sheet","기업명","종목코드","corp_code","updated_at","schema_version","framework_json"]
 QUARTER_HEADER_START_COLUMN = 6
 DEFAULT_STRUCTURE_START_YEAR = 2016
@@ -390,6 +390,156 @@ def selectors_from_sheet_structure(structure: dict) -> list[dict]:
     return selectors
 
 
+def _unique_labels(values: list[object] | tuple[object, ...]) -> list[str]:
+    labels = []
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            candidates = list(value)
+        else:
+            candidates = [value]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text and text not in labels:
+                labels.append(text)
+    return labels
+
+
+def _selector_key(selector: dict) -> tuple[str, object]:
+    target = selector.get("target_row")
+    try:
+        if target not in (None, ""):
+            return ("row", int(target))
+    except (TypeError, ValueError):
+        pass
+    return ("labels", tuple(normalize_label(selector.get(field)) for field in ("section", "division", "item", "site", "unit")))
+
+
+def _quarter_order(label: str) -> int | None:
+    parts = quarter_parts(label)
+    if not parts:
+        return None
+    quarter, year = parts
+    return year * 4 + quarter
+
+
+def _merge_quarter_bounds(selector: dict, quarter: object) -> None:
+    label = str(quarter or "").strip()
+    order = _quarter_order(label)
+    if order is None:
+        return
+    first = str(selector.get("first_seen_quarter") or "").strip()
+    last = str(selector.get("last_seen_quarter") or "").strip()
+    if not first or (_quarter_order(first) or 10**9) > order:
+        selector["first_seen_quarter"] = label
+    if not last or (_quarter_order(last) or -1) < order:
+        selector["last_seen_quarter"] = label
+
+
+def _selector_update_score(selector: dict, update: dict) -> int:
+    score = 0
+    for field, weight in (("section", 4), ("division", 3), ("item", 5), ("site", 3), ("unit", 1)):
+        value = update.get(field)
+        if value and label_match(value, selector.get(field)):
+            score += weight
+        elif value and selector.get(field) and field in {"section", "item", "site"}:
+            score -= 1
+    source_label = update.get("source_label")
+    if source_label:
+        if any(label_match(source_label, selector.get(field)) for field in ("section", "division", "item", "site")):
+            score += 3
+        aliases = selector.get("source_aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if any(label_match(source_label, alias) for alias in aliases):
+            score += 3
+    return score
+
+
+def merge_framework_selectors(existing: list[dict], sheet_selectors: list[dict], updates: list[dict] | None = None, rcept_no: str = "") -> list[dict]:
+    merged: dict[tuple[str, object], dict] = {}
+    order: list[tuple[str, object]] = []
+
+    def add_selector(selector: dict) -> tuple[str, object] | None:
+        if not isinstance(selector, dict):
+            return None
+        prepared = dict(selector)
+        key = _selector_key(prepared)
+        if key not in merged:
+            merged[key] = prepared
+            order.append(key)
+        else:
+            current = merged[key]
+            for field in ("target_row", "section", "division", "item", "site", "unit", "confidence"):
+                if prepared.get(field) not in (None, ""):
+                    current[field] = prepared[field]
+            current["source_aliases"] = _unique_labels([current.get("source_aliases") or [], prepared.get("source_aliases") or []])[:40]
+            for field in ("first_seen_quarter", "last_seen_quarter"):
+                if prepared.get(field):
+                    _merge_quarter_bounds(current, prepared[field])
+            current["source_rcept_nos"] = _unique_labels([current.get("source_rcept_nos") or [], prepared.get("source_rcept_nos") or []])[:80]
+        merged[key]["source_aliases"] = _unique_labels([
+            merged[key].get("source_aliases") or [],
+            merged[key].get("item"),
+            merged[key].get("site"),
+            merged[key].get("division"),
+            merged[key].get("section"),
+        ])[:40]
+        _merge_quarter_bounds(merged[key], merged[key].get("first_seen_quarter"))
+        _merge_quarter_bounds(merged[key], merged[key].get("last_seen_quarter"))
+        return key
+
+    for selector in existing or []:
+        add_selector(selector)
+    for selector in sheet_selectors or []:
+        add_selector(selector)
+
+    for update in updates or []:
+        if not isinstance(update, dict):
+            continue
+        target_key = None
+        target = update.get("target_row")
+        try:
+            if target not in (None, "") and ("row", int(target)) in merged:
+                target_key = ("row", int(target))
+        except (TypeError, ValueError):
+            target_key = None
+        if target_key is None:
+            best_score, best_key = 0, None
+            for key, selector in merged.items():
+                score = _selector_update_score(selector, update)
+                if score > best_score:
+                    best_score, best_key = score, key
+            if best_score >= 7:
+                target_key = best_key
+        if target_key is None:
+            target_key = add_selector({
+                "target_row": update.get("target_row"),
+                "section": update.get("section") or "",
+                "division": update.get("division") or "",
+                "item": update.get("item") or update.get("source_label") or "",
+                "site": update.get("site") or "",
+                "unit": update.get("unit") or "",
+                "source_aliases": [],
+                "confidence": update.get("confidence") or "low",
+            })
+        if target_key is None:
+            continue
+        selector = merged[target_key]
+        selector["source_aliases"] = _unique_labels([
+            selector.get("source_aliases") or [],
+            update.get("source_label"),
+            update.get("section"),
+            update.get("division"),
+            update.get("item"),
+            update.get("site"),
+        ])[:40]
+        if rcept_no:
+            selector["source_rcept_nos"] = _unique_labels([selector.get("source_rcept_nos") or [], rcept_no])[:80]
+        _merge_quarter_bounds(selector, update.get("quarter"))
+
+    return sorted((merged[key] for key in order), key=lambda selector: (int(selector.get("target_row") or 10**9), str(selector.get("section") or ""), str(selector.get("division") or ""), str(selector.get("item") or ""), str(selector.get("site") or "")))
+
+
 def _table_to_html(table: list[list[str]], max_rows: int = 120) -> str:
     rows = []
     for row in table[:max_rows]:
@@ -398,7 +548,137 @@ def _table_to_html(table: list[list[str]], max_rows: int = 120) -> str:
     return "<table>" + "".join(rows) + "</table>"
 
 
+def _html_text_lines(fragment: str) -> list[str]:
+    text = re.sub(r"(?i)<\s*(br|/p|/div|/tr|/h[1-6]|/li)\b[^>]*>", "\n", str(fragment))
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    lines = []
+    for line in text.splitlines():
+        cleaned = re.sub(r"\s+", " ", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def _looks_like_heading(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text or len(text) > 140:
+        return False
+    if re.search(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", text):
+        return False
+    heading_patterns = [
+        r"^\d+\.\s*",
+        r"^[가-힣]\.\s*",
+        r"^\([가-힣]\)\s*",
+        r"^\(\d+\)\s*",
+        r"^[①-⑳]\s*",
+    ]
+    if any(re.match(pattern, text) for pattern in heading_patterns):
+        return True
+    return any(keyword in text for keyword in ("원재료 및 생산설비", "생산설비", "생산능력", "생산실적", "평균가동률", "평균가동시간"))
+
+
+def _update_heading_stack(stack: list[str], fragment: str) -> list[str]:
+    updated = list(stack)
+    for line in _html_text_lines(fragment):
+        if not _looks_like_heading(line):
+            continue
+        if line in updated:
+            updated = updated[:updated.index(line) + 1]
+            continue
+        if re.match(r"^\d+\.\s*", line) and "원재료 및 생산설비" in line:
+            updated = [line]
+        elif re.match(r"^\d+\.\s*", line):
+            major = [item for item in updated if "원재료 및 생산설비" in item or "생산설비" in item]
+            updated = major[-2:] + [line]
+        elif re.match(r"^[가-힣]\.\s*", line) and "생산설비" in line:
+            major = [item for item in updated if "원재료 및 생산설비" in item]
+            updated = major[-1:] + [line]
+        elif re.match(r"^[가-힣]\.\s*", line):
+            updated = updated[:5] + [line]
+        else:
+            updated.append(line)
+        updated = updated[-8:]
+    return updated
+
+
+def _normalized_table_text(raw_table: str) -> str:
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(raw_table, "html.parser")
+        spans: dict[tuple[int, int], tuple[str, int]] = {}
+        rows = []
+        for row_index, row_tag in enumerate(soup.find_all("tr")):
+            row = []
+            col_index = 0
+            while (row_index, col_index) in spans:
+                value, remaining = spans[(row_index, col_index)]
+                row.append(value)
+                if remaining > 1:
+                    spans[(row_index + 1, col_index)] = (value, remaining - 1)
+                col_index += 1
+            for cell_tag in row_tag.find_all(["th", "td"]):
+                while (row_index, col_index) in spans:
+                    value, remaining = spans[(row_index, col_index)]
+                    row.append(value)
+                    if remaining > 1:
+                        spans[(row_index + 1, col_index)] = (value, remaining - 1)
+                    col_index += 1
+                value = re.sub(r"\s+", " ", cell_tag.get_text(" ")).strip()
+                rowspan = int(cell_tag.get("rowspan") or 1)
+                colspan = int(cell_tag.get("colspan") or 1)
+                for offset in range(colspan):
+                    row.append(value)
+                    if rowspan > 1:
+                        spans[(row_index + 1, col_index + offset)] = (value, rowspan - 1)
+                col_index += colspan
+            rows.append(row)
+        return "\n".join(" | ".join(row) for row in rows if any(row))
+    except Exception:
+        document = UtilizationParser()._read_with_html_parser(raw_table, "htmlparser")
+        return "\n".join(" | ".join(row) for table in document.tables for row in table)
+
+
+def llm_utilization_blocks(parser: UtilizationParser, html: str, max_chars: int = 22000, max_blocks: int = 12) -> list[str]:
+    keywords = tuple(getattr(parser, "keywords", ()))
+    source = str(html)
+    blocks = []
+    heading_stack: list[str] = []
+    last_table_end = 0
+    try:
+        table_matches = list(re.finditer(r"<table\b[\s\S]*?</table>", source, flags=re.I))
+        for index, match in enumerate(table_matches, start=1):
+            between = source[last_table_end:match.start()]
+            heading_stack = _update_heading_stack(heading_stack, between)
+            raw_table = match.group()
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_table))
+            last_table_end = match.end()
+            if not any(keyword in text for keyword in keywords):
+                continue
+            normalized = _normalized_table_text(raw_table)
+            heading_text = "\n".join(f"- {item}" for item in heading_stack[-8:])
+            block = (
+                f"<utilization_block index=\"{len(blocks) + 1}\" source_table=\"{index}\">\n"
+                f"<heading_stack>\n{html_lib.escape(heading_text)}\n</heading_stack>\n"
+                f"<normalized_table>\n{html_lib.escape(normalized[:8000])}\n</normalized_table>\n"
+                f"<table_html>\n{raw_table}\n</table_html>\n"
+                f"</utilization_block>"
+            )
+            blocks.append(block[:max_chars])
+            if len(blocks) >= max_blocks:
+                break
+        if blocks:
+            return blocks
+    except Exception as exc:
+        LOG.warning("⚠️ LLM block extraction failed: %s", exc)
+    return []
+
+
 def llm_utilization_context(parser: UtilizationParser, html: str, max_chars: int = 22000) -> str:
+    blocks = llm_utilization_blocks(parser, html, max_chars=max_chars, max_blocks=12)
+    if blocks:
+        joined = "\n".join(blocks)
+        return joined[:max_chars]
     keywords = tuple(getattr(parser, "keywords", ()))
     try:
         from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
@@ -822,8 +1102,8 @@ class SheetStore:
 
     def sheet_structure(self, ws) -> dict:
         self._ensure_quarter_headers(ws)
-        self.quota.read(); values = ws.get_all_values()
-        first_row = values[0] if values else []
+        self.quota.read(); first_row = ws.row_values(1)
+        self.quota.read(); label_values = ws.get("A2:E") or []
         quarters = []
         for col, label in enumerate(first_row, start=1):
             text = str(label or "").strip()
@@ -831,7 +1111,7 @@ class SheetStore:
                 quarters.append({"col": col, "label": text})
         rows = []
         section = division = ""
-        for index, row in enumerate(values[1:], start=2):
+        for index, row in enumerate(label_values, start=2):
             padded = list(row) + [""] * 5
             if padded[:len(self.headers)] == self.headers:
                 break
@@ -846,7 +1126,7 @@ class SheetStore:
                 continue
             if c or e or (b and section):
                 rows.append({"row": index, "section": section, "division": division if c or e else "", "item": c or b, "site": d, "unit": e})
-        return {"title": ws.title, "quarters": quarters, "rows": rows[:160]}
+        return {"title": ws.title, "quarters": quarters, "rows": rows}
 
     def _match_structure_row(self, structure: dict, update: dict) -> int | None:
         target = update.get("target_row")
@@ -1154,15 +1434,16 @@ def main() -> int:
         structured_requires_selectors = True
     llm_per_report_allow_new_rows = os.getenv("LLM_PER_REPORT_ALLOW_NEW_ROWS", "true").lower() in {"1","true","yes"}
     llm_per_report_immediate_write = os.getenv("LLM_PER_REPORT_IMMEDIATE_WRITE", "true").lower() in {"1","true","yes"}
+    llm_per_report_max_blocks = env_int("LLM_PER_REPORT_MAX_BLOCKS", 12)
     llm_build_framework_in_per_report = os.getenv("LLM_BUILD_FRAMEWORK_IN_PER_REPORT", "false").lower() in {"1","true","yes"}
     append_raw_rows = os.getenv("APPEND_RAW_ROWS", "false").lower() in {"1","true","yes"}
     force_reprocess = env_bool("FORCE_REPROCESS")
     LOG.info("📆 대상 사업연도: %s", ",".join(str(year) for year in business_years))
-    LOG.info("🤖 LLM 호출 상한: 프레임워크=%d/%d per company, 일반=%d/%d per company, 보고서별=%d/%d per company, 예외=%d/%d per company, 프레임워크모드=%s, 보고서별=%s, 보고서별 새행=%s, 보고서별 즉시쓰기=%s, 보고서별 framework생성=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
+    LOG.info("🤖 LLM 호출 상한: 프레임워크=%d/%d per company, 일반=%d/%d per company, 보고서별=%d/%d per company, 예외=%d/%d per company, block/report=%d, 프레임워크모드=%s, 보고서별=%s, 보고서별 새행=%s, 보고서별 즉시쓰기=%s, 보고서별 framework생성=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
              framework_max_calls, framework_max_calls_per_company,
              llm_max_calls, llm_max_calls_per_company, llm_per_report_max_calls,
              llm_per_report_max_calls_per_company, llm_exception_max_calls,
-             llm_exception_max_calls_per_company, structure_mode, llm_per_report_mode, llm_per_report_allow_new_rows,
+             llm_exception_max_calls_per_company, llm_per_report_max_blocks, structure_mode, llm_per_report_mode, llm_per_report_allow_new_rows,
              llm_per_report_immediate_write, llm_build_framework_in_per_report, value_fallback_mode,
              exception_fallback_mode, structured_requires_selectors, append_raw_rows)
     successes = framework_llm_calls = regular_llm_calls = per_report_llm_calls = exception_llm_calls = 0
@@ -1235,12 +1516,17 @@ def main() -> int:
                         try:
                             llm_structure_snapshot = store.sheet_structure(ws)
                             if structure_mode and llm_per_report_mode and llm_per_report_allow_new_rows:
-                                refreshed_selectors = selectors_from_sheet_structure(llm_structure_snapshot)
-                                if refreshed_selectors and len(refreshed_selectors) != framework_selector_count:
+                                refreshed_selectors = merge_framework_selectors(
+                                    selectors,
+                                    selectors_from_sheet_structure(llm_structure_snapshot),
+                                    pending,
+                                    str(rcept_value or ""),
+                                )
+                                if refreshed_selectors and refreshed_selectors != selectors:
                                     selectors = refreshed_selectors
                                     framework_selector_count = len(refreshed_selectors)
                                     store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
-                                    LOG.info("✅ %s framework JSON refreshed from sheet rows: %d selectors", name, len(selectors))
+                                    LOG.info("✅ %s framework JSON refreshed as cumulative registry: %d selectors", name, len(selectors))
                         except Exception as exc:
                             LOG.warning("⚠️ framework JSON 갱신 실패 %s: %s", name, exc)
                             history_rows.append(store.history_values(name, stock, corp, year_value, rcept_value,
@@ -1280,37 +1566,53 @@ def main() -> int:
                             llm_structure_snapshot = store.sheet_structure(ws)
                             history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}; saved JSON", ws.title))
                         if llm_per_report_mode:
-                            can_per_report_llm = can_use_llm(per_report_llm_calls, llm_per_report_max_calls,
-                                                             llm_per_report_company_counts, llm_key,
-                                                             llm_per_report_max_calls_per_company)
-                            if not can_per_report_llm:
+                            llm_blocks = llm_utilization_blocks(parser, html, max_blocks=llm_per_report_max_blocks)
+                            if not llm_blocks:
+                                llm_blocks = [llm_utilization_context(parser, html)]
+                            LOG.info("🧾 %s/%s LLM 후보 block: %d", name, rcept, len(llm_blocks))
+                            report_success = False
+                            report_called = False
+                            for block_index, llm_html in enumerate(llm_blocks, start=1):
+                                can_per_report_llm = can_use_llm(per_report_llm_calls, llm_per_report_max_calls,
+                                                                 llm_per_report_company_counts, llm_key,
+                                                                 llm_per_report_max_calls_per_company)
+                                if not can_per_report_llm:
+                                    history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                             "llm_per_report_skipped",
+                                                                             f"block {block_index}/{len(llm_blocks)} skipped; no OLLAMA_API_KEY or per-report budget exhausted", ws.title))
+                                    break
+                                llm_per_report_company_counts[llm_key] = llm_per_report_company_counts.get(llm_key, 0) + 1
+                                per_report_llm_calls += 1
+                                report_called = True
+                                LOG.info("🤖 %s/%s 보고서별 LLM 호출: %s block %d/%d (%d chars)",
+                                         name, rcept, quarter, block_index, len(llm_blocks), len(llm_html))
+                                structure = call_structure(llm_html, llm_structure_snapshot or store.sheet_structure(ws), quarter,
+                                                           allow_new_rows=llm_per_report_allow_new_rows)
+                                if structure.updates:
+                                    company_updates.extend(structure.updates)
+                                    history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                             f"llm_per_report_{structure.status}",
+                                                                             f"block {block_index}/{len(llm_blocks)}; {len(structure.updates)} cells returned via {MODEL}", ws.title))
+                                    if llm_per_report_immediate_write:
+                                        flush_structured_updates("report_structured_write", year, rcept, f"per-report {quarter} block {block_index}/{len(llm_blocks)}")
+                                    if not report_success:
+                                        successes += 1
+                                        report_success = True
+                                else:
+                                    raw_preview = re.sub(r"\s+", " ", str(structure.raw or ""))[:180]
+                                    LOG.warning("⚠️ %s/%s 보고서별 LLM 0 updates: status=%s block=%d/%d raw=%s",
+                                                name, rcept, structure.status, block_index, len(llm_blocks), raw_preview)
+                                    history_rows.append(store.history_values(name, stock, corp, year, rcept,
+                                                                             f"llm_per_report_{structure.status}",
+                                                                             f"block {block_index}/{len(llm_blocks)}; 0 cells via {MODEL}; raw={raw_preview}", ws.title))
+                                if llm_per_report_immediate_write:
+                                    flush_history_rows()
+                            if not report_called:
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                          "llm_per_report_skipped",
-                                                                         "no OLLAMA_API_KEY or per-report budget exhausted", ws.title))
-                                continue
-                            llm_per_report_company_counts[llm_key] = llm_per_report_company_counts.get(llm_key, 0) + 1
-                            per_report_llm_calls += 1
-                            LOG.info("🤖 %s/%s 보고서별 LLM 호출: %s", name, rcept, quarter)
-                            llm_html = llm_html or llm_utilization_context(parser, html)
-                            LOG.info("🧾 %s/%s LLM 후보 context: %d chars", name, rcept, len(llm_html))
-                            structure = call_structure(llm_html, llm_structure_snapshot or store.sheet_structure(ws), quarter,
-                                                       allow_new_rows=llm_per_report_allow_new_rows)
-                            if structure.updates:
-                                company_updates.extend(structure.updates)
-                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
-                                                                         f"llm_per_report_{structure.status}",
-                                                                         f"{len(structure.updates)} cells returned via {MODEL}", ws.title))
+                                                                         "no OLLAMA_API_KEY or per-report budget exhausted before first block", ws.title))
                                 if llm_per_report_immediate_write:
-                                    flush_structured_updates("report_structured_write", year, rcept, f"per-report {quarter}")
-                                successes += 1
-                            else:
-                                raw_preview = re.sub(r"\s+", " ", str(structure.raw or ""))[:180]
-                                LOG.warning("⚠️ %s/%s 보고서별 LLM 0 updates: status=%s raw=%s", name, rcept, structure.status, raw_preview)
-                                history_rows.append(store.history_values(name, stock, corp, year, rcept,
-                                                                         f"llm_per_report_{structure.status}",
-                                                                         f"0 cells via {MODEL}; raw={raw_preview}", ws.title))
-                            if llm_per_report_immediate_write:
-                                flush_history_rows()
+                                    flush_history_rows()
                             continue
                         parse_result = parser.parse_with_diagnostics(html, year)
                         rows = parse_result.rows

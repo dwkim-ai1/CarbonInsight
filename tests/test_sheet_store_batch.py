@@ -3,7 +3,7 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import FRAMEWORK_HEADERS, SheetStore, llm_utilization_context, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, selectors_from_sheet_structure, target_business_years
+from utilization_collector import FRAMEWORK_HEADERS, SheetStore, llm_utilization_context, merge_framework_selectors, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, selectors_from_sheet_structure, target_business_years
 from utilization_parser import UtilizationParser
 
 
@@ -20,13 +20,21 @@ class FakeWorksheet:
         self.row_count = row_count
         self.col_count = col_count
         self.calls = []
+        self.get_all_values_called = False
 
     def row_values(self, row):
         if self.values is not None and row <= len(self.values):
             return self.values[row - 1]
         return ["", "", "", "", "", "1Q26"]
 
+    def get(self, range_name):
+        values = self.values if self.values is not None else self.get_all_values()
+        if range_name == "A2:E":
+            return [list(row[:5]) for row in values[1:]]
+        return values
+
     def get_all_values(self):
+        self.get_all_values_called = True
         if self.values is not None:
             return self.values
         return [["", "", "", "", "", "1Q26"], ["가동률", "", "MDF", "", "(%)"]]
@@ -126,6 +134,64 @@ def test_selectors_from_sheet_structure_uses_existing_sheet_rows():
         "source_aliases": ["평균가동률", "판지", "가동률"],
         "confidence": "medium",
     }]
+
+
+def test_sheet_structure_reads_only_header_and_label_columns_without_row_cap():
+    values = [["", "", "", "", "", "1Q26", "2Q26", ""]]
+    for index in range(170):
+        values.append(["가동률", "", f"품목{index}", "", "%", "87", "91", "ignored"])
+    ws = FakeWorksheet(values=values)
+    store = SheetStore(None, ["dummy"], FakeQuota())
+
+    structure = store.sheet_structure(ws)
+
+    assert not ws.get_all_values_called
+    assert [quarter["label"] for quarter in structure["quarters"]] == ["1Q26", "2Q26"]
+    assert len(structure["rows"]) == 170
+    assert structure["rows"][-1]["item"] == "품목169"
+
+
+def test_merge_framework_selectors_tracks_aliases_and_seen_periods():
+    existing = [{
+        "target_row": 2,
+        "section": "한국남동발전(주)",
+        "division": "발전/전기",
+        "item": "생산능력",
+        "site": "삼천포",
+        "unit": "MW",
+        "source_aliases": ["삼천포"],
+        "first_seen_quarter": "2Q26",
+        "confidence": "medium",
+    }]
+    sheet_selectors = [{
+        "target_row": 2,
+        "section": "한국남동발전(주)",
+        "division": "발전/전기",
+        "item": "생산능력",
+        "site": "삼천포",
+        "unit": "MW",
+        "source_aliases": ["생산능력"],
+        "confidence": "medium",
+    }]
+    updates = [{
+        "section": "한국남동발전",
+        "division": "발전/전기",
+        "item": "생산능력",
+        "site": "삼천포발전소",
+        "unit": "MW",
+        "quarter": "4Q24",
+        "value": "2,120",
+        "source_label": "삼천포발전소",
+        "confidence": "high",
+    }]
+
+    merged = merge_framework_selectors(existing, sheet_selectors, updates, "20260515000001")
+
+    assert len(merged) == 1
+    assert merged[0]["first_seen_quarter"] == "4Q24"
+    assert merged[0]["last_seen_quarter"] == "2Q26"
+    assert "삼천포발전소" in merged[0]["source_aliases"]
+    assert merged[0]["source_rcept_nos"] == ["20260515000001"]
 
 
 def test_llm_utilization_context_keeps_relevant_tables_not_document_prefix():
