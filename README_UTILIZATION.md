@@ -61,13 +61,18 @@ framework를 다시 생성합니다. 기본값에서는 기존 `_framework` JSON
 기업당 최초 1회 수준으로 제한합니다.
 
 초기 백필처럼 정밀 매핑이 필요하면 `llm_per_report_mode=true`로 실행합니다. 이 모드는
-정기보고서 1건마다 `gemma4:31b-cloud`를 호출해 기존 framework row에 맞는 값만 큐에
-넣습니다. `_framework`가 비어 있으면 기본값 `LLM_PER_REPORT_ALLOW_NEW_ROWS=true`에 따라
-LLM이 반환한 section/division/item/site/unit으로 기업별 시트 구조 행을 새로 만들고 값을
-씁니다. 기존 구조를 버리고 다시 잡으려면 `force_reprocess=true`를 함께 사용합니다.
+정기보고서 1건마다 `gemma4:31b-cloud`를 호출해 기업별 시트 구조와 값을 함께 만듭니다.
+`_framework`가 비어 있으면 기본값 `LLM_PER_REPORT_ALLOW_NEW_ROWS=true`에 따라 LLM이
+반환한 section/division/item/site/unit으로 기업별 시트 구조 행을 새로 만들고 값을 씁니다.
+보고서별 LLM 결과는 기본값 `LLM_PER_REPORT_IMMEDIATE_WRITE=true`에 따라 보고서 1건마다
+즉시 Google Sheets에 반영하므로, 장시간 실행이 timeout되어도 이미 처리한 값은 남습니다.
+per-report 백필에서 별도 framework 생성 LLM은 기본값 `LLM_BUILD_FRAMEWORK_IN_PER_REPORT=false`로
+건너뛰며, 대신 실제로 생성된 회사별 시트 행 구조를 `_framework` JSON으로 갱신합니다.
+기존 구조를 버리고 다시 잡으려면 `force_reprocess=true`를 함께 사용합니다.
 기본 호출 상한은 전체 `10000`, 기업당 `60`이며 GitHub Actions Variables의
 `LLM_PER_REPORT_MAX_CALLS`, `LLM_PER_REPORT_MAX_CALLS_PER_COMPANY`,
-`LLM_PER_REPORT_ALLOW_NEW_ROWS`로 조정할 수 있습니다.
+`LLM_PER_REPORT_ALLOW_NEW_ROWS`, `LLM_PER_REPORT_IMMEDIATE_WRITE`,
+`LLM_BUILD_FRAMEWORK_IN_PER_REPORT`로 조정할 수 있습니다.
 `years_back=10`은 현재 사업연도를 포함한 최근 10개 사업연도만 조회합니다.
 보고서별 LLM 모드는 오래 걸릴 수 있으므로 `target_shard=1`, `company_offset=0`,
 `company_limit=2`처럼 작은 기업 묶음부터 실행한 뒤 offset을 늘려 이어가는 방식을

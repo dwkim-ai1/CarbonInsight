@@ -349,6 +349,37 @@ def rows_to_structured_updates(rows: list[dict], quarter: str, selectors: list[d
     return updates
 
 
+def selectors_from_sheet_structure(structure: dict) -> list[dict]:
+    selectors = []
+    for row in structure.get("rows", []):
+        try:
+            target_row = int(row.get("row"))
+        except (TypeError, ValueError):
+            continue
+        section = str(row.get("section") or "").strip()
+        division = str(row.get("division") or "").strip()
+        item = str(row.get("item") or "").strip()
+        site = str(row.get("site") or "").strip()
+        unit = str(row.get("unit") or "").strip()
+        if not any([section, division, item, site]):
+            continue
+        aliases = []
+        for label in (item, site, division, section):
+            if label and label not in aliases:
+                aliases.append(label)
+        selectors.append({
+            "target_row": target_row,
+            "section": section,
+            "division": division,
+            "item": item,
+            "site": site,
+            "unit": unit,
+            "source_aliases": aliases,
+            "confidence": "medium",
+        })
+    return selectors
+
+
 def can_use_llm(call_count: int, max_calls: int, company_counts: dict[str, int], company_key: str, max_per_company: int) -> bool:
     return bool(os.getenv("OLLAMA_API_KEY") and call_count < max_calls and company_counts.get(company_key, 0) < max_per_company)
 
@@ -955,14 +986,17 @@ def main() -> int:
         LOG.warning("⚠️ LLM_PER_REPORT_MODE에서는 framework 밖 row 생성을 막기 위해 STRUCTURED_WRITES_REQUIRE_SELECTORS를 활성화합니다.")
         structured_requires_selectors = True
     llm_per_report_allow_new_rows = os.getenv("LLM_PER_REPORT_ALLOW_NEW_ROWS", "true").lower() in {"1","true","yes"}
+    llm_per_report_immediate_write = os.getenv("LLM_PER_REPORT_IMMEDIATE_WRITE", "true").lower() in {"1","true","yes"}
+    llm_build_framework_in_per_report = os.getenv("LLM_BUILD_FRAMEWORK_IN_PER_REPORT", "false").lower() in {"1","true","yes"}
     append_raw_rows = os.getenv("APPEND_RAW_ROWS", "false").lower() in {"1","true","yes"}
     force_reprocess = env_bool("FORCE_REPROCESS")
     LOG.info("📆 대상 사업연도: %s", ",".join(str(year) for year in business_years))
-    LOG.info("🤖 LLM 호출 상한: 프레임워크=%d/%d per company, 일반=%d/%d per company, 보고서별=%d/%d per company, 예외=%d/%d per company, 프레임워크모드=%s, 보고서별=%s, 보고서별 새행=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
+    LOG.info("🤖 LLM 호출 상한: 프레임워크=%d/%d per company, 일반=%d/%d per company, 보고서별=%d/%d per company, 예외=%d/%d per company, 프레임워크모드=%s, 보고서별=%s, 보고서별 새행=%s, 보고서별 즉시쓰기=%s, 보고서별 framework생성=%s, 값 fallback=%s, 예외 fallback=%s, selector필수=%s, raw append=%s",
              framework_max_calls, framework_max_calls_per_company,
              llm_max_calls, llm_max_calls_per_company, llm_per_report_max_calls,
              llm_per_report_max_calls_per_company, llm_exception_max_calls,
-             llm_exception_max_calls_per_company, structure_mode, llm_per_report_mode, llm_per_report_allow_new_rows, value_fallback_mode,
+             llm_exception_max_calls_per_company, structure_mode, llm_per_report_mode, llm_per_report_allow_new_rows,
+             llm_per_report_immediate_write, llm_build_framework_in_per_report, value_fallback_mode,
              exception_fallback_mode, structured_requires_selectors, append_raw_rows)
     successes = framework_llm_calls = regular_llm_calls = per_report_llm_calls = exception_llm_calls = 0
     llm_framework_company_counts: dict[str, int] = {}
@@ -993,17 +1027,65 @@ def main() -> int:
                 ws, ledger, framework_store = store.setup(shard, name, stock)
                 llm_key = stock or corp
                 selectors: list[dict] = []
+                framework_selector_count = 0
                 framework_attempted = False
                 company_updates: list[dict] = []
                 legacy_rows: list[dict] = []
                 history_rows: list[list] = []
                 llm_structure_snapshot = None
+
+                def allow_structured_new_rows() -> bool:
+                    return (llm_per_report_mode and llm_per_report_allow_new_rows) or not (structured_requires_selectors and structure_mode)
+
+                def flush_history_rows():
+                    nonlocal history_rows
+                    if not history_rows:
+                        return
+                    try:
+                        store.record_history_rows(ledger, history_rows)
+                        history_rows = []
+                    except Exception as exc:
+                        LOG.warning("⚠️ 장부 batch write 실패 %s: %s", name, exc)
+
+                def flush_structured_updates(status: str, year_value: int | str, rcept_value: str, reason: str):
+                    nonlocal company_updates, history_rows, llm_structure_snapshot, selectors, framework_selector_count
+                    if not company_updates:
+                        return
+                    pending = company_updates
+                    company_updates = []
+                    try:
+                        applied = store.apply_structured_updates(ws, pending, allow_new_rows=allow_structured_new_rows())
+                    except Exception as exc:
+                        company_updates = pending + company_updates
+                        LOG.warning("⚠️ 기업 구조 데이터 write 실패 %s: %s", name, exc)
+                        history_rows.append(store.history_values(name, stock, corp, year_value, rcept_value,
+                                                                 f"{status}_failure", str(exc), ws.title))
+                        return
+                    history_rows.append(store.history_values(name, stock, corp, year_value, rcept_value, status,
+                                                             f"{applied} cells from {len(pending)} queued updates; {reason}", ws.title))
+                    LOG.info("✅ %s %s: %d cells from %d updates", name, status, applied, len(pending))
+                    if applied:
+                        try:
+                            llm_structure_snapshot = store.sheet_structure(ws)
+                            if structure_mode and llm_per_report_mode and llm_per_report_allow_new_rows:
+                                refreshed_selectors = selectors_from_sheet_structure(llm_structure_snapshot)
+                                if refreshed_selectors and len(refreshed_selectors) != framework_selector_count:
+                                    selectors = refreshed_selectors
+                                    framework_selector_count = len(refreshed_selectors)
+                                    store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                                    LOG.info("✅ %s framework JSON refreshed from sheet rows: %d selectors", name, len(selectors))
+                        except Exception as exc:
+                            LOG.warning("⚠️ framework JSON 갱신 실패 %s: %s", name, exc)
+                            history_rows.append(store.history_values(name, stock, corp, year_value, rcept_value,
+                                                                     "framework_refresh_failure", str(exc), ws.title))
+
                 if structure_mode and not force_reprocess:
                     saved_selectors = store.load_framework(framework_store, ws.title)
                     if saved_selectors:
                         selectors = store.apply_framework(ws, saved_selectors)
                         if selectors != saved_selectors:
                             store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                        framework_selector_count = len(selectors)
                         framework_attempted = True
                         llm_structure_snapshot = store.sheet_structure(ws)
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "framework_reused", f"{len(selectors)} selectors from JSON", ws.title))
@@ -1014,13 +1096,17 @@ def main() -> int:
                         html = dart.document(rcept)
                         can_framework_llm = can_use_llm(framework_llm_calls, framework_max_calls, llm_framework_company_counts,
                                                          llm_key, framework_max_calls_per_company)
-                        if structure_mode and not framework_attempted and can_framework_llm:
+                        build_framework_now = structure_mode and not framework_attempted and can_framework_llm
+                        if llm_per_report_mode and llm_per_report_allow_new_rows and not llm_build_framework_in_per_report:
+                            build_framework_now = False
+                        if build_framework_now:
                             framework_attempted = True
                             framework_llm_calls += 1
                             llm_framework_company_counts[llm_key] = llm_framework_company_counts.get(llm_key, 0) + 1
                             framework = call_framework(html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
                             store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
+                            framework_selector_count = len(selectors)
                             llm_structure_snapshot = store.sheet_structure(ws)
                             history_rows.append(store.history_values(name, stock, corp, year, rcept, f"framework_{framework.status}", f"{len(selectors)} selectors via {MODEL}; saved JSON", ws.title))
                         if llm_per_report_mode:
@@ -1041,12 +1127,16 @@ def main() -> int:
                                 company_updates.extend(structure.updates)
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                          f"llm_per_report_{structure.status}",
-                                                                         f"{len(structure.updates)} cells queued via {MODEL}", ws.title))
+                                                                         f"{len(structure.updates)} cells returned via {MODEL}", ws.title))
+                                if llm_per_report_immediate_write:
+                                    flush_structured_updates("report_structured_write", year, rcept, f"per-report {quarter}")
                                 successes += 1
                             else:
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                          f"llm_per_report_{structure.status}",
                                                                          f"0 cells via {MODEL}", ws.title))
+                            if llm_per_report_immediate_write:
+                                flush_history_rows()
                             continue
                         parse_result = parser.parse_with_diagnostics(html, year)
                         rows = parse_result.rows
@@ -1104,16 +1194,10 @@ def main() -> int:
                     except Exception as exc:
                         LOG.warning("⚠️ 부분 실패 %s/%s: %s", name, rcept, exc)
                         history_rows.append(store.history_values(name, stock, corp, year, rcept, "failure", str(exc), ws.title))
+                        if llm_per_report_mode and llm_per_report_immediate_write:
+                            flush_history_rows()
                         if env_bool("DEBUG_MODE"): Path("debug").mkdir(exist_ok=True); Path(f"debug/{corp}_{rcept}.html").write_text(str(locals().get("html", "")), encoding="utf-8")
-                if company_updates:
-                    try:
-                        allow_new_rows = (llm_per_report_mode and llm_per_report_allow_new_rows) or not (structured_requires_selectors and structure_mode)
-                        applied = store.apply_structured_updates(ws, company_updates, allow_new_rows=allow_new_rows)
-                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_write", f"{applied} cells from {len(company_updates)} queued updates", ws.title))
-                        LOG.info("✅ %s batch structured write: %d cells", name, applied)
-                    except Exception as exc:
-                        LOG.warning("⚠️ 기업 구조 데이터 batch write 실패 %s: %s", name, exc)
-                        history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_structured_failure", str(exc), ws.title))
+                flush_structured_updates("batch_structured_write", now_year, "", "company batch")
                 if legacy_rows:
                     try:
                         appended = store.append_rows(ws, legacy_rows)
@@ -1122,10 +1206,7 @@ def main() -> int:
                     except Exception as exc:
                         LOG.warning("⚠️ 기업 raw row batch append 실패 %s: %s", name, exc)
                         history_rows.append(store.history_values(name, stock, corp, now_year, "", "batch_raw_failure", str(exc), ws.title))
-                try:
-                    store.record_history_rows(ledger, history_rows)
-                except Exception as exc:
-                    LOG.warning("⚠️ 장부 batch write 실패 %s: %s", name, exc)
+                flush_history_rows()
         LOG.info("✅ 수집 완료: 성공 보고서=%d, LLM 호출=%d (프레임워크=%d, 일반=%d, 보고서별=%d, 예외=%d)",
                  successes, framework_llm_calls + regular_llm_calls + per_report_llm_calls + exception_llm_calls,
                  framework_llm_calls, regular_llm_calls, per_report_llm_calls, exception_llm_calls)

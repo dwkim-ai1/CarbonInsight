@@ -3,7 +3,7 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, target_business_years
+from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, selectors_from_sheet_structure, target_business_years
 
 
 class FakeQuota:
@@ -87,6 +87,25 @@ def test_framework_json_roundtrip_uses_framework_sheet_cache():
     assert row_index == 2
     assert store.load_framework(framework, "000001") == selectors
     assert framework.calls[0][0] == "update"
+
+
+def test_selectors_from_sheet_structure_uses_existing_sheet_rows():
+    structure = {"rows": [
+        {"row": 2, "section": "가동률", "division": "판지", "item": "평균가동률", "site": "", "unit": "%"},
+    ]}
+
+    selectors = selectors_from_sheet_structure(structure)
+
+    assert selectors == [{
+        "target_row": 2,
+        "section": "가동률",
+        "division": "판지",
+        "item": "평균가동률",
+        "site": "",
+        "unit": "%",
+        "source_aliases": ["평균가동률", "판지", "가동률"],
+        "confidence": "medium",
+    }]
 
 
 def test_row_period_maps_to_matching_quarter_not_report_quarter_only():
