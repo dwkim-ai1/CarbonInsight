@@ -10,6 +10,7 @@ import time
 import io
 import zipfile
 import html as html_lib
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -397,14 +398,93 @@ def _table_to_html(table: list[list[str]], max_rows: int = 120) -> str:
     return "<table>" + "".join(rows) + "</table>"
 
 
-def llm_utilization_context(parser: UtilizationParser, html: str, max_chars: int = 14000) -> str:
+def llm_utilization_context(parser: UtilizationParser, html: str, max_chars: int = 22000) -> str:
+    keywords = tuple(getattr(parser, "keywords", ()))
+    try:
+        from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+            soup = BeautifulSoup(str(html), "html.parser")
+        candidates = []
+        for table_tag in soup.find_all("table"):
+            text = re.sub(r"\s+", " ", table_tag.get_text(" "))
+            if any(keyword in text for keyword in keywords):
+                candidates.append(table_tag)
+        parts = []
+        used = 0
+        for index, table_tag in enumerate(candidates, start=1):
+            context_texts = []
+            sibling = table_tag.previous_sibling
+            while sibling is not None and len(context_texts) < 10:
+                if getattr(sibling, "name", None) == "table":
+                    break
+                text = re.sub(r"\s+", " ", sibling.get_text(" ") if hasattr(sibling, "get_text") else str(sibling)).strip()
+                if text:
+                    context_texts.append(text)
+                sibling = sibling.previous_sibling
+            parent = table_tag.parent
+            while parent is not None and len(context_texts) < 14:
+                sibling = parent.previous_sibling
+                while sibling is not None and len(context_texts) < 14:
+                    if getattr(sibling, "name", None) == "table":
+                        break
+                    text = re.sub(r"\s+", " ", sibling.get_text(" ") if hasattr(sibling, "get_text") else str(sibling)).strip()
+                    if text:
+                        context_texts.append(text)
+                    sibling = sibling.previous_sibling
+                parent = parent.parent
+            context = " / ".join(reversed(context_texts[-8:]))
+            raw_table = str(table_tag)
+            fragment = (
+                f"<candidate_table index=\"{index}\">\n"
+                f"<context>{html_lib.escape(context)}</context>\n"
+                f"{raw_table}\n"
+                f"</candidate_table>"
+            )
+            if parts and used + len(fragment) > max_chars:
+                break
+            parts.append(fragment)
+            used += len(fragment)
+        if parts:
+            return "\n".join(parts)[:max_chars]
+    except ImportError:
+        pass
+    except Exception as exc:
+        LOG.warning("⚠️ LLM context raw-table extraction failed: %s", exc)
+    try:
+        parts = []
+        used = 0
+        for index, match in enumerate(re.finditer(r"<table\b[\s\S]*?</table>", str(html), flags=re.I), start=1):
+            raw_table = match.group()
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_table))
+            if not any(keyword in text for keyword in keywords):
+                continue
+            prefix = str(html)[max(0, match.start() - 5000):match.start()]
+            last_table_end = prefix.lower().rfind("</table>")
+            if last_table_end >= 0:
+                prefix = prefix[last_table_end + len("</table>"):]
+            context = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", prefix)).strip()
+            context = context[-700:]
+            fragment = (
+                f"<candidate_table index=\"{index}\">\n"
+                f"<context>{html_lib.escape(context)}</context>\n"
+                f"{raw_table}\n"
+                f"</candidate_table>"
+            )
+            if parts and used + len(fragment) > max_chars:
+                break
+            parts.append(fragment)
+            used += len(fragment)
+        if parts:
+            return "\n".join(parts)[:max_chars]
+    except Exception as exc:
+        LOG.warning("⚠️ LLM context regex-table extraction failed: %s", exc)
     try:
         document = parser._read_document(html)
     except Exception:
         return str(html)[:max_chars]
     candidates = [table for table in document.tables if parser._table_has_utilization_signal(table)]
     if not candidates:
-        keywords = tuple(getattr(parser, "keywords", ()))
         for table in document.tables:
             text = " ".join(" ".join(str(cell or "") for cell in row) for row in table)
             if any(keyword in text for keyword in keywords):

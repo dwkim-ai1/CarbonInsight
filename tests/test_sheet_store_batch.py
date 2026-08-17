@@ -131,12 +131,15 @@ def test_selectors_from_sheet_structure_uses_existing_sheet_rows():
 def test_llm_utilization_context_keeps_relevant_tables_not_document_prefix():
     html = "<html><body>" + ("<p>무관한 앞부분</p>" * 300) + """
     <table><tr><td>구분</td><td>기타</td></tr><tr><td>A</td><td>B</td></tr></table>
+    <p>1. 한국남동발전(주)</p><p>가. 생산능력</p>
     <table><tr><td>구분</td><td>생산능력</td><td>생산실적</td><td>가동률</td></tr>
-    <tr><td>전력</td><td>100</td><td>87</td><td>87%</td></tr></table>
+    <tr><td rowspan="2">전력</td><td>100</td><td>87</td><td>87%</td></tr></table>
     </body></html>"""
 
     context = llm_utilization_context(UtilizationParser(), html, max_chars=1000)
 
+    assert "한국남동발전" in context
+    assert "rowspan" in context
     assert "가동률" in context
     assert "87%" in context
     assert "무관한 앞부분" not in context

@@ -20,12 +20,20 @@ STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시트 구조
 - 값은 DART 원문에 있는 숫자/문자열만 사용한다. 계산하거나 추정하지 않는다.
 - 기존 시트 row와 맞는 값만 반환하고 target_row를 넣는다.
 - 맞는 행이 없으면 반환하지 않는다. 이 단계에서는 새 구조 행을 만들지 않는다.
-- section은 생산능력, 생산실적, 가동률, 가동가능시간, 실제가동시간, 평균가동률 등 원문/시트의 상위 항목을 쓴다.
-- quarter는 원문 기간이 명확하면 해당 분기(예: 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
+- section/division/item/site/unit은 Google Sheet A~E열의 위계다. 공시 표의 병합 셀과 직전 제목을 보존해서 채운다.
+- section(A열): 최상위 사업부문/자회사/제조부문/공시 제목. 예: 화력발전부문, 한국남동발전(주), 소주제조, 맥주제조, 발전.
+- division(B열): 다음 위계. 예: 발전/전기, 소주, 맥주, 생산능력, 생산실적, 평균가동률.
+- item(C열): 측정 지표 또는 품목. 예: 생산능력, 생산실적, 평균가동률, 원자력, 이천공장.
+- site(D열): 사업소/공장/발전원/세부 항목. 예: 삼천포, 영흥, 이천공장, 원자력, 신재생.
+- unit(E열): 단위. 예: MW, GWh, kl, 시간, %.
+- 표에 여러 행이 있으면 사업소/공장/발전원/자회사별로 각각 별도 update를 반환한다. 합계 행도 원문에 있으면 별도 update로 반환한다.
+- 생산능력/생산실적/평균가동률/평균가동시간처럼 서로 다른 지표는 같은 행에 섞지 말고 item 또는 division으로 구분한다.
+- 예: 하이트진로 평균가동률 표의 이천공장 80.9는 section=소주제조, division=소주, item=평균가동률, site=이천공장, unit=% 로 둔다.
+- quarter는 원문 기간이 명확하면 해당 분기(예: 2026년 반기 또는 2026년 1월~6월=2Q26, 2025년=4Q25, 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
 - confidence는 high, medium, low 중 하나다.
 
 스키마:
-[{"target_row":null,"section":"생산능력","division":null,"item":null,"site":null,"unit":null,"quarter":"{quarter}","value":null,"source_label":null,"confidence":"low"}]
+[{"target_row":null,"section":"한국남동발전(주)","division":"발전/전기","item":"생산능력","site":"삼천포","unit":"MW","quarter":"{quarter}","value":null,"source_label":null,"confidence":"low"}]
 
 대상 분기: {quarter}
 현재 시트 구조 JSON:
@@ -39,12 +47,20 @@ BACKFILL_STRUCTURE_USER_PROMPT = '''DART HTML과 현재 회사별 가동률 시�
 - 값은 DART 원문에 있는 숫자/문자열만 사용한다. 계산하거나 추정하지 않는다.
 - 기존 시트 row와 맞으면 target_row를 넣는다.
 - 맞는 행이 없으면 target_row는 null로 두고 section/division/item/site/unit/source_label을 채워 새 구조 행을 만들 수 있게 한다.
-- section은 생산능력, 생산실적, 가동률, 가동가능시간, 실제가동시간, 평균가동률 등 원문/시트의 상위 항목을 쓴다.
-- quarter는 원문 기간이 명확하면 해당 분기(예: 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
+- section/division/item/site/unit은 Google Sheet A~E열의 위계다. 공시 표의 병합 셀과 직전 제목을 보존해서 채운다.
+- section(A열): 최상위 사업부문/자회사/제조부문/공시 제목. 예: 화력발전부문, 한국남동발전(주), 소주제조, 맥주제조, 발전.
+- division(B열): 다음 위계. 예: 발전/전기, 소주, 맥주, 생산능력, 생산실적, 평균가동률.
+- item(C열): 측정 지표 또는 품목. 예: 생산능력, 생산실적, 평균가동률, 원자력, 이천공장.
+- site(D열): 사업소/공장/발전원/세부 항목. 예: 삼천포, 영흥, 이천공장, 원자력, 신재생.
+- unit(E열): 단위. 예: MW, GWh, kl, 시간, %.
+- 표에 여러 행이 있으면 사업소/공장/발전원/자회사별로 각각 별도 update를 반환한다. 합계 행도 원문에 있으면 별도 update로 반환한다.
+- 생산능력/생산실적/평균가동률/평균가동시간처럼 서로 다른 지표는 같은 행에 섞지 말고 item 또는 division으로 구분한다.
+- 예: 하이트진로 평균가동률 표의 이천공장 80.9는 section=소주제조, division=소주, item=평균가동률, site=이천공장, unit=% 로 둔다.
+- quarter는 원문 기간이 명확하면 해당 분기(예: 2026년 반기 또는 2026년 1월~6월=2Q26, 2025년=4Q25, 2024년 3분기=3Q24)를 쓰고, 불명확할 때만 대상 분기를 사용한다.
 - confidence는 high, medium, low 중 하나다.
 
 스키마:
-[{"target_row":null,"section":"생산능력","division":null,"item":null,"site":null,"unit":null,"quarter":"{quarter}","value":null,"source_label":null,"confidence":"low"}]
+[{"target_row":null,"section":"한국남동발전(주)","division":"발전/전기","item":"생산능력","site":"삼천포","unit":"MW","quarter":"{quarter}","value":null,"source_label":null,"confidence":"low"}]
 
 대상 분기: {quarter}
 현재 시트 구조 JSON:
@@ -301,10 +317,10 @@ def call_structure(html: str, sheet_structure: dict, quarter: str, client=None, 
     prompt = (prompt_template
               .replace("{quarter}", quarter)
               .replace("{sheet_structure}", structure_json)
-              .replace("{html}", str(html)[:12000]))
+              .replace("{html}", str(html)[:22000]))
     for attempt in range(retries + 1):
         try:
-            response = client.chat(model=MODEL, stream=False, options={"temperature": 0.0, "num_ctx": 16384},
+            response = client.chat(model=MODEL, stream=False, options={"temperature": 0.0, "num_ctx": 32768},
                                    messages=[{"role":"system","content":STRUCTURE_SYSTEM_PROMPT}, {"role":"user","content":prompt}])
             raw = response["message"]["content"] if isinstance(response, dict) else response.message.content
             return validate_structure_response(raw, html, sheet_structure, quarter)
