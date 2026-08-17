@@ -9,6 +9,7 @@ import sys
 import time
 import io
 import zipfile
+import html as html_lib
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -163,6 +164,14 @@ def column_letter(index: int) -> str:
         index, remainder = divmod(index - 1, 26)
         letters = chr(65 + remainder) + letters
     return letters
+
+
+def column_number(letters: str) -> int:
+    value = 0
+    for char in str(letters or "").upper():
+        if "A" <= char <= "Z":
+            value = value * 26 + ord(char) - 64
+    return value
 
 
 def default_quarter_labels(start_year: int = DEFAULT_STRUCTURE_START_YEAR, end_year: int | None = None) -> list[str]:
@@ -380,6 +389,49 @@ def selectors_from_sheet_structure(structure: dict) -> list[dict]:
     return selectors
 
 
+def _table_to_html(table: list[list[str]], max_rows: int = 120) -> str:
+    rows = []
+    for row in table[:max_rows]:
+        cells = "".join(f"<td>{html_lib.escape(str(cell or ''))}</td>" for cell in row)
+        rows.append(f"<tr>{cells}</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
+
+def llm_utilization_context(parser: UtilizationParser, html: str, max_chars: int = 14000) -> str:
+    try:
+        document = parser._read_document(html)
+    except Exception:
+        return str(html)[:max_chars]
+    candidates = [table for table in document.tables if parser._table_has_utilization_signal(table)]
+    if not candidates:
+        keywords = tuple(getattr(parser, "keywords", ()))
+        for table in document.tables:
+            text = " ".join(" ".join(str(cell or "") for cell in row) for row in table)
+            if any(keyword in text for keyword in keywords):
+                candidates.append(table)
+    parts = []
+    used = 0
+    for index, table in enumerate(candidates, start=1):
+        fragment = f"<candidate_table index=\"{index}\">{_table_to_html(table)}</candidate_table>"
+        if parts and used + len(fragment) > max_chars:
+            break
+        parts.append(fragment)
+        used += len(fragment)
+    if parts:
+        return "\n".join(parts)
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html)))
+    windows = []
+    for keyword in getattr(parser, "keywords", ()):
+        pos = text.find(keyword)
+        if pos >= 0:
+            start = max(0, pos - 2500)
+            end = min(len(text), pos + 5500)
+            windows.append(text[start:end])
+    if windows:
+        return "\n".join(windows)[:max_chars]
+    return str(html)[:max_chars]
+
+
 def can_use_llm(call_count: int, max_calls: int, company_counts: dict[str, int], company_key: str, max_per_company: int) -> bool:
     return bool(os.getenv("OLLAMA_API_KEY") and call_count < max_calls and company_counts.get(company_key, 0) < max_per_company)
 
@@ -485,6 +537,26 @@ class SheetStore:
     def _find_worksheet(self, worksheets, title: str):
         return next((ws for ws in worksheets if ws.title == title), None)
 
+    def _ensure_grid_size(self, ws, min_rows: int | None = None, min_cols: int | None = None):
+        if self.test_mode:
+            return
+        current_rows = int(getattr(ws, "row_count", 0) or 0)
+        current_cols = int(getattr(ws, "col_count", 0) or 0)
+        target_rows = None
+        target_cols = None
+        if min_rows and (not current_rows or min_rows > current_rows):
+            target_rows = min_rows
+        if min_cols and (not current_cols or min_cols > current_cols):
+            target_cols = min_cols
+        if target_rows or target_cols:
+            kwargs = {}
+            if target_rows:
+                kwargs["rows"] = target_rows
+            if target_cols:
+                kwargs["cols"] = target_cols
+            self.quota.write()
+            ws.resize(**kwargs)
+
     def _ensure_data_table(self, ws):
         key = ws.id
         if key in self.next_rows:
@@ -500,6 +572,7 @@ class SheetStore:
             if self.test_mode:
                 LOG.info("DRY-RUN %s!A%d에 출력 헤더 작성 예정", ws.title, next_row)
             else:
+                self._ensure_grid_size(ws, min_rows=next_row, min_cols=len(self.headers))
                 self.quota.write(); ws.update(f"A{next_row}", [self.headers])
             self.next_rows[key] = next_row + 1
         else:
@@ -512,6 +585,7 @@ class SheetStore:
         if self.test_mode:
             LOG.info("DRY-RUN %s!F1에 기본 분기 헤더 작성 예정", ws.title)
         else:
+            self._ensure_grid_size(ws, min_rows=1, min_cols=QUARTER_HEADER_START_COLUMN + len(self.quarter_labels) - 1)
             self.quota.write(); ws.update(f"{column_letter(QUARTER_HEADER_START_COLUMN)}1", [self.quarter_labels])
 
     def _ensure_quarter_column(self, ws, quarter: str) -> int:
@@ -526,6 +600,7 @@ class SheetStore:
         if self.test_mode:
             LOG.info("DRY-RUN %s!%s1에 분기 헤더 %s 작성 예정", ws.title, column_letter(column), quarter)
         else:
+            self._ensure_grid_size(ws, min_rows=1, min_cols=column)
             self.quota.write(); ws.update(f"{column_letter(column)}1", [[quarter]])
         return column
 
@@ -546,6 +621,7 @@ class SheetStore:
             if self.test_mode:
                 LOG.info("DRY-RUN %s!A%d에 장부 헤더 작성 예정", ledger.title, next_row)
             else:
+                self._ensure_grid_size(ledger, min_rows=next_row, min_cols=len(LEDGER_HEADERS))
                 self.quota.write(); ledger.update(f"A{next_row}", [LEDGER_HEADERS])
             self.ledger_next_rows[key] = next_row + 1
         else:
@@ -813,6 +889,7 @@ class SheetStore:
             if self.test_mode:
                 LOG.info("DRY-RUN %s 분기 헤더 %d개 batch 작성 예정", ws.title, len(planned_updates))
             else:
+                self._ensure_grid_size(ws, min_rows=1, min_cols=max(used_columns or {1}))
                 self.quota.write(); ws.batch_update(planned_updates, value_input_option="USER_ENTERED")
         return quarter_columns
 
@@ -823,6 +900,14 @@ class SheetStore:
         if self.test_mode:
             LOG.info("DRY-RUN %s 셀 %d개 batch update 예정", ws.title, len(requests))
             return len(requests)
+        max_row = 1
+        max_col = 1
+        for cell in cells:
+            match = re.fullmatch(r"([A-Z]+)(\d+)", str(cell))
+            if match:
+                max_col = max(max_col, column_number(match.group(1)))
+                max_row = max(max_row, int(match.group(2)))
+        self._ensure_grid_size(ws, min_rows=max_row, min_cols=max_col)
         for index in range(0, len(requests), 500):
             self.quota.write(); ws.batch_update(requests[index:index + 500], value_input_option="USER_ENTERED")
         return len(requests)
@@ -889,6 +974,7 @@ class SheetStore:
         if self.test_mode:
             LOG.info("DRY-RUN %s!A%d:%s%d raw row %d개 batch append 예정", ws.title, row_index, end_col, end_row, len(values))
         else:
+            self._ensure_grid_size(ws, min_rows=end_row, min_cols=len(self.headers))
             self.quota.write(); ws.update(f"A{row_index}:{end_col}{end_row}", values, value_input_option="USER_ENTERED")
         self.next_rows[ws.id] = end_row + 1
         return len(values)
@@ -912,6 +998,7 @@ class SheetStore:
             row_index = self.ledger_next_rows[ledger.id]
         end_row = row_index + len(rows) - 1
         end_col = column_letter(len(LEDGER_HEADERS))
+        self._ensure_grid_size(ledger, min_rows=end_row, min_cols=len(LEDGER_HEADERS))
         self.quota.write(); ledger.update(f"A{row_index}:{end_col}{end_row}", rows, value_input_option="USER_ENTERED")
         self.ledger_next_rows[ledger.id] = end_row + 1
         return len(rows)
@@ -1094,6 +1181,7 @@ def main() -> int:
                     quarter = report_quarter_label(report, year)
                     try:
                         html = dart.document(rcept)
+                        llm_html = ""
                         can_framework_llm = can_use_llm(framework_llm_calls, framework_max_calls, llm_framework_company_counts,
                                                          llm_key, framework_max_calls_per_company)
                         build_framework_now = structure_mode and not framework_attempted and can_framework_llm
@@ -1103,7 +1191,9 @@ def main() -> int:
                             framework_attempted = True
                             framework_llm_calls += 1
                             llm_framework_company_counts[llm_key] = llm_framework_company_counts.get(llm_key, 0) + 1
-                            framework = call_framework(html, store.sheet_structure(ws))
+                            llm_html = llm_html or llm_utilization_context(parser, html)
+                            LOG.info("🧾 %s/%s LLM 후보 context: %d chars", name, rcept, len(llm_html))
+                            framework = call_framework(llm_html, store.sheet_structure(ws))
                             selectors = store.apply_framework(ws, framework.selectors)
                             store.save_framework(framework_store, name, stock, corp, ws.title, selectors)
                             framework_selector_count = len(selectors)
@@ -1121,7 +1211,9 @@ def main() -> int:
                             llm_per_report_company_counts[llm_key] = llm_per_report_company_counts.get(llm_key, 0) + 1
                             per_report_llm_calls += 1
                             LOG.info("🤖 %s/%s 보고서별 LLM 호출: %s", name, rcept, quarter)
-                            structure = call_structure(html, llm_structure_snapshot or store.sheet_structure(ws), quarter,
+                            llm_html = llm_html or llm_utilization_context(parser, html)
+                            LOG.info("🧾 %s/%s LLM 후보 context: %d chars", name, rcept, len(llm_html))
+                            structure = call_structure(llm_html, llm_structure_snapshot or store.sheet_structure(ws), quarter,
                                                        allow_new_rows=llm_per_report_allow_new_rows)
                             if structure.updates:
                                 company_updates.extend(structure.updates)
@@ -1132,9 +1224,11 @@ def main() -> int:
                                     flush_structured_updates("report_structured_write", year, rcept, f"per-report {quarter}")
                                 successes += 1
                             else:
+                                raw_preview = re.sub(r"\s+", " ", str(structure.raw or ""))[:180]
+                                LOG.warning("⚠️ %s/%s 보고서별 LLM 0 updates: status=%s raw=%s", name, rcept, structure.status, raw_preview)
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
                                                                          f"llm_per_report_{structure.status}",
-                                                                         f"0 cells via {MODEL}", ws.title))
+                                                                         f"0 cells via {MODEL}; raw={raw_preview}", ws.title))
                             if llm_per_report_immediate_write:
                                 flush_history_rows()
                             continue
@@ -1158,7 +1252,9 @@ def main() -> int:
                         if exception_fallback_mode and (parse_result.needs_llm or selector_miss) and can_exception_llm:
                             llm_exception_company_counts[llm_key] = llm_exception_company_counts.get(llm_key, 0) + 1
                             exception_llm_calls += 1
-                            structure = call_structure(html, store.sheet_structure(ws), quarter)
+                            llm_html = llm_html or llm_utilization_context(parser, html)
+                            LOG.info("🧾 %s/%s 예외 LLM 후보 context: %d chars", name, rcept, len(llm_html))
+                            structure = call_structure(llm_html, store.sheet_structure(ws), quarter)
                             if structure.updates:
                                 company_updates.extend(structure.updates)
                                 history_rows.append(store.history_values(name, stock, corp, year, rcept,
@@ -1176,7 +1272,8 @@ def main() -> int:
                         can_llm = can_use_llm(regular_llm_calls, llm_max_calls, llm_company_counts, llm_key, llm_max_calls_per_company)
                         if value_fallback_mode and not rows and can_llm:
                             llm_company_counts[llm_key] = llm_company_counts.get(llm_key, 0) + 1
-                            regular_llm_calls += 1; fallback = call_fallback(html)
+                            llm_html = llm_html or llm_utilization_context(parser, html)
+                            regular_llm_calls += 1; fallback = call_fallback(llm_html)
                             rows = fallback.rows
                             for row in rows:
                                 row["가동률(%)"] = row.pop("가동률", None)

@@ -3,7 +3,8 @@ import types
 
 sys.modules.setdefault("gspread", types.ModuleType("gspread"))
 
-from utilization_collector import FRAMEWORK_HEADERS, SheetStore, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, selectors_from_sheet_structure, target_business_years
+from utilization_collector import FRAMEWORK_HEADERS, SheetStore, llm_utilization_context, reports, resolve_company_codes, row_quarter_label, rows_to_structured_updates, selected_company_work, selectors_from_sheet_structure, target_business_years
+from utilization_parser import UtilizationParser
 
 
 class FakeQuota:
@@ -12,10 +13,12 @@ class FakeQuota:
 
 
 class FakeWorksheet:
-    def __init__(self, title="000001", worksheet_id=1, values=None):
+    def __init__(self, title="000001", worksheet_id=1, values=None, row_count=200, col_count=100):
         self.id = worksheet_id
         self.title = title
         self.values = values
+        self.row_count = row_count
+        self.col_count = col_count
         self.calls = []
 
     def row_values(self, row):
@@ -39,6 +42,11 @@ class FakeWorksheet:
 
     def update(self, *args, **kwargs):
         self.calls.append(("update", args, kwargs))
+
+    def resize(self, **kwargs):
+        self.calls.append(("resize", (), kwargs))
+        self.row_count = kwargs.get("rows", self.row_count)
+        self.col_count = kwargs.get("cols", self.col_count)
 
 
 def test_structured_updates_use_single_batch_update_for_cells():
@@ -77,6 +85,18 @@ def test_structured_updates_can_block_new_rows_after_framework():
     assert ws.calls == []
 
 
+def test_history_write_expands_grid_before_update():
+    ws = FakeWorksheet("_처리이력", worksheet_id=2, values=[["timestamp","기업명","종목코드","corp_code","사업연도","접수번호","상태","메시지","출력시트"]], row_count=1, col_count=6)
+    store = SheetStore(None, ["dummy"], FakeQuota())
+    store._ensure_ledger(ws)
+
+    store.record_history_rows(ws, [["t", "회사", "000001", "00123456", 2026, "r", "ok", "message", "000001"]])
+
+    assert ws.calls[-2][0] == "resize"
+    assert ws.calls[-2][2] == {"rows": 2, "cols": 9}
+    assert ws.calls[-1][0] == "update"
+
+
 def test_framework_json_roundtrip_uses_framework_sheet_cache():
     framework = FakeWorksheet("_framework", 9, [FRAMEWORK_HEADERS])
     store = SheetStore(None, ["dummy"], FakeQuota())
@@ -106,6 +126,20 @@ def test_selectors_from_sheet_structure_uses_existing_sheet_rows():
         "source_aliases": ["평균가동률", "판지", "가동률"],
         "confidence": "medium",
     }]
+
+
+def test_llm_utilization_context_keeps_relevant_tables_not_document_prefix():
+    html = "<html><body>" + ("<p>무관한 앞부분</p>" * 300) + """
+    <table><tr><td>구분</td><td>기타</td></tr><tr><td>A</td><td>B</td></tr></table>
+    <table><tr><td>구분</td><td>생산능력</td><td>생산실적</td><td>가동률</td></tr>
+    <tr><td>전력</td><td>100</td><td>87</td><td>87%</td></tr></table>
+    </body></html>"""
+
+    context = llm_utilization_context(UtilizationParser(), html, max_chars=1000)
+
+    assert "가동률" in context
+    assert "87%" in context
+    assert "무관한 앞부분" not in context
 
 
 def test_row_period_maps_to_matching_quarter_not_report_quarter_only():
